@@ -1641,7 +1641,7 @@ describe("AgentOS native data flow", () => {
 
     await user.click(screen.getByRole("button", { name: "프로바이더" }));
     // manifest에 없는 Provider라도 어댑터가 키를 받으면 연결 경로가 있어야 합니다.
-    await user.click(await screen.findByRole("button", { name: "키로 연결" }));
+    await user.click(await screen.findByRole("button", { name: "키 추가" }));
     await user.type(screen.getByLabelText("키"), "sk-test");
     await user.click(screen.getByRole("button", { name: "연결" }));
 
@@ -1676,6 +1676,8 @@ describe("AgentOS native data flow", () => {
           providerId: "openrouter",
           endpointId: "endpoint-openrouter",
           credentialId: "credential-openrouter",
+          label: "기본 키",
+          status: "active",
           version: 1,
         },
       ],
@@ -1689,7 +1691,9 @@ describe("AgentOS native data flow", () => {
 
     await user.click(screen.getByRole("button", { name: "프로바이더" }));
     // 계정이 아니라 자격 증명이 사실이므로, 키가 있으면 빈 상태가 아니어야 합니다.
-    expect(await screen.findByRole("button", { name: "키 교체" })).toBeInTheDocument();
+    // 키가 있으면 목록으로 보이고, 추가는 언제나 «추가»입니다.
+    expect(await screen.findByText("기본 키")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "키 추가" })).toBeInTheDocument();
     expect(screen.queryByText("등록된 키가 없습니다.")).not.toBeInTheDocument();
   });
 
@@ -1745,6 +1749,8 @@ describe("AgentOS native data flow", () => {
           providerId: "openrouter",
           endpointId: "endpoint-openrouter",
           credentialId: "credential-openrouter",
+          label: "기본 키",
+          status: "active",
           version: 2,
         },
       ],
@@ -1757,7 +1763,7 @@ describe("AgentOS native data flow", () => {
     render(<App service={service({ disableCredential, loadSettings })} />);
 
     await user.click(screen.getByRole("button", { name: "프로바이더" }));
-    await user.click(await screen.findByRole("button", { name: "키 제거" }));
+    await user.click(await screen.findByRole("button", { name: "제거" }));
 
     expect(disableCredential).toHaveBeenCalledWith("credential-openrouter", 2);
     expect(await screen.findByRole("status")).toHaveTextContent("키를 제거했습니다.");

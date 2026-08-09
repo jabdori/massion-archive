@@ -446,6 +446,7 @@ export const appEnglishMessages = {
   "구독 로그인": "Subscription login",
   "사용 중": "In use",
   미사용: "Not in use",
+  "키 추가": "Add key",
   "이 프로바이더는 이미 비활성입니다. 지금 제거하면 등록이 사라집니다.":
     "This provider is already disabled. Removing it now deletes the registration.",
   "키 제거": "Remove key",

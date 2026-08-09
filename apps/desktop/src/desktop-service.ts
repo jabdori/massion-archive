@@ -1183,12 +1183,17 @@ export interface ProviderConnectionView {
    */
   readonly verifiedModelCount?: number;
   readonly verifiedAt?: string;
-  /** `provider_credential.secret_version`. 키를 언제 갈았는지입니다. */
-  readonly credentialVersion?: number;
-  /** 키를 지우려면 식별자가 필요합니다. 없으면 화면이 제거를 제안할 수 없습니다. */
-  readonly credentialId?: string;
-  /** 제거는 낙관적 동시성을 쓰므로 credential의 현재 version이 필요합니다. */
-  readonly credentialRevision?: number;
+  /**
+   * 한 Provider는 키를 여러 개 가질 수 있습니다(Z.AI는 실제로 둘). 하나만 들고 있으면
+   * 화면이 «추가»와 «교체»를 구분하지 못하고 나머지 키는 존재하지 않는 것이 됩니다.
+   */
+  readonly credentials: readonly {
+    readonly credentialId: string;
+    readonly label: string;
+    readonly status: string;
+    readonly secretVersion?: number;
+    readonly revision?: number;
+  }[];
   /** 이 Provider가 제공하는 모델 프로필입니다. */
   readonly models: readonly ProviderModelView[];
 }
@@ -5278,7 +5283,7 @@ export function projectProviderConnections(
       const providerModels = models.filter((item) => str(item, "providerId") === providerId);
       const health = projectProviderHealth(circuits.find((item) => str(item, "providerId") === providerId));
       const verified = evidence.filter((item) => str(item, "providerId") === providerId);
-      const credential = credentials.find((item) => str(item, "providerId") === providerId);
+      const providerCredentials = credentials.filter((item) => str(item, "providerId") === providerId);
       const verifiedAt = verified
         .map((item) => str(item, "verifiedAt"))
         .filter(Boolean)
@@ -5312,11 +5317,15 @@ export function projectProviderConnections(
         ...(health ? { health } : {}),
         ...(verified.length ? { verifiedModelCount: verified.length } : {}),
         ...(verifiedAt ? { verifiedAt } : {}),
-        ...(credential && typeof credential.secretVersion === "number"
-          ? { credentialVersion: credential.secretVersion }
-          : {}),
-        ...(credential && typeof credential.credentialId === "string" ? { credentialId: credential.credentialId } : {}),
-        ...(credential && typeof credential.version === "number" ? { credentialRevision: credential.version } : {}),
+        credentials: providerCredentials
+          .filter((item) => typeof item.credentialId === "string")
+          .map((item) => ({
+            credentialId: str(item, "credentialId"),
+            label: str(item, "label"),
+            status: str(item, "status"),
+            ...(typeof item.secretVersion === "number" ? { secretVersion: item.secretVersion } : {}),
+            ...(typeof item.version === "number" ? { revision: item.version } : {}),
+          })),
       };
     });
   // 지원 목록은 앱에 고정된 상수라 서버를 기다릴 이유가 없습니다. 연결 상태만 나중에 채웁니다.
@@ -5354,6 +5363,7 @@ export function projectProviderConnections(
       connectionConflict: false,
       endpoints: [],
       models: [],
+      credentials: [],
       ...(keyAuthKind(row) ? { keyAuthKind: keyAuthKind(row) as "api-key" | "subscription-key" } : {}),
     }));
   return [...merged, ...offered].sort((left, right) => left.displayName.localeCompare(right.displayName));

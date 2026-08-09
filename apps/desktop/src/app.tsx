@@ -4854,13 +4854,13 @@ function ProviderSurface({ service }: { service: DesktopService }) {
       ),
     },
   ].filter((group) => group.items.length > 0);
-  const removeKey = async (connection: ProviderConnectionView) => {
-    if (saving || connection.credentialId === undefined || connection.credentialRevision === undefined) return;
+  const removeKey = async (credential: ProviderConnectionView["credentials"][number]) => {
+    if (saving || credential.revision === undefined) return;
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      await service.disableCredential(connection.credentialId, connection.credentialRevision);
+      await service.disableCredential(credential.credentialId, credential.revision);
       setSettings(await service.loadSettings());
       setNotice("키를 제거했습니다.");
     } catch (cause) {
@@ -5108,7 +5108,7 @@ function ProviderSurface({ service }: { service: DesktopService }) {
                 }}
                 onDisconnectAccount={(account) => void disconnectAccount(account)}
                 onLogin={(newAccount, alias) => void loginSubscription(selected, newAccount, alias)}
-                onRemoveKey={() => void removeKey(selected)}
+                onRemoveKey={(credential) => void removeKey(credential)}
               />
               {selected.connected && selected.adapterKind !== "subscription-connector" ? (
                 <div className="mt-6 border-t border-border pt-4">
@@ -5327,7 +5327,7 @@ function ProviderOverviewTab({
   onLogin: (newAccount: boolean, alias: string) => void;
   onConnectKey: () => void;
   onDisconnectAccount: (account: SubscriptionAccountView) => void;
-  onRemoveKey: () => void;
+  onRemoveKey: (credential: ProviderConnectionView["credentials"][number]) => void;
 }) {
   const mine = accounts.filter((account) => account.providerId === connection.providerId);
   // 구독 커넥터는 계정을 갖고, API 어댑터는 키를 갖습니다. 없는 쪽을 빈 목록으로 보이면 잘못된 인상을 줍니다.
@@ -5337,11 +5337,10 @@ function ProviderOverviewTab({
   const canLogin = usesAccounts && connection.providerId === "openai-codex";
   // manifest 밖에서 직접 등록한 Provider도 API 어댑터면 키를 받습니다.
   const directEndpointId = connection.endpoints[0]?.endpointId || undefined;
-  // 키는 계정이 아니라 자격 증명이 사실입니다. mine으로 세면 직접 등록 Provider는 영원히 0입니다.
-  // 키가 있다는 사실은 자격의 존재입니다. secret version은 «언제 갈았는지»일 뿐이라 없을 수 있습니다.
-  const hasKey = connection.credentialId !== undefined;
-  const credentialCount = usesAccounts ? mine.length : hasKey ? 1 : 0;
-  const credentialEmpty = usesAccounts ? mine.length === 0 : !hasKey;
+  // 키도 계정처럼 여럿입니다. 하나로 접으면 «추가»와 «교체»가 뒤섞이고 나머지 키가 사라집니다.
+  const keys = connection.credentials;
+  const credentialCount = usesAccounts ? mine.length : keys.length;
+  const credentialEmpty = usesAccounts ? mine.length === 0 : keys.length === 0;
   const canConnectKey =
     !canLogin &&
     (connection.keyAuthKind !== undefined ||
@@ -5387,14 +5386,12 @@ function ProviderOverviewTab({
                       : "로그인이 필요합니다",
                 )}
               </span>
-            ) : connection.credentialVersion === undefined ? (
+            ) : keys.length === 0 ? (
               <span className="text-fg-2">{translate("등록되지 않았습니다")}</span>
             ) : (
               <span>
                 {translate("API 키")}
-                <span className="ml-2 font-mono text-[11px] tabular-nums text-muted">
-                  v{connection.credentialVersion}
-                </span>
+                <span className="ml-2 text-figure tabular-nums text-fg-4">{keys.length}</span>
               </span>
             )}
           </ProviderField>
@@ -5418,7 +5415,7 @@ function ProviderOverviewTab({
               <p className="mt-1 text-figure text-fg-4">{translate("이 앱에서는 아직 연결할 수 없습니다.")}</p>
             )}
           </div>
-        ) : (
+        ) : usesAccounts ? (
           <ul>
             {mine.map((account) => (
               <AccountCard
@@ -5430,30 +5427,24 @@ function ProviderOverviewTab({
               />
             ))}
           </ul>
+        ) : (
+          <ul>
+            {keys.map((key) => (
+              <CredentialRow credential={key} key={key.credentialId} onRemove={() => onRemoveKey(key)} />
+            ))}
+          </ul>
         )}
         {canConnectKey ? (
-          <div className="mt-2 flex gap-2">
+          <div className="mt-3">
             <button
-              className="flex-1 rounded-[5px] border border-control px-3 py-1.5 text-speaker text-secondary transition-colors duration-150 hover:border-fg-3 hover:text-primary"
+              className="rounded-[5px] border border-control px-3 py-1.5 text-speaker text-secondary transition-colors duration-150 hover:border-fg-3 hover:text-primary"
               onClick={() => {
                 onConnectKey();
               }}
               type="button"
             >
-              {translate(hasKey ? "키 교체" : "키로 연결")}
+              {translate("키 추가")}
             </button>
-            {/* 넣을 수 있으면 뺄 수도 있어야 합니다. 키가 없으면 뺄 것도 없습니다. */}
-            {hasKey ? (
-              <button
-                className="rounded-[5px] px-3 py-1.5 text-speaker text-fg-4 transition-colors duration-150 hover:text-danger"
-                onClick={() => {
-                  onRemoveKey();
-                }}
-                type="button"
-              >
-                {translate("키 제거")}
-              </button>
-            ) : null}
           </div>
         ) : null}
         {canLogin ? (
@@ -5491,6 +5482,38 @@ function ProviderOverviewTab({
  * 계정 하나. 남은 양이 아니라 «쓴 양»을 먼저 말합니다 — 사용자가 묻는 것은 얼마나 썼나입니다.
  * 막대는 데이터라 이징하지 않습니다.
  */
+/** 키도 계정과 같은 행으로 읽힙니다. 한쪽만 카드면 같은 화면에 목록 문법이 둘이 됩니다. */
+function CredentialRow({
+  credential,
+  onRemove,
+}: {
+  credential: ProviderConnectionView["credentials"][number];
+  onRemove: () => void;
+}) {
+  return (
+    <li className="flex items-baseline gap-2 border-b border-border py-2 last:border-b-0">
+      <span
+        aria-hidden="true"
+        className={`size-1.5 shrink-0 rounded-full ${credential.status === "active" ? "bg-fg-3" : "border border-fg-4"}`}
+      />
+      <span className="min-w-0 flex-1 truncate text-body text-secondary">{credential.label}</span>
+      <span className="sr-only">{translate(credential.status === "active" ? "사용 중" : "미사용")}</span>
+      {credential.secretVersion === undefined ? null : (
+        <span className="shrink-0 text-figure tabular-nums text-fg-4">v{credential.secretVersion}</span>
+      )}
+      <button
+        className="shrink-0 rounded-[5px] px-1.5 py-0.5 text-figure text-fg-4 transition-colors duration-150 hover:text-danger"
+        onClick={() => {
+          onRemove();
+        }}
+        type="button"
+      >
+        {translate("제거")}
+      </button>
+    </li>
+  );
+}
+
 function AccountCard({ account, onDisconnect }: { account: SubscriptionAccountView; onDisconnect: () => void }) {
   const used = account.minimumRemainingRatio === undefined ? undefined : 1 - account.minimumRemainingRatio;
   return (
