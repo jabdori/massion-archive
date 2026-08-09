@@ -216,8 +216,14 @@ export interface RouteAttemptView {
   /** ISO. 화면이 날짜·시각을 각자 잘라 씁니다. */
   readonly at: string;
   readonly routeId: string;
-  readonly modelId: string;
-  readonly providerId: string;
+  /** 계보 정본. Provider 등록이 제거돼도 남습니다. */
+  readonly modelProfileId: string;
+  /**
+   * 등록이 제거된 과거 호출에는 없습니다. 이름을 지어내는 대신 화면이 「등록 제거됨」이라고 말합니다.
+   * 행 자체는 빼지 않습니다 — 예산의 본체는 관측이라 지출 합계에서 조용히 사라지면 안 됩니다.
+   */
+  readonly modelId?: string;
+  readonly providerId?: string;
   readonly executionId?: string;
   readonly optimizationRunId?: string;
   readonly optimizationBatchId?: string;
@@ -2031,6 +2037,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-18",
     at: "2026-07-29T10:24:11",
     routeId: "route-reasoning",
+    modelProfileId: "mp-claude-sonnet-5",
     modelId: "claude-sonnet-5",
     providerId: "anthropic-claude-code",
     status: "running",
@@ -2048,6 +2055,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-17",
     at: "2026-07-29T10:23:52",
     routeId: "route-reasoning",
+    modelProfileId: "mp-glm-5.2",
     modelId: "glm-5.2",
     providerId: "zai",
     status: "succeeded",
@@ -2068,6 +2076,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-16",
     at: "2026-07-29T10:23:40",
     routeId: "route-reasoning",
+    modelProfileId: "mp-gpt-5.6-luna",
     modelId: "gpt-5.6-luna",
     providerId: "openai-codex",
     status: "failed",
@@ -2088,6 +2097,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-15",
     at: "2026-07-29T10:23:04",
     routeId: "route-reasoning",
+    modelProfileId: "mp-claude-sonnet-5",
     modelId: "claude-sonnet-5",
     providerId: "anthropic-claude-code",
     status: "succeeded",
@@ -2107,6 +2117,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-14",
     at: "2026-07-29T10:22:31",
     routeId: "route-utility",
+    modelProfileId: "mp-claude-haiku-4-5",
     modelId: "claude-haiku-4-5",
     providerId: "anthropic-claude-code",
     status: "succeeded",
@@ -2126,6 +2137,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-13",
     at: "2026-07-29T10:21:58",
     routeId: "route-embedding",
+    modelProfileId: "mp-nomic-embed-text",
     modelId: "nomic-embed-text",
     providerId: "ollama",
     status: "succeeded",
@@ -2145,6 +2157,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-12",
     at: "2026-07-29T10:20:12",
     routeId: "route-utility",
+    modelProfileId: "mp-qwen3:8b",
     modelId: "qwen3:8b",
     providerId: "ollama",
     status: "succeeded",
@@ -2164,6 +2177,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-11",
     at: "2026-07-28T17:02:44",
     routeId: "route-reasoning",
+    modelProfileId: "mp-claude-sonnet-5",
     modelId: "claude-sonnet-5",
     providerId: "anthropic-claude-code",
     status: "succeeded",
@@ -2183,6 +2197,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-10",
     at: "2026-07-28T16:48:19",
     routeId: "route-reasoning",
+    modelProfileId: "mp-claude-sonnet-5",
     modelId: "claude-sonnet-5",
     providerId: "anthropic-claude-code",
     status: "failed",
@@ -2203,6 +2218,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-09",
     at: "2026-07-28T16:31:05",
     routeId: "route-utility",
+    modelProfileId: "mp-claude-haiku-4-5",
     modelId: "claude-haiku-4-5",
     providerId: "anthropic-claude-code",
     status: "succeeded",
@@ -2222,6 +2238,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-08",
     at: "2026-07-28T11:12:37",
     routeId: "route-reasoning",
+    modelProfileId: "mp-glm-5.2",
     modelId: "glm-5.2",
     providerId: "zai",
     status: "succeeded",
@@ -2241,6 +2258,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-07",
     at: "2026-07-27T14:55:20",
     routeId: "route-reasoning",
+    modelProfileId: "mp-claude-sonnet-5",
     modelId: "claude-sonnet-5",
     providerId: "anthropic-claude-code",
     status: "succeeded",
@@ -2260,6 +2278,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-06",
     at: "2026-07-27T14:41:03",
     routeId: "route-utility",
+    modelProfileId: "mp-qwen3:8b",
     modelId: "qwen3:8b",
     providerId: "ollama",
     status: "succeeded",
@@ -2279,6 +2298,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-05",
     at: "2026-07-27T14:22:58",
     routeId: "route-reasoning",
+    modelProfileId: "mp-glm-5.2",
     modelId: "glm-5.2",
     providerId: "zai",
     status: "succeeded",
@@ -2298,6 +2318,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-04",
     at: "2026-07-24T09:38:41",
     routeId: "route-reasoning",
+    modelProfileId: "mp-claude-sonnet-5",
     modelId: "claude-sonnet-5",
     providerId: "anthropic-claude-code",
     status: "succeeded",
@@ -2317,6 +2338,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-03",
     at: "2026-07-24T09:20:16",
     routeId: "route-utility",
+    modelProfileId: "mp-claude-haiku-4-5",
     modelId: "claude-haiku-4-5",
     providerId: "anthropic-claude-code",
     status: "succeeded",
@@ -2336,6 +2358,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-02",
     at: "2026-07-24T09:04:52",
     routeId: "route-embedding",
+    modelProfileId: "mp-nomic-embed-text",
     modelId: "nomic-embed-text",
     providerId: "ollama",
     status: "succeeded",
@@ -2355,6 +2378,7 @@ const fixtureAttempts: readonly RouteAttemptView[] = [
     attemptId: "a-01",
     at: "2026-07-22T15:17:29",
     routeId: "route-reasoning",
+    modelProfileId: "mp-gpt-5.6-luna",
     modelId: "gpt-5.6-luna",
     providerId: "openai-codex",
     status: "succeeded",
@@ -5149,12 +5173,17 @@ export function projectRouteAttempts(value: unknown): readonly RouteAttemptView[
     const fallbackFrom = routeAttemptOptionalString(row, "fallbackFrom");
     const workId = routeAttemptOptionalString(row, "workId");
     const workTitle = routeAttemptOptionalString(row, "workTitle");
+    // 등록이 제거된 Provider의 과거 호출에는 모델·프로바이더 이름이 없습니다. 계보 정본인
+    // modelProfileId만 남으므로 여기서 던지지 않고 그대로 옮깁니다 — 화면이 등록 제거를 말합니다.
+    const modelId = routeAttemptOptionalString(row, "modelId");
+    const providerId = routeAttemptOptionalString(row, "providerId");
     return {
       attemptId: routeAttemptString(row, "attemptId"),
       at,
       routeId: routeAttemptString(row, "routeId"),
-      modelId: routeAttemptString(row, "modelId"),
-      providerId: routeAttemptString(row, "providerId"),
+      modelProfileId: routeAttemptString(row, "modelProfileId"),
+      ...(modelId === undefined ? {} : { modelId }),
+      ...(providerId === undefined ? {} : { providerId }),
       ...(executionId === undefined ? {} : { executionId }),
       ...(optimizationRunId === undefined ? {} : { optimizationRunId }),
       ...(optimizationBatchId === undefined ? {} : { optimizationBatchId }),

@@ -2299,6 +2299,7 @@ describe("Application desktop service", () => {
           attemptId: "attempt-live-1",
           at: "2026-07-30T01:00:00.000Z",
           routeId: "route-reasoning",
+          modelProfileId: "mp-gpt-coding",
           modelId: "gpt-coding",
           providerId: "openai",
           optimizationRunId: "optimization-run-live-1",
@@ -2329,6 +2330,7 @@ describe("Application desktop service", () => {
         attemptId: "attempt-live-1",
         at: "2026-07-30T01:00:00.000Z",
         routeId: "route-reasoning",
+        modelProfileId: "mp-gpt-coding",
         modelId: "gpt-coding",
         providerId: "openai",
         optimizationRunId: "optimization-run-live-1",
@@ -2362,6 +2364,7 @@ describe("Application desktop service", () => {
       attemptId: "attempt-time",
       at,
       routeId: "route-1",
+      modelProfileId: "mp-gpt",
       modelId: "gpt",
       providerId: "openai",
       status: "succeeded",
@@ -2379,6 +2382,31 @@ describe("Application desktop service", () => {
     expect(projectRouteAttempts([attempt("2026-07-30T01:02:03.004Z")])).toMatchObject([
       { at: "2026-07-30T01:02:03.004Z" },
     ]);
+  });
+
+  it("등록이 제거된 모델의 호출 기록은 이름 없이 남기고 목록 전체를 죽이지 않는다", () => {
+    // Provider를 두 번 제거하면 route_attempt는 남고 model_profile은 지워집니다(2026-08-09 이전 동작).
+    // 그 한 행 때문에 던지면 예산 표면이 통째로 오류가 되고, 조용히 빼면 지출 합계가 틀려집니다.
+    const removed = {
+      attemptId: "attempt-orphan",
+      at: "2026-07-30T01:02:03.004Z",
+      routeId: "route-1",
+      modelProfileId: "mp-removed",
+      status: "succeeded",
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      costMicros: 42,
+    };
+
+    const projected = projectRouteAttempts([removed]);
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({ attemptId: "attempt-orphan", modelProfileId: "mp-removed", costMicros: 42 });
+    expect(projected[0]?.modelId).toBeUndefined();
+    expect(projected[0]?.providerId).toBeUndefined();
   });
 
   it("Capabilities registry 조회·설치 결과에서 awaiting-approval 식별자를 보존한다", async () => {

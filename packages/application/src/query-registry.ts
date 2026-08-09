@@ -1301,8 +1301,11 @@ function publicRouteAttempt(value: unknown, lineage: RouteAttemptPublicLineage =
     attemptId: routeAttemptText(attempt.attempt_id, "시도 ID"),
     at: routeAttemptInstant(attempt.created_at),
     routeId: routeAttemptText(attempt.route_id, "경로 ID"),
-    modelId: routeAttemptText(attempt.model_id, "모델 ID"),
-    providerId: routeAttemptText(attempt.provider_id, "Provider ID"),
+    modelProfileId: routeAttemptText(attempt.model_profile_id, "모델 profile ID"),
+    // Provider 등록이 제거된 과거 호출에는 이름이 없습니다. 지어내지 않고 비워 보냅니다 —
+    // 화면이 「등록이 제거된 모델」이라고 말하고, 지출 합계에서는 빠지지 않습니다.
+    ...(attempt.model_id === undefined ? {} : { modelId: routeAttemptText(attempt.model_id, "모델 ID") }),
+    ...(attempt.provider_id === undefined ? {} : { providerId: routeAttemptText(attempt.provider_id, "Provider ID") }),
     ...(lineage.execution === undefined ? {} : { executionId: lineage.execution.executionId }),
     ...(lineage.optimizationRunId === undefined ? {} : { optimizationRunId: lineage.optimizationRunId }),
     ...(optimizationBatchId === undefined ? {} : { optimizationBatchId }),

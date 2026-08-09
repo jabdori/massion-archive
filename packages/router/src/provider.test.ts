@@ -655,6 +655,39 @@ describe("Provider와 암호화 Credential lifecycle", () => {
       { organization_id: context.organizationId },
     );
     expect(attempts[0]?.count).toBe(1);
+    // 그 기록이 가리키는 model_profile도 남겨야 합니다. 지우면 listAttempts가 고아 행에서 던져
+    // 예산·라우터 패널이 통째로 죽습니다. 지울지는 「몇 번째 제거인가」가 아니라 「계보가 참조하는가」가 정합니다.
+    const [survivingProfiles] = await database.query<[{ readonly count: number }[]]>(
+      "SELECT count() FROM model_profile WHERE organization_id = $organization_id AND model_profile_id = $model_profile_id GROUP ALL;",
+      { organization_id: context.organizationId, model_profile_id: modelProfileId },
+    );
+    expect(survivingProfiles[0]?.count).toBe(1);
+  });
+
+  it("호출 기록이 없는 Provider의 model_profile은 제거와 함께 지운다", async () => {
+    const { provider, endpoint } = await providerEndpoint();
+    const modelProfileId = crypto.randomUUID();
+    await database.query(
+      "CREATE model_profile CONTENT { model_profile_id: $model_profile_id, organization_id: $organization_id, provider_id: $provider_id, endpoint_id: $endpoint_id, model_id: 'never-called', route_kind: 'chat', context_window: 1000, supports_tools: false, supports_structured_output: false, supports_vision: false, supports_streaming: false, equivalence_group: 'test-group', eval_score: 0.9f, verified: false, enabled: true, created_at: time::now(), updated_at: time::now() };",
+      {
+        model_profile_id: modelProfileId,
+        organization_id: context.organizationId,
+        provider_id: provider.provider_id,
+        endpoint_id: endpoint.endpoint_id,
+      },
+    );
+
+    const removal = await service.removeProvider(context, {
+      commandId: crypto.randomUUID(),
+      providerId: provider.provider_id,
+    });
+
+    expect(removal.removed).toBe(true);
+    const [profiles] = await database.query<[{ readonly count: number }[]]>(
+      "SELECT count() FROM model_profile WHERE organization_id = $organization_id GROUP ALL;",
+      { organization_id: context.organizationId },
+    );
+    expect(profiles[0]?.count ?? 0).toBe(0);
   });
 
   it("구독 연결 Provider는 제거 대신 구독 해제를 요구한다", async () => {

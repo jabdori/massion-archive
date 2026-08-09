@@ -3710,6 +3710,18 @@ function tokensOf(attempt: RouteAttemptView): number {
   return attempt.inputTokens + attempt.outputTokens;
 }
 
+/**
+ * Provider 등록이 제거된 과거 호출에는 모델·프로바이더 이름이 없습니다. 행을 빼면 지출 합계가
+ * 조용히 틀려지므로 남기되, 이름을 지어내지 않고 등록이 없어졌다고 말합니다.
+ */
+function attemptModelLabel(attempt: RouteAttemptView): string {
+  return attempt.modelId ?? translate("등록 제거됨");
+}
+
+function attemptProviderLabel(attempt: RouteAttemptView): string {
+  return attempt.providerId ?? translate("등록 제거됨");
+}
+
 /** 초당 토큰. 출력과 소요 시간이 둘 다 있어야 말할 수 있습니다. 없으면 말하지 않습니다. */
 function speedOf(attempt: RouteAttemptView): number | undefined {
   if (attempt.durationMs === undefined || attempt.durationMs <= 0 || attempt.outputTokens === 0) return undefined;
@@ -4160,14 +4172,16 @@ function AttemptRow({ attempt, onOpen }: { attempt: RouteAttemptView; onOpen: (a
         {attempt.fallbackFrom === undefined ? null : (
           <ArrowBendDownRight aria-label={translate("넘어옴")} className="mr-1 inline text-muted" size={12} />
         )}
-        {attempt.modelId}
+        {attemptModelLabel(attempt)}
       </td>
       <td className="whitespace-nowrap px-3 py-1.5 text-[12px] text-muted">
         {attempt.effort === undefined
           ? "—"
           : ((EFFORT_LABEL[attempt.effort as ReasoningEffort] as string | undefined) ?? attempt.effort)}
       </td>
-      <td className="whitespace-nowrap px-3 py-1.5 font-mono text-[12px] text-muted">{attempt.providerId}</td>
+      <td className="whitespace-nowrap px-3 py-1.5 font-mono text-[12px] text-muted">
+        {attemptProviderLabel(attempt)}
+      </td>
       <td
         className={`whitespace-nowrap px-3 py-1.5 text-[12px] ${failed || interrupted ? "text-danger" : "text-muted"}`}
       >
@@ -4204,8 +4218,8 @@ function UsageBreakdown({ attempts }: { attempts: readonly RouteAttemptView[] })
   };
   return (
     <>
-      <BreakdownList heading={translate("모델")} rows={fold((attempt) => attempt.modelId)} />
-      <BreakdownList heading={translate("프로바이더")} rows={fold((attempt) => attempt.providerId)} />
+      <BreakdownList heading={translate("모델")} rows={fold((attempt) => attemptModelLabel(attempt))} />
+      <BreakdownList heading={translate("프로바이더")} rows={fold((attempt) => attemptProviderLabel(attempt))} />
     </>
   );
 }
@@ -4274,7 +4288,7 @@ function AttemptDetail({ attempt, onClose }: { attempt: RouteAttemptView | undef
                       ? "실패"
                       : (attempt.statusCode ?? "성공")}
               </span>
-              <span className="font-mono text-[13px] font-normal text-secondary">{attempt.modelId}</span>
+              <span className="font-mono text-[13px] font-normal text-secondary">{attemptModelLabel(attempt)}</span>
             </DialogTitle>
             <dl className="mt-1">
               <DetailRow label={translate("시간")}>{attempt.at.replace("T", " ")}</DetailRow>
@@ -4288,7 +4302,7 @@ function AttemptDetail({ attempt, onClose }: { attempt: RouteAttemptView | undef
               {attempt.optimizationBatchId === undefined ? null : (
                 <DetailRow label={translate("최적화 배치")}>{attempt.optimizationBatchId}</DetailRow>
               )}
-              <DetailRow label={translate("프로바이더")}>{attempt.providerId}</DetailRow>
+              <DetailRow label={translate("프로바이더")}>{attemptProviderLabel(attempt)}</DetailRow>
               <DetailRow label={translate("추론 강도")}>
                 {attempt.effort === undefined
                   ? "—"
@@ -5588,10 +5602,8 @@ function AccountCard({ account, onDisconnect }: { account: SubscriptionAccountVi
 
 function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust: boolean; service: DesktopService }) {
   const { locale, preference, setPreference, systemLocale } = useI18n();
-  const [settings, setSettings] = useState<SettingsView>();
   const [autonomy, setAutonomy] = useState<AutonomyView>();
   const [workspaces, setWorkspaces] = useState<readonly DesktopWorkspaceView[]>();
-  const [settingsError, setSettingsError] = useState("");
   const [autonomyError, setAutonomyError] = useState("");
   const [workspaceError, setWorkspaceError] = useState("");
   const [notice, setNotice] = useState("");
@@ -5612,14 +5624,10 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
   }, [focusWorkspaceTrust]);
   useEffect(() => {
     let disposed = false;
-    void service.loadSettings().then(
-      (value) => {
-        if (!disposed) setSettings(value);
-      },
-      (cause: unknown) => {
-        if (!disposed) setSettingsError(surfaceErrorMessage(cause, "설정을 불러오지 못했습니다."));
-      },
-    );
+    // 프로바이더·예산 분리(헌법 6절, 2026-07-30) 뒤 설정이 소유하는 것은 언어·실행 권한·자가개선
+    // 채택·워크스페이스 신뢰뿐입니다. loadSettings()의 router·subscription 7개 조회는 렌더에 쓰이지
+    // 않으면서 표면을 열 때마다 왕복 7회를 쓰고, 그중 하나만 실패해도 이 화면과 무관한 오류 배너를
+    // 띄웠습니다. 각 구역이 자기 조회의 로딩·오류를 이미 따로 그립니다.
     void service.loadAutonomy().then(
       (value) => {
         if (!disposed) setAutonomy(value);
@@ -5718,8 +5726,6 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
         <h1 className="text-[15px] font-semibold tracking-[-0.008em] text-primary">{translate("설정")}</h1>
       </header>
       <div className="min-h-0 overflow-y-auto px-5 py-4">
-        {settingsError ? <SurfaceError message={settingsError} /> : null}
-        {!settings && !settingsError ? <SurfaceLoading /> : null}
         <div className="mx-auto max-w-[88ch] pb-8">
           <GrowthSection headingLevel={2} title={translate("언어")}>
             <ChoiceGroup

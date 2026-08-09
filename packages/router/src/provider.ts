@@ -595,16 +595,22 @@ export class ProviderService {
             "SELECT count() FROM route_attempt WHERE organization_id = $organization_id AND model_profile_id IN $profile_ids GROUP ALL;",
             { organization_id: context.organizationId, profile_ids: profileIds },
           );
+          const referencedByAttempts = (attempts[0]?.count ?? 0) > 0;
           // 처음 제거하면 실행 계보를 지키려고 은퇴만 시킵니다. 이미 은퇴한 것을 다시 제거하면
           // 사용자가 두 번 확인한 것이므로 등록 자체를 지웁니다. route_attempt 행은 그대로 남습니다.
-          retired = (attempts[0]?.count ?? 0) > 0 && provider.enabled;
+          retired = referencedByAttempts && provider.enabled;
           await tx.query(
             "DELETE model_route_candidate WHERE organization_id = $organization_id AND model_profile_id IN $profile_ids;",
             { organization_id: context.organizationId, profile_ids: profileIds },
           );
-          if (!retired) {
+          if (!referencedByAttempts) {
             // 검증 근거는 스키마가 immutable로 못 박았습니다. 모델이 실재했다는 기록은
             // Provider 등록보다 오래 살아야 하므로 지우지 않고 남깁니다.
+            //
+            // 같은 이유로 호출 기록이 가리키는 profile도 남깁니다. 여기서 `retired`를 조건으로 쓰면
+            // 두 번째 제거(그때는 provider.enabled가 이미 false)가 route_attempt는 남긴 채 profile만
+            // 지워 고아 행을 만들고, listAttempts가 그 행에서 던져 예산·라우터 패널이 통째로 죽습니다.
+            // 지울지 말지를 정하는 것은 「몇 번째 제거인가」가 아니라 「계보가 참조하는가」입니다.
             await tx.query(
               "DELETE model_profile WHERE organization_id = $organization_id AND model_profile_id IN $profile_ids;",
               { organization_id: context.organizationId, profile_ids: profileIds },

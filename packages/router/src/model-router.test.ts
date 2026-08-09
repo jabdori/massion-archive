@@ -742,6 +742,31 @@ describe("Model Route simulation과 reservation", () => {
     ]);
   });
 
+  it("등록이 제거된 모델의 과거 호출 기록도 목록에 남기고 이름을 지어내지 않는다", async () => {
+    const created = await route();
+    const reserved = await router.reserve(context, {
+      commandId: crypto.randomUUID(),
+      routeName: created.name,
+      estimatedTokens: 1,
+      estimatedCostMicros: 0,
+    });
+    // 2026-08-09 이전 removeProvider가 만든 고아 행. 한 행 때문에 목록 전체가 죽으면
+    // 예산 표면이 통째로 오류가 되고, 조용히 빼면 지출 합계가 틀려집니다.
+    await database.query("DELETE model_profile WHERE model_profile_id = $model_profile_id;", {
+      model_profile_id: profile.model_profile_id,
+    });
+
+    const attempts = await router.listAttempts(context);
+
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      attempt_id: reserved.attempt.attempt_id,
+      model_profile_id: profile.model_profile_id,
+    });
+    expect(attempts[0]?.model_id).toBeUndefined();
+    expect(attempts[0]?.provider_id).toBeUndefined();
+  });
+
   it("손상된 Route Attempt 행은 목록 경계에서 fail-closed한다", async () => {
     const created = await route();
     const reserved = await router.reserve(context, {

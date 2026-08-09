@@ -1228,6 +1228,7 @@ describe("ApplicationQueryRegistry", () => {
           {
             attempt_id: "attempt-public-1",
             route_id: "route-reasoning",
+            model_profile_id: "profile-gpt-coding",
             model_id: "gpt-coding",
             provider_id: "openai",
             execution_id: "execution-attempt-1",
@@ -1260,6 +1261,9 @@ describe("ApplicationQueryRegistry", () => {
         attemptId: "attempt-public-1",
         at: "2026-07-30T01:00:00.000Z",
         routeId: "route-reasoning",
+        // ADR-003 §4가 잇는 계보 사슬의 연결 고리입니다. 등록이 제거돼도 남으므로
+        // 이름을 잃은 과거 호출도 서로 구분됩니다. 비밀이 아니라 조회의 join key입니다.
+        modelProfileId: "profile-gpt-coding",
         modelId: "gpt-coding",
         providerId: "openai",
         executionId: "execution-attempt-1",
@@ -1293,6 +1297,7 @@ describe("ApplicationQueryRegistry", () => {
           {
             attempt_id: "attempt-interrupted",
             route_id: "route-1",
+            model_profile_id: "profile-gpt",
             model_id: "gpt",
             provider_id: "openai",
             optimization_run_id: "optimization-run-new",
@@ -1306,6 +1311,7 @@ describe("ApplicationQueryRegistry", () => {
           {
             attempt_id: "attempt-legacy-evaluation",
             route_id: "route-1",
+            model_profile_id: "profile-gpt",
             model_id: "gpt",
             provider_id: "openai",
             execution_id: "optimization-run-legacy",
@@ -1350,6 +1356,7 @@ describe("ApplicationQueryRegistry", () => {
           {
             attempt_id: "attempt-orphan-lineage",
             route_id: "route-1",
+            model_profile_id: "profile-gpt",
             model_id: "gpt",
             provider_id: "openai",
             execution_id: "orphan-lineage",
@@ -1374,6 +1381,7 @@ describe("ApplicationQueryRegistry", () => {
     const attempt = (createdAt: unknown) => ({
       attempt_id: "attempt-time",
       route_id: "route-1",
+      model_profile_id: "profile-gpt",
       model_id: "gpt",
       provider_id: "openai",
       status: "succeeded",
@@ -1411,6 +1419,7 @@ describe("ApplicationQueryRegistry", () => {
           {
             attempt_id: "attempt-malformed",
             route_id: "route-1",
+            model_profile_id: "profile-gpt",
             model_id: "gpt",
             provider_id: "openai",
             status: "succeeded",

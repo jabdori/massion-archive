@@ -12,6 +12,7 @@ export const appEnglishMessages = {
   개선: "Growth",
   확장: "Extensions",
   프로바이더: "Provider",
+  "등록 제거됨": "Registration removed",
   예산: "Budget",
   설정: "Settings",
   완료: "Complete",

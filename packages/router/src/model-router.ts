@@ -179,8 +179,11 @@ export interface RouteAttempt {
 export interface RouteAttemptListItem {
   readonly attempt_id: string;
   readonly route_id: string;
-  readonly model_id: string;
-  readonly provider_id: string;
+  /** 계보 정본. 등록이 제거돼도 이 ID는 남으므로 감사는 언제나 가능합니다. */
+  readonly model_profile_id: string;
+  /** Provider 등록이 제거된 과거 호출에는 없습니다. 이름을 지어내지 않습니다. */
+  readonly model_id?: string;
+  readonly provider_id?: string;
   readonly execution_id?: string;
   readonly optimization_run_id?: string;
   readonly optimization_batch_id?: string;
@@ -1030,13 +1033,21 @@ export class ModelRouter {
     return records.map((value) => {
       const row = routeAttemptListRow(value, context.organizationId);
       const profile = profiles.get(row.model_profile_id);
-      if (!profile || profile.organization_id !== context.organizationId)
+      if (profile && profile.organization_id !== context.organizationId)
         throw new Error("Route Attempt 행의 모델 계보가 유효하지 않습니다");
+      // profile이 없는 행은 다른 조직의 것이 아니라 등록이 제거된 과거 호출입니다.
+      // 여기서 던지면 한 행 때문에 목록 전체가 죽어 예산 표면이 통째로 오류가 됩니다.
+      // 행은 남기되 모델 이름을 지어내지 않습니다 — 화면이 등록이 없어졌다고 말합니다.
       return {
         attempt_id: row.attempt_id,
         route_id: row.route_id,
-        model_id: attemptRowText(profile.model_id, "모델 ID"),
-        provider_id: attemptRowText(profile.provider_id, "Provider ID"),
+        model_profile_id: row.model_profile_id,
+        ...(profile
+          ? {
+              model_id: attemptRowText(profile.model_id, "모델 ID"),
+              provider_id: attemptRowText(profile.provider_id, "Provider ID"),
+            }
+          : {}),
         ...(row.execution_id === undefined ? {} : { execution_id: row.execution_id }),
         ...(row.optimization_run_id === undefined ? {} : { optimization_run_id: row.optimization_run_id }),
         ...(row.optimization_batch_id === undefined ? {} : { optimization_batch_id: row.optimization_batch_id }),

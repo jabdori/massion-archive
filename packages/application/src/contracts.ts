@@ -182,8 +182,11 @@ export interface RouteAttemptViewV1 {
   readonly attemptId: string;
   readonly at: string;
   readonly routeId: string;
-  readonly modelId: string;
-  readonly providerId: string;
+  /** 계보 정본. Provider 등록이 제거돼도 남으므로 감사는 언제나 가능합니다. */
+  readonly modelProfileId: string;
+  /** 등록이 제거된 과거 호출에는 없습니다. 화면은 이름을 지어내는 대신 제거됐다고 말합니다. */
+  readonly modelId?: string;
+  readonly providerId?: string;
   readonly executionId?: string;
   readonly optimizationRunId?: string;
   readonly optimizationBatchId?: string;
