@@ -78,6 +78,7 @@ describe("Application 계약 경계", () => {
   });
 
   it("타입 경로가 계약 밖 무타입 경로보다 많다", () => {
+    // 2026-08-09에 growth.revert가 타입 경로로 들어왔습니다. 이 비율은 커지기만 해야 합니다.
     // 이 비율이 뒤집히면 계약이 아니라 우회로가 제품 표면이 됩니다.
     const typed = operations("query", true).size + operations("command", true).size;
     expect(typed).toBeGreaterThan(UNTYPED_QUERIES.length + UNTYPED_COMMANDS.length);

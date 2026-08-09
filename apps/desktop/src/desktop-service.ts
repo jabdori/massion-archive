@@ -1457,6 +1457,15 @@ export interface DesktopService {
     readonly expectedRevision: number;
     readonly reason: string;
   }): Promise<void>;
+  /**
+   * 채택을 되돌립니다. 4.8이 요구하는 루프의 마지막 걸음이고, 그동안 CLI에만 있었습니다 —
+   * 채택은 화면에서 하고 취소는 터미널에서 하는 상태였습니다.
+   */
+  revertGrowthAdoption(input: {
+    readonly adoptionId: string;
+    readonly suggestionRevision: number;
+    readonly reason: string;
+  }): Promise<void>;
   putExplicitMemory(input: {
     readonly key: string;
     readonly kind: ExplicitMemoryViewV1["entries"][number]["kind"];
@@ -1900,6 +1909,13 @@ export function createApplicationDesktopService(
       await client.command("growth.suggestion.approve", {
         suggestionId: input.suggestionId,
         expectedRevision: input.expectedRevision,
+        reason: input.reason,
+      });
+    },
+    async revertGrowthAdoption(input) {
+      await client.command("growth.revert", {
+        adoptionId: input.adoptionId,
+        suggestionRevision: input.suggestionRevision,
         reason: input.reason,
       });
     },
@@ -4219,6 +4235,13 @@ export function createFixtureDesktopService(): DesktopService {
     loadGrowthSuggestion: (suggestionId) =>
       fixturePromise(() => {
         throw new Error(`Fixture Growth Suggestion exact 조회를 구성하지 않았습니다: ${suggestionId}`);
+      }),
+    revertGrowthAdoption: (input) =>
+      fixturePromise(() => {
+        // 브라우저 개발 화면에는 채택 원장이 없습니다. 되돌리기 결과를 지어내는 대신,
+        // 실계약에서만 답할 수 있다는 사실을 그대로 말합니다.
+        if (!input.reason.trim()) throw new Error("되돌리기 사유가 필요합니다");
+        throw new Error(`Fixture는 채택 되돌리기를 구성하지 않았습니다: ${input.adoptionId}`);
       }),
     approveGrowthSuggestion: (input) =>
       fixturePromise(() => {

@@ -807,6 +807,19 @@ export interface ApplicationCommandMapV1 {
   readonly "growth.suggestion.approve": {
     readonly payload: { readonly suggestionId: string; readonly expectedRevision: number; readonly reason: string };
   };
+  /**
+   * 채택을 되돌립니다. 헌법 4.8은 자가개선 루프의 마지막 걸음으로 «악화되거나 현재 유효 권한
+   * 모드에서 적용할 수 없으면 중단하고 되돌린다»를 요구하는데, 이 명령이 타입 계약에 없던 동안
+   * 되돌리기는 CLI에만 있었습니다. 채택은 화면에서 하고 취소는 터미널에서 하는 상태였습니다.
+   */
+  readonly "growth.revert": {
+    readonly payload: {
+      readonly adoptionId: string;
+      readonly suggestionRevision: number;
+      readonly reason: string;
+      readonly approvalId?: string;
+    };
+  };
 }
 
 export interface ApplicationEventV1 {

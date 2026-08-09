@@ -384,7 +384,7 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 
 - **도메인은 4.8을 정확히 구현하고 있습니다.** 평가 게이트(`proposed → evaluated → awaiting-review → adopted`), 신호 그룹 `required`/`supporting`/`conflict`, 신호 출처 `deterministic`/`independent`/`model-self`, 전후 버전(`beforeVersionId`/`afterVersionId`), 측정 기반 효과 판정(표본 수·임계값·단위)이 모두 존재합니다.
 - (정정 2026-08-09) 이 절은 원래 「조회가 넷뿐이고 `patch_json`·`source_reference_ids`·`reflection_run_id`·`revision`을 버린다」, 「데스크톱 개선 표면은 읽기 전용이고 승인·거절 버튼이 비활성」이라고 적었습니다. **둘 다 해소됐습니다** — `GrowthSuggestionViewV1`이 patch·evaluation(신호 포함)·adoption(전후 버전·checksum)·reflectionRunId·sourceReferenceIds·revision을 모두 내보내고, 데스크톱이 `growth.configure`·`growth.suggestion.approve`·`growth.suggestion.reject`를 타입 경로로 실제 호출합니다.
-- **남은 것 셋.** ① `growth.revert`가 명령 레지스트리에만 있고 `ApplicationCommandMapV1`과 데스크톱에 없어 되돌리기가 공개 제품 경로에 없습니다(`growth.adopt`는 `suggestion.approve` 핸들러가 내부에서 불러 간접 도달합니다). ② 신호의 실제 증거(`evidence_json`)가 투영에서 `note: signal.unit`으로 대체돼 화면의 note에는 항상 단위 문자열만 들어갑니다. ③ 생산 `GrowthWorker`가 만드는 신호 다섯이 전부 `passed`/`1`/`boolean` 상수라, `minimumIndependentSupportingSignals` 게이트가 후보 품질과 무관하게 항상 통과합니다 — 4.8의 「독립된 신호와 반대 근거로 평가」가 실질적으로 「계보 존재 확인」으로 축소돼 있습니다.
+- **남은 것 둘.** ① (해소 2026-08-09) `growth.revert`가 `ApplicationCommandMapV1`과 데스크톱 서비스에 연결됐습니다 — 채택은 화면에서 하고 취소는 터미널에서 하던 상태가 끝났습니다. ② 신호의 실제 증거(`evidence_json`)가 투영에서 `note: signal.unit`으로 대체돼 화면의 note에는 항상 단위 문자열만 들어갑니다. ③ 생산 `GrowthWorker`가 만드는 신호 다섯이 전부 `passed`/`1`/`boolean` 상수라, `minimumIndependentSupportingSignals` 게이트가 후보 품질과 무관하게 항상 통과합니다 — 4.8의 「독립된 신호와 반대 근거로 평가」가 실질적으로 「계보 존재 확인」으로 축소돼 있습니다.
 - 화면은 이제 "왜 믿어야 하는가"의 **계약상 근거**를 받습니다. 그러나 ③ 때문에 그 근거의 **내용**이 아직 측정이 아닙니다.
 - 인계 문서: [개선 평가·채택·효과 핸드오프](../phases/30-surface-parity-agent-ux/growth-adoption-handoff.md)
 
