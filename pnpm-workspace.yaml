@@ -6,8 +6,8 @@ packages:
   - extensions/*
   - packages/*
 
-# 아래 열 건은 전이 의존성의 공개된 취약점입니다. 직접 의존이 아니라 상위 패키지가
-# 끌고 오는 것이라 패치 버전으로 끌어올립니다. verify:security가 moderate 이상 0건을 요구합니다.
+# 아래는 전이 의존성의 공개된 취약점입니다. 직접 의존이 아니라 상위 패키지가 끌고 오는 것이라
+# 패치 버전으로 끌어올립니다. verify:security가 moderate 이상 0건을 요구합니다.
 overrides:
   "@opentelemetry/core": 2.8.0
   uuid: 11.1.1
@@ -20,9 +20,12 @@ overrides:
   fast-uri: "3.1.5"
   hono: ">=4.12.34"
   ip-address: ">=10.3.1"
+  # vite·postcss가 끌고 오는 dev 전용 전이 의존. size 0에서 무한 루프(GHSA-2v37-7h3g-55p8).
+  nanoid: ">=3.3.17"
   js-yaml: "^4.1.1"
-  # gray-matter@4는 v4에서 사라진 safeLoad를 씁니다. 그 경로만 3.x로 되돌립니다.
-  "gray-matter>js-yaml": "^3.14.1"
+  # gray-matter@4는 v4에서 사라진 safeLoad를 씁니다. 그 경로만 3.x로 되돌리되, 3.15.1 미만은
+  # CVE-2026-59870(!!omap 이차 CPU 소비, GHSA-5p4m-2wfm-xmqj)에 걸리므로 하한을 그 위로 둡니다.
+  "gray-matter>js-yaml": "^3.15.1"
   prismjs: ">=1.30.0"
   socket.io-parser: ">=4.2.7"
   tar: ">=7.5.21"
