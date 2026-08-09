@@ -546,10 +546,15 @@ describe("Massion server product", () => {
 
     const address = await daemon.start();
     try {
-      const readyResponse = await fetch(`${address.url}/health/ready`);
-      expect(readyResponse.status).toBe(200);
-      await expect(readyResponse.json()).resolves.toMatchObject({
-        components: { "application-run-recovery": "ready" },
+      // 시작 복구는 `start()`가 돌려준 뒤에도 계속 돕니다. probe는 그동안 정직하게 not-ready를
+      // 답하므로, 즉시 단언하면 빠른 머신에서만 우연히 통과합니다. 이 테스트는 `pnpm verify`
+      // 안에 있어서 그 우연이 곧 릴리스 게이트의 간헐적 거짓말이 됩니다. 결과를 기다립니다.
+      await vi.waitFor(async () => {
+        const readyResponse = await fetch(`${address.url}/health/ready`);
+        expect(readyResponse.status).toBe(200);
+        await expect(readyResponse.json()).resolves.toMatchObject({
+          components: { "application-run-recovery": "ready" },
+        });
       });
       await vi.waitFor(
         async () => {
