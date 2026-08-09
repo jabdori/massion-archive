@@ -86,8 +86,10 @@ function parseAnswers(toolOutput: string | undefined, targets: readonly string[]
         if (typeof candidate === "string" && candidate.trim().length > 0) return candidate.trim();
       }
     }
-    const encoded = JSON.stringify(value);
-    return encoded === undefined || encoded === "null" ? undefined : encoded;
+    // null·undefined는 위에서 걸렀으므로 "null"은 나올 수 없습니다. 다만 함수·symbol이면
+    // `JSON.stringify`가 실제로 undefined를 돌려주고, lib 타입은 그 경로를 string으로 적습니다.
+    const encoded: string | undefined = JSON.stringify(value);
+    return encoded;
   };
   if (Array.isArray(parsed)) return targets.map((_target, index) => textOf(parsed[index]));
   const single = textOf(parsed);
