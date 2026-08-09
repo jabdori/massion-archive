@@ -8,6 +8,8 @@
 
 > **제품 정체성 정본:** [Massion 제품 헌법과 현재 방향](../product/constitution.md). 이 문서는 현재 구현 구조를 설명하며 제품의 목적과 철학을 다시 정의하지 않습니다.
 
+> **이 문서보다 나중에 승인된 결정:** [ADR-001 개인용 전체 권한](ADR-001-personal-full-access.md)(2026-07-25, 2026-07-30 개정) · [ADR-002 지식 축과 표면 복원](ADR-002-knowledge-axis-restoration.md)(2026-07-27) · [ADR-003 작업 인지 모델 배치](ADR-003-task-aware-model-placement.md)(2026-07-28). 아래 그림과 표는 기준일 2026-07-24 시점이므로 세 결정이 반영돼 있지 않습니다. 표면 집합(아홉)과 모델 배치는 헌법 §6과 각 ADR이 정본입니다.
+
 이 문서는 Massion을 처음 접하는 사람과 구현 에이전트가 현재 구현 전체를 빠르게 파악하도록 돕습니다. 현재 공개 저장소에 존재하는 코드와 검증 가능한 동작을 같은 그림에 표시하되 상태를 명확히 구분합니다. 세부 계약은 도메인 코드·테스트, 운영 문서와 현재 Phase 문서가 소유하며, 이 문서는 그 관계를 연결하는 지도입니다.
 
 현재 동작은 실제 코드·테스트, 운영 문서, 현재 Phase 설계·회고 순으로 판정합니다. 새 저장소 전환 때 제외한 과거 Phase 문서나 대체된 개념도는 현재 구현 완료의 근거로 사용하지 않습니다. 과거 계보에서 확인된 제품 의도는 [제품 헌법](../product/constitution.md)이 보존합니다.
@@ -106,7 +108,7 @@ flowchart LR
   classDef planned fill:#f3f4f6,stroke:#6b7280,color:#374151,stroke-width:1px,stroke-dasharray:5 5;
   classDef external fill:#ffedd5,stroke:#c2410c,color:#7c2d12,stroke-width:2px;
 
-  Foundation["기반 계약<br/>@massion/foundation"]:::implemented
+  Foundation["기반 계약<br/>@massion/foundation<br/>생산 소비자 0"]:::planned
   Storage["저장소 facade<br/>@massion/storage"]:::implemented
   Identity["사용자·tenant<br/>@massion/identity"]:::implemented
   Organization["조직 그래프<br/>@massion/organization"]:::implemented
@@ -131,7 +133,7 @@ flowchart LR
   VoltAgent["VoltAgent 실행 엔진<br/>외부"]:::external
   Provider["AI Provider<br/>외부"]:::external
 
-  Foundation --> Storage
+  Foundation -. "의존 없음" .-> Storage
   Storage --> Identity
   Identity --> Organization
   Identity --> Work
@@ -692,7 +694,8 @@ flowchart LR
 
 | 영역 | 상태 | 구현·설계 위치 | Phase |
 |---|---|---|---|
-| 기반 계약·저장소·Identity·Organization | 구현됨 | `packages/foundation`, `packages/storage`, `packages/identity`, `packages/organization` | 현재 코드 |
+| 저장소·Identity·Organization | 구현됨 | `packages/storage`, `packages/identity`, `packages/organization` | 현재 코드 |
+| 기반 계약 | 코드 존재·생산 소비자 0 | `packages/foundation` | Node 24 런타임 가드 3함수뿐이며 저장소 전체에서 import 0건, 어떤 `package.json`의 dependencies에도 없음 |
 | Work·Router·Runtime·Governance | 구현됨 | `packages/work`, `packages/router`, `packages/runtime`, `packages/governance` | 5~8 |
 | Context·Evidence·Engineering·Assurance·Records·Growth | 구현됨 | `packages/context-strategy`, `packages/evidence`, `packages/software-engineering`, `packages/assurance`, `packages/records`, `packages/growth` | 9~14 |
 | Extension SDK·Host | 구현됨 | `packages/extension-sdk`, `packages/extension-host`, `apps/server` | Application API에 Extension Host와 Registry 설치기 조립 |

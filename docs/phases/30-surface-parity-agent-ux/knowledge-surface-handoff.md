@@ -1,6 +1,7 @@
 # 핸드오프 — 지식 표면과 통합 이웃 조회
 
-> **상태:** 화면 완성, 계약 미구현. 다른 에이전트가 이어받도록 작성한 인계 문서
+> **상태:** 화면 완성, **계약은 이후 구현됨**. 아래 본문은 작성 시점(2026-07-27) 진단이며 그대로 읽으면 안 됩니다
+> **정정:** 2026-08-09 코드 대조. 이 문서가 「없음」으로 적은 세 조회 `knowledge.index`·`knowledge.graph`·`knowledge.links`는 **모두 존재합니다** — `ApplicationQueryMapV1`과 `query-registry`에 등록돼 있고 데스크톱이 실제로 호출합니다. 아래 계약 설계는 이미 반영된 것으로 읽으십시오.
 > **작성일:** 2026-07-27
 > **결정:** [ADR-002 지식 축과 표면 복원](../../architecture/ADR-002-knowledge-axis-restoration.md)
 > **관련:** [제품 헌법 §5·§6·§9.6](../../product/constitution.md), [근거 관계 그래프](knowledge-graph-handoff.md)

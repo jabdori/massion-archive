@@ -1,6 +1,7 @@
 # 핸드오프 — 개선(자가개선) 평가·승인·효과를 계약에 노출
 
-> **상태:** 미구현. 다른 에이전트가 이어받도록 작성한 인계 문서
+> **상태:** **절반 구현됨**. 아래 본문은 작성 시점(2026-07-23) 진단이며 그대로 읽으면 안 됩니다
+> **정정:** 2026-08-09 코드 대조. `growth.configure`·`growth.suggestion.approve`·`growth.suggestion.reject` 명령과 `growth.suggestion.get` 조회는 **이미 타입 계약에 있고 데스크톱이 호출합니다**. `GrowthSuggestionViewV1`도 patch·evaluation·adoption·reflectionRunId·sourceReferenceIds·revision을 내보냅니다. 남은 것은 ① `growth.revert`가 공개 제품 경로에 없음 ② 신호 `evidence_json`이 투영에서 단위 문자열로 대체됨 ③ 생산 `GrowthWorker` 신호 다섯이 전부 상수라 독립 신호 게이트가 항상 통과함 — 셋뿐입니다. 헌법 §9.3도 함께 갱신했습니다.
 > **작성일:** 2026-07-23
 > **관련 목표:** [제품 헌법 목표 3 — Growth를 1급 제품 표면으로 완성](../../product/constitution.md)
 > **표면 이름:** `개선` (2026-07-23 확정. 구 `성장`)

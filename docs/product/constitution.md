@@ -364,11 +364,12 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 
 - 남은 격차는 화면 추가보다 **계약과 실제 실행 연결**에 집중돼 있습니다. 표면을 완성본 기준으로 만들면서 도메인에는 있고 Application 계약이나 생산 호출 경로가 버리는 것이 반복해서 드러났습니다. 현재 네 인계 문서가 개선, 협업·조직, 확장, 설정 범위를 소유합니다(9.3·9.4·9.5, [설정 조회 계약](../phases/30-surface-parity-agent-ux/settings-contract-handoff.md)).
 - 조직 화면은 **구조(A) + 지도(B) 하이브리드**로 완성본 기준으로 그립니다(2026-07-24). 본문은 자식이 있는 노드를 접을 수 있는 중첩 구조, 우측은 전체 위치를 보여주는 지도이며 A가 읽기의 중심임을 유지하도록 55:45로 나눕니다. `NodeRole`은 총괄·조율·실행만 뜻하므로 `coordinator`를 부서나 팀으로 번역하지 않습니다. 에이전트는 `agentIdentityToken`으로 업무 화면과 같은 이름을 쓰고, scope:"work" 임시 팀은 분리·점선으로 구분합니다.
-- 다만 **읽기 전용**입니다. 편성·분리·병합·Staffing 명령이 계약에 없고, `parent_handle`은 조회 쿼리가 가져오지 않으며 `scope`·`work_id`는 `OrganizationNodeViewV1`에 없습니다. 따라서 **실 데이터로는 계층·임시/영속 구분을 그릴 수 없습니다.** 지금 화면은 fixture로 완성본을 고정해 둔 상태입니다([협업 런타임 핸드오프](../phases/30-surface-parity-agent-ux/agent-collaboration-runtime-handoff.md) §7).
+- 다만 **읽기 전용**입니다. 편성·분리·병합은 명령 레지스트리에 `organization.command`로 있지만 `ApplicationCommandMapV1`에 없어 타입 클라이언트만 쓰는 데스크톱에서는 부를 수 없습니다. 유일한 실사용 경로는 CLI의 `org:apply`입니다.
+- (정정 2026-08-09) 이 절은 원래 「`parent_handle`은 조회가 가져오지 않고 `scope`·`work_id`는 `OrganizationNodeViewV1`에 없어 실 데이터로 계층·임시/영속을 그릴 수 없다」고 적었습니다. **셋 다 지금은 있습니다** — 계약(`contracts.ts` `OrganizationNodeViewV1`), 조회 투영(`query-registry.ts`), 데스크톱 투영(`desktop-service.ts`) 세 층이 모두 나르고 테스트가 고정합니다. 조직 화면은 계층과 임시/영속 구분을 실 데이터로 그립니다. 남은 것은 **쓰기(편성 명령)뿐**입니다.
 - 확장 화면은 Capability를 먼저 보이지만 **설치된 확장의 Capability는 계약이 주지 않아 비어 있습니다.** 9.5를 보십시오.
 - 설정에 있던 `로컬 환경` 구역은 daemon 상태·데이터 위치를 볼 **조회 자체가 없어** 2026-07-30에 제거했습니다. 조회가 열리면 어느 표면이 소유할지 다시 정합니다 — 이것은 사람이 정한 경계가 아니므로 설정으로 돌아가지 않습니다.
 - `프로바이더`는 연결·계정·키 추가가 실제 명령으로 동작하지만 **모델 개별 on/off는 계약에 명령이 없어 화면 상태로만 남습니다.**
-- `예산`은 한도·임계값을 걸 수 있게 그려 두었으나 **가드를 쓰는 명령이 계약에 없습니다.** 모델 호출 기록은 `route_attempt` 테이블이 있는데도 `ApplicationQueryMapV1`에 조회가 없어 화면이 빈 목록 대신 「조회가 아직 계약에 없다」고 말합니다. 즉 **예산 표면은 지금 한도도 못 걸고 기록도 못 읽습니다.** 인계: [설정 조회 계약](../phases/30-surface-parity-agent-ux/settings-contract-handoff.md)
+- `예산`은 **기록은 읽고 한도는 못 겁니다**(정정 2026-08-09). 모델 호출 기록은 `router.attempts` 조회가 계약·레지스트리·데스크톱 호출까지 완결돼 실제로 표시됩니다 — 이 절이 적었던 「조회가 계약에 없다」는 낡았습니다. 반면 한도·알림 임계값은 여전히 화면 로컬 상태이고 저장·조회 명령이 계약에 없습니다. 경로 예산 자체는 도메인·CLI(`router.route.configure`)에 있으나 데스크톱이 부르지 않습니다. 인계: [설정 조회 계약](../phases/30-surface-parity-agent-ux/settings-contract-handoff.md)
 - (해소 2026-07-30) Work 실행 중단을 `Esc`에 걸었습니다. 4.6이 정지를 Work 단위로 확정했으므로 그 자리의 접근성이 곧 안전 수단의 접근성입니다.
 - 위 세 표면 분리(프로바이더·예산 신설, 설정 축소, 모델 경로 폼 제거)는 ADR-002가 `지식` 표면에 대해 남긴 수준의 결정 기록을 아직 갖고 있지 않습니다. 6절이 근거를 적었을 뿐이며 별도 ADR이 필요합니다.
 - 화면은 없는 것을 숫자 0이나 빈 표로 채우지 않고 무엇이 없는지 말합니다. 이 규칙은 테스트로 고정돼 있습니다.
@@ -382,9 +383,9 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 ### 9.3 개선(자가개선)
 
 - **도메인은 4.8을 정확히 구현하고 있습니다.** 평가 게이트(`proposed → evaluated → awaiting-review → adopted`), 신호 그룹 `required`/`supporting`/`conflict`, 신호 출처 `deterministic`/`independent`/`model-self`, 전후 버전(`beforeVersionId`/`afterVersionId`), 측정 기반 효과 판정(표본 수·임계값·단위)이 모두 존재합니다.
-- **Application 조회 계약은 판정 결과만 내보내고 근거를 버립니다.** 조회는 넷뿐이며 `growth.suggestions` 투영이 `patch_json`(전후 diff), `source_reference_ids`(원인 Event·Evidence), `reflection_run_id`, `revision`을 버립니다. 평가 실행과 신호 영수증은 조회 자체가 없고, 효과는 측정값 없이 판정 한 단어만 전달됩니다. 명령 레지스트리에는 `growth.configure`·`growth.adopt`·`growth.revert`가 이미 있지만 타입이 지정된 `ApplicationCommandMapV1`과 데스크톱 서비스에 연결되지 않았습니다. `evaluate`·명시적 `reject`·효과 관측 명령도 공개 제품 경로에 없습니다.
-- 그래서 화면은 "무엇을 바꾸자"만 보여줄 수 있고 "왜 믿어야 하는가"를 보여줄 수 없습니다. **근거 없는 승인 버튼**이며, 4.8이 막으려던 것을 화면에서 무력화합니다.
-- 데스크톱 `개선` 표면은 이 제약 아래 읽기 전용입니다. 승인·거절 버튼은 비활성이며 이유가 화면에 표시됩니다.
+- (정정 2026-08-09) 이 절은 원래 「조회가 넷뿐이고 `patch_json`·`source_reference_ids`·`reflection_run_id`·`revision`을 버린다」, 「데스크톱 개선 표면은 읽기 전용이고 승인·거절 버튼이 비활성」이라고 적었습니다. **둘 다 해소됐습니다** — `GrowthSuggestionViewV1`이 patch·evaluation(신호 포함)·adoption(전후 버전·checksum)·reflectionRunId·sourceReferenceIds·revision을 모두 내보내고, 데스크톱이 `growth.configure`·`growth.suggestion.approve`·`growth.suggestion.reject`를 타입 경로로 실제 호출합니다.
+- **남은 것 셋.** ① `growth.revert`가 명령 레지스트리에만 있고 `ApplicationCommandMapV1`과 데스크톱에 없어 되돌리기가 공개 제품 경로에 없습니다(`growth.adopt`는 `suggestion.approve` 핸들러가 내부에서 불러 간접 도달합니다). ② 신호의 실제 증거(`evidence_json`)가 투영에서 `note: signal.unit`으로 대체돼 화면의 note에는 항상 단위 문자열만 들어갑니다. ③ 생산 `GrowthWorker`가 만드는 신호 다섯이 전부 `passed`/`1`/`boolean` 상수라, `minimumIndependentSupportingSignals` 게이트가 후보 품질과 무관하게 항상 통과합니다 — 4.8의 「독립된 신호와 반대 근거로 평가」가 실질적으로 「계보 존재 확인」으로 축소돼 있습니다.
+- 화면은 이제 "왜 믿어야 하는가"의 **계약상 근거**를 받습니다. 그러나 ③ 때문에 그 근거의 **내용**이 아직 측정이 아닙니다.
 - 인계 문서: [개선 평가·채택·효과 핸드오프](../phases/30-surface-parity-agent-ux/growth-adoption-handoff.md)
 
 ### 9.4 에이전트 협업 런타임
@@ -411,7 +412,8 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 - 생산 server는 `WorkspaceKnowledgeService`를 통해 Repository·Revision·Indexer·Search·CodeGraph·EvidenceBrief를 Workspace Work intake에 조립하고, 검증된 prompt 자료와 citation을 Agent 실행에 전달합니다. 실제 Provider Work에서도 `work.knowledge=ready`와 reference 2개를 확인했지만, 화면 기반 K01~K04 전체 UAT는 아직 남아 있습니다.
 - Work·Room·Message를 정본으로 유지하면서 Growth의 versioned MemoryVersion·PromptVersion·RuntimeExecution 계보를 생산 WorkService·Agent instruction에 주입했습니다. 명시적 기억은 다음 새 Work부터 적용되고 사용 중지 뒤 이후 Work에서 제외되며 과거 계보는 재작성하지 않습니다. 실제 Provider 재시작 증거에서 memory revision과 Work 실행 계보가 보존됐지만, K03·K04 화면 UAT는 미완료입니다.
 - v1은 기존 relation을 1-hop 검색 확장에 사용하고 EvidenceBrief를 SharedContextReference·ContextVersion·Agent prompt·Work citation에 연결합니다. LSP, embedding provider, SurrealDB native relation 전환은 실제 품질·성능 실패가 측정될 때만 별도 계획을 엽니다.
-- **화면은 근거 목록까지만 답합니다.** `WorkKnowledgeViewV1.references`가 평평한 목록이라 `contains·imports·calls·implements·documents` 관계가 계약에서 잘립니다. 업무 `근거` 탭은 완성본 기준으로 관계를 그려두었고 연결만 기다립니다. 인계: [근거 관계 그래프](../phases/30-surface-parity-agent-ux/knowledge-graph-handoff.md)
+- (정정 2026-08-09) 이 절은 원래 「`WorkKnowledgeViewV1.references`가 평평해 관계가 계약에서 잘린다」고 적었습니다. **관계는 도달합니다** — references 배열 자체는 평평하지만 각 reference의 `provenance.paths[].relation`이 relationId·relationKey·kind(contains·imports·calls·implements·documents)·symbolKey를 담고, 별도 조회 `knowledge.links`가 방향과 미해결 여부를 줍니다. 데스크톱이 둘을 접합해 relationId·checksum까지 대조하고 어긋나면 던집니다.
+- 다만 `documents` 관계는 **추출기가 한 번도 만들지 않습니다**(`extractors.ts`가 contains·imports·calls·implements만 push). 종류가 계약에 선언돼 있는 것과 데이터가 생기는 것은 다릅니다. 인계: [근거 관계 그래프](../phases/30-surface-parity-agent-ux/knowledge-graph-handoff.md)
 - 현재 저장소에는 LSP 구현이 없습니다. Tree-sitter+BM25+1-hop graph의 실제 UAT가 cross-file 정확도 때문에 반복 실패할 때만 LSP adapter 계획을 엽니다. embedding과 SurrealDB native relation 전환도 각각 검색 품질과 순회 성능 실패가 측정될 때만 추가합니다.
 
 ## 10. 다음 목표

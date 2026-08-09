@@ -9,27 +9,38 @@ Massion은 개인이 자기 기계에서 여러 AI 에이전트를 조직처럼 
 첫 메인 릴리스는 **개인용 macOS arm64 데스크톱 앱**입니다.
 
 - 사용자는 내부 식별자 없이 사명을 만들고 필요하면 로컬 워크스페이스와 파일을 문맥으로 추가합니다.
-- 홈·업무·조직·개선·확장·설정과 전역 수신함이 같은 Application 상태를 봅니다.
+- 홈·업무·지식·조직·개선·확장·프로바이더·예산·설정 아홉 표면과 전역 수신함이 같은 Application 상태를 봅니다.
 - 완료는 모델의 선언이 아니라 독립 품질 보증(Assurance)과 기록(Records) 뒤에만 확정됩니다.
 - 앱을 닫아도 로컬 daemon과 SurrealDB 데이터는 남고 다음 실행에서 복원됩니다.
 - Provider가 없어도 조회·승인·취소·진단은 제한 모드로 동작해야 합니다.
-- 사용자가 자율성을 **automatic**(자동 승인, 기본값), **review**(수동 검토), **full**(전체 권한) 중에서 선택합니다. 전체 권한은 Claude·Codex의 dangerous bypass와 같이 모든 승인을 사용자 책임 하에 자동 통과합니다.
+- 사용자가 자율성을 **automatic**(자동 승인, 기본값), **review**(수동 검토), **full-access**(전체 권한) 중에서 선택합니다. 전체 권한은 Claude·Codex의 dangerous bypass와 같이 모든 승인을 사용자 책임 하에 자동 통과합니다.
 
 ## 코드·자동화 검증 범위 (Phase 30)
 
-아래 상태는 코드와 자동화 테스트의 범위이며, 실제 Tauri 사용자 인수 테스트(UAT)·서명·공증·설치/업데이트 검증 완료를 의미하지 않습니다.
+아래는 **자동화 테스트가 통과한 범위**이며, 그 자체로 제품 완주를 뜻하지 않습니다. 실제 제품 상태
+판정은 [정본 인계서 §0.H](docs/phases/30-surface-parity-agent-ux/aaa-v1-continuation-handoff-2026-08-05.md)가
+소유합니다 — 거기서 Work lifecycle과 협업방은 `blocked`입니다. 도메인 테스트가 GREEN인 것과
+Application·Server·Desktop이 연결됐다는 것은 다른 주장입니다(같은 문서 §0.E.1).
 
-| 영역                                                       | 상태      | 검증                      |
-| ---------------------------------------------------------- | --------- | ------------------------- |
-| 홈·워크스페이스 문맥                                       | 구현 완료 | desktop 89 test 통과      |
-| 네이티브 폴더·파일 선택                                    | 구현 완료 | desktop test 통과         |
-| 코드 지식(Evidence)·검색·그래프                            | 구현 완료 | evidence 66 test 통과     |
-| Core 파이프라인에 지식 연결                                | 구현 완료 | application 340 test 통과 |
-| 명시적 개인 기억(memory) 주입                              | 구현 완료 | growth 96 test 통과       |
-| 전체 권한 실행 모드                                        | 구현 완료 | governance 65 test 통과   |
-| 수신함 UX 정합                                             | 구현 완료 | desktop test 통과         |
-| Core 전체 경로(Representative→Strategy→Delivery→Assurance) | 구현 완료 | server 238 test 통과      |
-| 독립 검증·기록·완료                                        | 구현 완료 | server 통합 테스트 통과   |
+| 영역                              | 코드·테스트 | 제품 상태(§0.H) | 스위트                      |
+| --------------------------------- | ----------- | --------------- | --------------------------- |
+| 홈·워크스페이스 문맥·수신함       | 통과        | `partial`       | desktop 282                 |
+| 네이티브 폴더·파일 선택           | 통과        | `partial`       | desktop 282                 |
+| 코드 지식(Evidence)·검색·그래프   | 통과        | `partial`       | evidence 78                 |
+| Core 파이프라인·Application 계약  | 통과        | `blocked`       | application 534             |
+| 명시적 개인 기억(memory)·자가개선 | 통과        | `partial`       | growth 145                  |
+| 전체 권한 실행 모드·정책·승인     | 통과        | `partial`       | governance 77               |
+| Work 도메인·협업방 계약           | 통과        | `blocked`       | work 80                     |
+| 모델 라우팅·fallback·credential   | 통과        | `partial`       | router 97                   |
+| 모델 평가실·역할별 배치           | 통과        | `partial`       | model-optimization 53       |
+| Extension 설치·격리·레지스트리    | 통과        | `partial`       | extension-host 154 · sdk 35 |
+| Core 전체 경로·독립 검증·기록     | 통과        | `blocked`       | server 346                  |
+
+개수는 2026-08-09 실측입니다. 문서가 아니라 실행이 정본이므로 다음 명령으로 다시 확인합니다.
+
+```sh
+pnpm -r --workspace-concurrency=1 test
+```
 
 ## 릴리스 게이트 상태
 
