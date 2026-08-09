@@ -6,6 +6,11 @@
 > Master 보강 시작 source HEAD: `92ed55d5d06145947b1598c4f7a112311692b7bc`
 > Master 보강 commit: `git log -1 --oneline -- docs/phases/30-surface-parity-agent-ux/aaa-v1-continuation-handoff-2026-08-05.md`로 확인
 > 제품 상태: **완료 아님 — 목표 일시 정지(paused), 아래 임계 경로부터 재개 필요**
+>
+> **후속 세션 기록(2026-08-09)**: [`provider-surface-and-fallback-handoff-2026-08-09.md`](provider-surface-and-fallback-handoff-2026-08-09.md)가
+> 이 문서의 §7.4·§10 단계 1~2를 실제로 실행한 결과입니다. Codex fallback 배선, Provider 표면 전반,
+> SurrealDB 트랜잭션 유실을 다루며 커밋 22건을 남겼습니다. 두 문서가 충돌하면 더 최근 실행 기록인
+> 그쪽이 이깁니다. 단계 3(§7.5 협업방 배선) 이후는 이 문서가 그대로 정본입니다.
 
 이 문서는 다음 구현 에이전트가 이전 채팅 전체를 읽지 않고도 프로젝트의 배경·의도·의사결정·구현 과정·실패·검증·현재 상태를 복원하고 작업을 안전하게 이어가기 위한 master handoff입니다. 오래된 계획 문서나 fixture와 충돌할 때는 현재 소스 코드, Git 상태, 실제 데이터베이스와 런타임 증거를 우선합니다.
 
