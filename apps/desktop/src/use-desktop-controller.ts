@@ -1,4 +1,4 @@
-import { useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { DesktopFilter, DesktopService, DesktopWorkspaceView, StartWorkInput } from "@/desktop-service";
 import type { ApprovalView, WorkView } from "@/model";
@@ -105,6 +105,19 @@ export function useDesktopController(service: DesktopService, outputLocale: "en"
   const workLoadFlightsRef = useRef(new Map<string, WorkLoadFlight>());
   const terminalStabilizationRef = useRef<TerminalStabilization | undefined>(undefined);
   const commandLocks = useRef(new Set<string>());
+  const startWorkRequestRef = useRef(0);
+  const activeServiceRef = useRef(service);
+
+  useLayoutEffect(() => {
+    activeServiceRef.current = service;
+    startWorkRequestRef.current += 1;
+    commandLocks.current.delete("start-work");
+    setStartingWork(false);
+    return () => {
+      startWorkRequestRef.current += 1;
+      commandLocks.current.delete("start-work");
+    };
+  }, [service]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -407,16 +420,17 @@ export function useDesktopController(service: DesktopService, outputLocale: "en"
   const reloadIndex = useCallback(
     async (options: { preserveSelection?: boolean; surfaceError?: boolean } = {}): Promise<WorkView[] | undefined> => {
       const request = ++indexRequestRef.current;
+      const requestService = service;
       try {
-        const next = await service.loadIndex({
+        const next = await requestService.loadIndex({
           filter: filterRef.current,
           locale: outputLocale,
           search: queryRef.current,
         });
-        if (request !== indexRequestRef.current) return undefined;
+        if (request !== indexRequestRef.current || activeServiceRef.current !== requestService) return undefined;
         return applyIndex([...next], options.preserveSelection);
       } catch (error) {
-        if (request !== indexRequestRef.current) return undefined;
+        if (request !== indexRequestRef.current || activeServiceRef.current !== requestService) return undefined;
         if (options.surfaceError) throw error;
         setAnnouncement(errorMessage(error, "Work 목록을 새로 고치지 못했습니다."));
         return undefined;
@@ -780,8 +794,11 @@ export function useDesktopController(service: DesktopService, outputLocale: "en"
       return;
     }
     commandLocks.current.add("start-work");
+    const request = ++startWorkRequestRef.current;
+    const requestService = service;
     setStartingWork(true);
     setNewWorkError("");
+    setNewWorkOpen(false);
     const input: StartWorkInput = {
       text,
       outputLocale,
@@ -789,42 +806,48 @@ export function useDesktopController(service: DesktopService, outputLocale: "en"
       ...(newWorkWorkspacePaths.length === 0 ? {} : { workspacePaths: newWorkWorkspacePaths }),
     };
     const baselineWorkIds = new Set(worksRef.current.map((value) => value.id));
+    let result: Awaited<ReturnType<DesktopService["startWork"]>>;
     try {
-      const result = await service.startWork(input);
-      const ownRunEvent = durableRunEventsRef.current.get(result.runId);
-      durableRunEventsRef.current.clear();
-      if (ownRunEvent) durableRunEventsRef.current.set(result.runId, ownRunEvent);
-      const expectedCorrelationId = `${result.runId}:intake:work`;
-      for (const [workId, correlationId] of durableWorkCorrelationsRef.current) {
-        if (correlationId === expectedCorrelationId) continue;
-        durableWorkCorrelationsRef.current.delete(workId);
-        durableWorkCandidatesRef.current.delete(workId);
-      }
-      const creation: PendingCreation = {
-        runId: result.runId,
-        baselineWorkIds,
-      };
-      pendingCreationRef.current = creation;
-      setPendingCreationState(creation);
-      filterRef.current = "active";
-      setFilterState("active");
-      setNewWorkOpen(false);
-      setNewWorkText("");
-      newWorkWorkspaceRef.current = undefined;
-      setNewWorkWorkspace(undefined);
-      setNewWorkWorkspacePaths([]);
-      setAnnouncement("새 Work 실행을 시작했습니다. Work 생성을 기다리고 있습니다.");
-      const next = await reloadIndex();
-      if (next) await resolvePendingCreation(next);
+      result = await requestService.startWork(input);
     } catch (error) {
+      if (startWorkRequestRef.current !== request || activeServiceRef.current !== requestService) return;
       durableRunEventsRef.current.clear();
       durableWorkCandidatesRef.current.clear();
       durableWorkCorrelationsRef.current.clear();
-      setNewWorkError(errorMessage(error, "새 Work 실행을 시작하지 못했습니다."));
-    } finally {
       commandLocks.current.delete("start-work");
       setStartingWork(false);
+      setNewWorkError(errorMessage(error, "새 Work 실행을 시작하지 못했습니다."));
+      setNewWorkOpen(true);
+      return;
     }
+    if (startWorkRequestRef.current !== request || activeServiceRef.current !== requestService) return;
+    const ownRunEvent = durableRunEventsRef.current.get(result.runId);
+    durableRunEventsRef.current.clear();
+    if (ownRunEvent) durableRunEventsRef.current.set(result.runId, ownRunEvent);
+    const expectedCorrelationId = `${result.runId}:intake:work`;
+    for (const [workId, correlationId] of durableWorkCorrelationsRef.current) {
+      if (correlationId === expectedCorrelationId) continue;
+      durableWorkCorrelationsRef.current.delete(workId);
+      durableWorkCandidatesRef.current.delete(workId);
+    }
+    const creation: PendingCreation = {
+      runId: result.runId,
+      baselineWorkIds,
+    };
+    pendingCreationRef.current = creation;
+    setPendingCreationState(creation);
+    filterRef.current = "active";
+    setFilterState("active");
+    setNewWorkText("");
+    newWorkWorkspaceRef.current = undefined;
+    setNewWorkWorkspace(undefined);
+    setNewWorkWorkspacePaths([]);
+    commandLocks.current.delete("start-work");
+    setStartingWork(false);
+    setAnnouncement("새 Work 실행을 시작했습니다. Work 생성을 기다리고 있습니다.");
+    const next = await reloadIndex();
+    if (next && startWorkRequestRef.current === request && activeServiceRef.current === requestService)
+      await resolvePendingCreation(next);
   };
 
   const registerWorkspace = async (path: string) => {
@@ -936,7 +959,10 @@ export function useDesktopController(service: DesktopService, outputLocale: "en"
     newWork: {
       error: [newWorkError, newWorkPickerError, newWorkWorkspaceLoadError].filter(Boolean).join(" "),
       open: newWorkOpen,
-      setOpen: setNewWorkOpen,
+      setOpen: (open: boolean) => {
+        if (open && commandLocks.current.has("start-work")) return;
+        setNewWorkOpen(open);
+      },
       setText: setNewWorkText,
       setWorkspace: (workspace: DesktopWorkspaceView | undefined) => {
         if (registeringWorkspace || workspace?.trust === "blocked") return;

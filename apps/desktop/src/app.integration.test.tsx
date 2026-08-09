@@ -656,6 +656,94 @@ describe("AgentOS native data flow", () => {
     expect(screen.queryByRole("main", { name: "이전 service의 늦은 Work" })).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["unmount", "resolve"],
+    ["unmount", "reject"],
+    ["service 교체", "resolve"],
+    ["service 교체", "reject"],
+  ] as const)("pending start는 %s 뒤 %s되어도 상태와 후속 I/O를 바꾸지 않는다", async (lifecycle, outcome) => {
+    const user = userEvent.setup();
+    const snapshot = fixtureDataAdapter();
+    const started = deferred<{ runId: string }>();
+    const initialLoadIndex = vi.fn(async () => snapshot.works);
+    const replacementLoadIndex = vi.fn(async () => snapshot.works);
+    const initialService = service({
+      initialSnapshot: snapshot,
+      loadIndex: initialLoadIndex,
+      startWork: async () => await started.promise,
+    });
+    const replacementService = service({ initialSnapshot: snapshot, loadIndex: replacementLoadIndex });
+    const view = render(<App service={initialService} />);
+
+    await user.click(screen.getByRole("button", { name: "새 Work 만들기" }));
+    await user.type(screen.getByRole("textbox", { name: "업무 요청" }), "lifecycle 뒤에는 이어서 처리하지 마");
+    await user.click(screen.getByRole("button", { name: "실행 시작" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "새 Work" })).not.toBeInTheDocument());
+    const initialCalls = initialLoadIndex.mock.calls.length;
+
+    if (lifecycle === "unmount") view.unmount();
+    else {
+      view.rerender(<App service={replacementService} />);
+      await waitFor(() => expect(replacementLoadIndex).toHaveBeenCalled());
+    }
+    const replacementCalls = replacementLoadIndex.mock.calls.length;
+    await act(async () => {
+      if (outcome === "resolve") started.resolve({ runId: "run-stale-start" });
+      else started.reject(new Error("이전 service의 늦은 실패"));
+      await Promise.resolve();
+    });
+
+    expect(initialLoadIndex).toHaveBeenCalledTimes(initialCalls);
+    expect(replacementLoadIndex).toHaveBeenCalledTimes(replacementCalls);
+    if (lifecycle === "service 교체") {
+      expect(screen.queryByText("이전 service의 늦은 실패")).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "새 Work" })).not.toBeInTheDocument();
+    }
+  });
+
+  it.each(["resolve", "reject"] as const)(
+    "service 교체 commit 직후 이전 start가 %s되어도 후속 상태와 I/O를 만들지 않는다",
+    async (outcome) => {
+      const user = userEvent.setup();
+      const snapshot = fixtureDataAdapter();
+      const started = deferred<{ runId: string }>();
+      const replacementBootstrap = deferred<"ready">();
+      const initialLoadIndex = vi.fn(async () => snapshot.works);
+      const replacementLoadIndex = vi.fn(async () => snapshot.works);
+      const initialService = service({
+        initialSnapshot: snapshot,
+        loadIndex: initialLoadIndex,
+        startWork: async () => await started.promise,
+      });
+      const replacementService = service({
+        bootstrap: async () => await replacementBootstrap.promise,
+        initialSnapshot: snapshot,
+        loadIndex: replacementLoadIndex,
+      });
+      const view = render(<App service={initialService} />);
+
+      await user.click(screen.getByRole("button", { name: "새 Work 만들기" }));
+      await user.type(screen.getByRole("textbox", { name: "업무 요청" }), "교체된 service에서는 이어서 처리하지 마");
+      await user.click(screen.getByRole("button", { name: "실행 시작" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "새 Work" })).not.toBeInTheDocument());
+      const initialCalls = initialLoadIndex.mock.calls.length;
+
+      view.rerender(<App service={replacementService} />);
+      const replacementCalls = replacementLoadIndex.mock.calls.length;
+      await act(async () => {
+        if (outcome === "resolve") started.resolve({ runId: "run-stale-immediate" });
+        else started.reject(new Error("교체 직후 도착한 이전 실패"));
+        await Promise.resolve();
+      });
+
+      expect(initialLoadIndex).toHaveBeenCalledTimes(initialCalls);
+      expect(replacementLoadIndex).toHaveBeenCalledTimes(replacementCalls);
+      expect(screen.queryByText("교체 직후 도착한 이전 실패")).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "새 Work" })).not.toBeInTheDocument();
+      replacementBootstrap.resolve("ready");
+    },
+  );
+
   it("StrictMode 재실행과 unmount에서도 selected Work timer를 하나만 유지한다", async () => {
     vi.useFakeTimers();
     try {
@@ -4421,12 +4509,15 @@ describe("AgentOS native data flow", () => {
       ...withoutRun,
       id: "work-buffered-correlation",
       title: "응답 전에 생성된 correlation Work",
+      run: { runId, status: "awaiting-approval", stage: "delivery", leaseGeneration: 1 },
     };
+    const foreignWorkId = "work-buffered-foreign";
     const started = deferred<{ runId: string }>();
     const bufferedStartWork = vi.fn(async () => await started.promise);
     let durable: ((event: unknown) => void) | undefined;
     let createdVisible = false;
     let eventBatchApplied = false;
+    const loadWork = vi.fn(async (workId: string) => (workId === created.id ? created : active));
     render(
       <App
         service={service({
@@ -4436,7 +4527,7 @@ describe("AgentOS native data flow", () => {
             if (createdVisible) eventBatchApplied = true;
             return createdVisible ? [created, active] : [active];
           },
-          loadWork: async (workId) => (workId === created.id ? created : active),
+          loadWork,
           subscribeDurable: async (handler) => {
             durable = handler;
             return async () => undefined;
@@ -4450,7 +4541,14 @@ describe("AgentOS native data flow", () => {
     const submitting = user.click(screen.getByRole("button", { name: "실행 시작" }));
     await waitFor(() => expect(durable).toBeTypeOf("function"));
     await waitFor(() => expect(bufferedStartWork).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog", { name: "새 Work" })).not.toBeInTheDocument();
     createdVisible = true;
+    durable?.({
+      sequence: 74,
+      type: "work.created",
+      correlationId: "run-foreign:intake:work",
+      resource: { type: "Work", id: foreignWorkId, revision: 1 },
+    });
     durable?.({
       sequence: 75,
       type: "work.created",
@@ -4458,11 +4556,20 @@ describe("AgentOS native data flow", () => {
       resource: { type: "Work", id: created.id, revision: 1 },
       payload: { domainSequence: 1 },
     });
+    durable?.({
+      sequence: 76,
+      type: "run.suspended",
+      payload: { workId: created.id },
+      resource: { type: "ApplicationRun", id: runId },
+    });
     await waitFor(() => expect(eventBatchApplied).toBe(true));
+    expect(screen.getByRole("main", { name: active.title })).toBeInTheDocument();
     started.resolve({ runId });
     await submitting;
 
     expect(await screen.findByRole("main", { name: created.title })).toBeInTheDocument();
+    expect(screen.getByText("새 Work가 승인을 기다리고 있습니다.")).toBeInTheDocument();
+    expect(loadWork).not.toHaveBeenCalledWith(foreignWorkId);
     expect(screen.queryByRole("status", { name: "Work 생성 중" })).not.toBeInTheDocument();
   });
 
@@ -5022,7 +5129,7 @@ describe("AgentOS native data flow", () => {
     expect(request).toHaveValue("선택기 오류 뒤에도 남아야 하는 요청");
   });
 
-  it("새 Work 요청 실패 시 입력을 보존하고 중복 실행을 막는다", async () => {
+  it("새 Work 제출은 즉시 모달을 닫고 실패 시 입력·폴더·파일·포커스를 복원한다", async () => {
     const user = userEvent.setup();
     const started = deferred<{ runId: string }>();
     const startWork = vi.fn(async () => await started.promise);
@@ -5037,7 +5144,13 @@ describe("AgentOS native data flow", () => {
       createdAt: "2026-07-24T00:00:00.000Z",
       lastUsedAt: "2026-07-24T00:00:00.000Z",
     };
-    render(<App service={service({ startWork, loadWorkspaces: async () => [workspace] })} />);
+    const contextPicker = {
+      pickDirectory: vi.fn(async () => undefined),
+      pickFiles: vi.fn(async () => ["/tmp/operations/reports/monthly.csv"]),
+    };
+    render(
+      <App contextPicker={contextPicker} service={service({ startWork, loadWorkspaces: async () => [workspace] })} />,
+    );
 
     await user.click(screen.getByRole("button", { name: "새 Work 만들기" }));
     const dialog = screen.getByRole("dialog", { name: "새 Work" });
@@ -5045,14 +5158,140 @@ describe("AgentOS native data flow", () => {
     const submit = within(dialog).getByRole("button", { name: "실행 시작" });
     await user.type(request, "월간 운영 지표를 분석해줘");
     await user.click(await within(dialog).findByRole("button", { name: /운영 폴더/ }));
-    await user.click(submit);
-    await user.click(submit);
+    await user.click(within(dialog).getByRole("button", { name: "파일 첨부" }));
+    expect(within(dialog).getByText("reports/monthly.csv")).toBeInTheDocument();
+    act(() => {
+      submit.click();
+      submit.click();
+    });
 
     expect(startWork).toHaveBeenCalledOnce();
-    started.reject(new Error("실행을 시작하지 못했습니다"));
-    expect(await within(dialog).findByText("실행을 시작하지 못했습니다")).toBeInTheDocument();
-    expect(request).toHaveValue("월간 운영 지표를 분석해줘");
-    expect(within(dialog).getByRole("button", { name: /운영 폴더/ })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "새 Work" })).not.toBeInTheDocument());
+    expect(screen.getByRole("main", { name: (fixtureDataAdapter().works[0] as WorkView).title })).toBeInTheDocument();
+    const pendingStatus = screen.getByRole("status", { name: "새 Work 요청 상태" });
+    const pendingCreateButton = screen.getByRole("button", { name: "새 Work 만들기" });
+    expect(pendingStatus).toHaveTextContent("새 Work 요청을 처리하고 있습니다.");
+    expect(pendingCreateButton).toBeDisabled();
+    expect(pendingCreateButton).toHaveAttribute("aria-describedby", pendingStatus.id);
+    expect(screen.queryByRole("dialog", { name: "새 Work" })).not.toBeInTheDocument();
+    expect(startWork).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      started.reject(new Error("실행을 시작하지 못했습니다"));
+    });
+    const reopened = await screen.findByRole("dialog", { name: "새 Work" });
+    const restoredRequest = within(reopened).getByRole("textbox", { name: "업무 요청" });
+    expect(await within(reopened).findByText("실행을 시작하지 못했습니다")).toBeInTheDocument();
+    expect(restoredRequest).toHaveValue("월간 운영 지표를 분석해줘");
+    expect(within(reopened).getByRole("button", { name: /운영 폴더/ })).toHaveAttribute("aria-pressed", "true");
+    expect(within(reopened).getByText("reports/monthly.csv")).toBeInTheDocument();
+    await waitFor(() => expect(restoredRequest).toHaveFocus());
+    await user.click(within(reopened).getByRole("button", { name: "새 Work 닫기" }));
+    expect(screen.queryByRole("status", { name: "새 Work 요청 상태" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "새 Work 만들기" })).toBeEnabled();
+  });
+
+  it("영어 UI도 pending start 이유를 버튼과 live status에 표시한다", async () => {
+    const started = deferred<{ runId: string }>();
+    try {
+      localStorage.setItem("massion.language.v1", "en");
+      const view = render(
+        <I18nProvider>
+          <App service={service({ startWork: async () => await started.promise })} />
+        </I18nProvider>,
+      );
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Create new Work" }));
+      await user.type(screen.getByRole("textbox", { name: "Work request" }), "Check the pending start state");
+      await user.click(screen.getByRole("button", { name: "Start run" }));
+
+      const status = await screen.findByRole("status", { name: "New Work request status" });
+      const button = screen.getByRole("button", { name: "Create new Work" });
+      expect(status).toHaveTextContent("Processing the new Work request.");
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("title", "Processing the new Work request.");
+
+      await act(async () => {
+        started.reject(new Error("Start failed"));
+      });
+      expect(await screen.findByRole("dialog", { name: "New Work" })).toBeInTheDocument();
+      view.unmount();
+    } finally {
+      localStorage.setItem("massion.language.v1", "ko");
+    }
+  });
+
+  it.each([
+    {
+      create: "새 Work 만들기",
+      dialog: "새 Work",
+      firstCreate: "첫 Work 만들기",
+      home: "홈",
+      locale: "ko",
+      request: "업무 요청",
+      start: "실행 시작",
+      status: "새 Work 요청 상태",
+      statusText: "새 Work 요청을 처리하고 있습니다.",
+      work: "업무",
+    },
+    {
+      create: "Create new Work",
+      dialog: "New Work",
+      firstCreate: "Create your first Work",
+      home: "Home",
+      locale: "en",
+      request: "Work request",
+      start: "Start run",
+      status: "New Work request status",
+      statusText: "Processing the new Work request.",
+      work: "Work",
+    },
+  ] as const)("$locale UI는 pending start를 Home과 Work의 모든 진입점에 유지한다", async (labels) => {
+    const started = deferred<{ runId: string }>();
+    localStorage.setItem("massion.language.v1", labels.locale);
+    const view = render(
+      <I18nProvider>
+        <App
+          service={service({
+            initialSnapshot: { works: [] },
+            loadIndex: async () => [],
+            startWork: async () => await started.promise,
+          })}
+        />
+      </I18nProvider>,
+    );
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: labels.home }));
+    const home = await screen.findByRole("main", { name: labels.home });
+    const homeCreate = within(home).getByRole("button", { name: labels.create });
+    await user.click(homeCreate);
+    await user.type(screen.getByRole("textbox", { name: labels.request }), "Keep the pending state visible");
+    await user.click(screen.getByRole("button", { name: labels.start }));
+
+    const status = await screen.findByRole("status", { name: labels.status });
+    expect(status).toHaveTextContent(labels.statusText);
+    expect(homeCreate).toBeDisabled();
+    expect(homeCreate).toHaveAttribute("aria-describedby", status.id);
+    expect(homeCreate).toHaveAttribute("title", labels.statusText);
+
+    await user.click(screen.getByRole("button", { name: labels.work }));
+    const listCreate = screen.getByRole("button", { name: labels.create });
+    const firstCreate = screen.getByRole("button", { name: labels.firstCreate });
+    expect(screen.getByRole("status", { name: labels.status })).toBe(status);
+    for (const button of [listCreate, firstCreate]) {
+      expect(button).toBeDisabled();
+      expect(button).toHaveAttribute("aria-describedby", status.id);
+      expect(button).toHaveAttribute("title", labels.statusText);
+    }
+
+    await act(async () => {
+      started.reject(new Error("Start failed"));
+    });
+    expect(await screen.findByRole("dialog", { name: labels.dialog })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: labels.status })).not.toBeInTheDocument();
+    view.unmount();
+    localStorage.setItem("massion.language.v1", "ko");
   });
 
   it("다른 워크스페이스를 선택하면 이전 파일 첨부를 지운다", async () => {

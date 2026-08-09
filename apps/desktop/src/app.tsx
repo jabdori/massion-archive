@@ -498,11 +498,23 @@ export function App({ contextPicker = nativeContextPicker, service }: AppProps) 
   return (
     <TooltipProvider delay={350}>
       <div
-        className="app-shell grid min-h-[720px] min-w-[1180px] grid-cols-[var(--sidebar-width)_242px_minmax(420px,1fr)_300px] grid-rows-[minmax(0,1fr)] overflow-hidden bg-canvas text-primary min-[1440px]:grid-cols-[var(--sidebar-width)_264px_minmax(0,1fr)_332px]"
+        className="app-shell relative grid min-h-[720px] min-w-[1180px] grid-cols-[var(--sidebar-width)_242px_minmax(420px,1fr)_300px] grid-rows-[minmax(0,1fr)] overflow-hidden bg-canvas text-primary min-[1440px]:grid-cols-[var(--sidebar-width)_264px_minmax(0,1fr)_332px]"
         data-sidebar-collapsed={sidebarCollapsed}
         data-testid="desktop-shell"
         style={{ "--sidebar-width": sidebarCollapsed ? "4.25rem" : "150px" } as CSSProperties}
       >
+        {controller.newWork.starting ? (
+          <p
+            aria-atomic="true"
+            aria-label={translate("새 Work 요청 상태")}
+            aria-live="polite"
+            className="pointer-events-none absolute bottom-3 left-[calc(var(--sidebar-width)+0.75rem)] z-40 max-w-xs rounded-[5px] border border-border bg-surface-1 px-3 py-2 text-[11px] text-secondary"
+            id="new-work-request-status"
+            role="status"
+          >
+            {translate("새 Work 요청을 처리하고 있습니다.")}
+          </p>
+        ) : null}
         <GlobalRail
           activeSurface={surface}
           collapsed={sidebarCollapsed}
@@ -531,6 +543,7 @@ export function App({ contextPicker = nativeContextPicker, service }: AppProps) 
               pendingCreation={controller.pendingCreation !== undefined}
               query={controller.query}
               selectedId={controller.selectedId}
+              startingWork={controller.newWork.starting}
               works={controller.visibleWorks}
             />
             {controller.work ? (
@@ -575,6 +588,7 @@ export function App({ contextPicker = nativeContextPicker, service }: AppProps) 
                 onCreate={() => {
                   controller.newWork.setOpen(true);
                 }}
+                startingWork={controller.newWork.starting}
               />
             )}
           </>
@@ -605,6 +619,7 @@ export function App({ contextPicker = nativeContextPicker, service }: AppProps) 
             onDecideApproval={(approval, vote) => decideNotification(approval, vote, "확장")}
             registryApproval={registryApproval}
             service={service}
+            startingWork={controller.newWork.starting}
             surface={surface}
             requestedGrowthSuggestionId={requestedGrowthSuggestionId}
           />
@@ -777,6 +792,7 @@ function ProductSurface({
   requestedGrowthSuggestionId,
   registryApproval,
   service,
+  startingWork,
   surface,
 }: {
   approvalBusy: boolean;
@@ -794,6 +810,7 @@ function ProductSurface({
   requestedGrowthSuggestionId: string | undefined;
   registryApproval: ApprovalView | undefined;
   service: DesktopService;
+  startingWork: boolean;
   surface: Exclude<DesktopSurface, "work">;
 }) {
   if (surface === "home")
@@ -804,6 +821,7 @@ function ProductSurface({
         onOpenNotifications={onOpenNotifications}
         onOpenWork={onOpenWork}
         service={service}
+        startingWork={startingWork}
       />
     );
   if (surface === "knowledge") return <KnowledgeSurface onOpenWork={onOpenWork} service={service} />;
@@ -846,7 +864,7 @@ function SurfaceFrame({ children, title }: { children: React.ReactNode; title: s
   );
 }
 
-function WorkEmptySurface({ onCreate }: { onCreate: () => void }) {
+function WorkEmptySurface({ onCreate, startingWork }: { onCreate: () => void; startingWork: boolean }) {
   return (
     <main
       aria-label={translate("업무")}
@@ -856,7 +874,14 @@ function WorkEmptySurface({ onCreate }: { onCreate: () => void }) {
         <Briefcase aria-hidden="true" className="mx-auto mb-4 text-muted" size={32} />
         <h1 className="text-lg font-semibold">{translate("선택한 상태에 Work가 없습니다.")}</h1>
         <p className="mt-2 text-sm text-muted">{translate("왼쪽에서 상태를 바꾸거나 첫 Work를 만들어주세요.")}</p>
-        <Button className="mt-5" onClick={onCreate} variant="primary">
+        <Button
+          aria-describedby={startingWork ? "new-work-request-status" : undefined}
+          className="mt-5"
+          disabled={startingWork}
+          onClick={onCreate}
+          title={startingWork ? translate("새 Work 요청을 처리하고 있습니다.") : undefined}
+          variant="primary"
+        >
           <Plus aria-hidden="true" size={16} />
           {translate("첫 Work 만들기")}
         </Button>
@@ -871,12 +896,14 @@ function HomeSurface({
   onOpenNotifications,
   onOpenWork,
   service,
+  startingWork,
 }: {
   inboxItems: InboxItem[] | undefined;
   onCreate: () => void;
   onOpenNotifications: () => void;
   onOpenWork: (workId: string) => void;
   service: DesktopService;
+  startingWork: boolean;
 }) {
   const [works, setWorks] = useState<WorkView[]>();
   const [error, setError] = useState("");
@@ -909,8 +936,12 @@ function HomeSurface({
       {/* 새 사명은 상시 진입점입니다. 현황이 주인공이고 입력은 항상 닿는 곳에 둡니다. */}
       <section aria-label={translate("새 사명")} className="mb-7 max-w-4xl">
         <button
+          aria-describedby={startingWork ? "new-work-request-status" : undefined}
+          aria-label={translate("새 Work 만들기")}
           className="flex w-full items-center gap-3 rounded-[7px] border border-line-strong bg-surface-1 px-4 py-3 text-left outline-none hover:bg-surface-2"
+          disabled={startingWork}
           onClick={onCreate}
+          title={startingWork ? translate("새 Work 요청을 처리하고 있습니다.") : undefined}
           type="button"
         >
           <Plus aria-hidden="true" className="text-muted" size={17} />
@@ -6587,6 +6618,7 @@ interface WorkListProps {
   filter: DesktopFilter;
   query: string;
   pendingCreation: boolean;
+  startingWork: boolean;
   onCreate: () => void;
   onSelect: (id: string) => void;
   onFilterChange: (filter: DesktopFilter) => void;
@@ -6602,6 +6634,7 @@ function WorkList({
   pendingCreation,
   query,
   selectedId,
+  startingWork,
   works,
 }: WorkListProps) {
   return (
@@ -6611,9 +6644,19 @@ function WorkList({
     >
       <header className="flex items-center justify-between border-b border-border px-3">
         <h2 className="text-[15px] font-semibold tracking-[-0.015em]">{translate("업무")}</h2>
-        <Button aria-label={translate("새 Work 만들기")} onClick={onCreate} size="icon" variant="ghost">
-          <Plus aria-hidden="true" size={17} />
-        </Button>
+        <div className="flex items-center">
+          <Button
+            aria-describedby={startingWork ? "new-work-request-status" : undefined}
+            aria-label={translate("새 Work 만들기")}
+            disabled={startingWork}
+            onClick={onCreate}
+            size="icon"
+            title={startingWork ? translate("새 Work 요청을 처리하고 있습니다.") : undefined}
+            variant="ghost"
+          >
+            <Plus aria-hidden="true" size={17} />
+          </Button>
+        </div>
       </header>
       <div className="space-y-2 border-b border-border px-2.5 py-2.5">
         <label className="relative block">

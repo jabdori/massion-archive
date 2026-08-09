@@ -626,6 +626,8 @@ export const appEnglishMessages = {
   "불러오는 중…": "Loading…",
   "Work 목록": "Work list",
   "새 Work 만들기": "Create new Work",
+  "새 Work 요청 상태": "New Work request status",
+  "새 Work 요청을 처리하고 있습니다.": "Processing the new Work request.",
   "Work 검색": "Search Work",
   "Work 상태": "Work status",
   "Work 생성 중": "Creating Work",
