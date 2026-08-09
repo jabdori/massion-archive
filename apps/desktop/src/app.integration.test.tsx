@@ -770,6 +770,9 @@ describe("AgentOS native data flow", () => {
   it("durable 갱신은 선택한 Work의 방만 다시 읽고 탭·오류·이전 성공 데이터를 보존한다", async () => {
     const user = userEvent.setup();
     const work = fixtureDataAdapter().works[0] as WorkView;
+    // 이 테스트는 durable 이벤트가 «방만» 다시 읽는지를 봅니다. 실행 중인 run이 붙어 있으면
+    // 무관한 배경 조정 폴러가 무장해 loadWork를 부르고, 단언이 시간에 따라 뒤집힙니다.
+    delete work.run;
     const atlas: SpeakerView = {
       handle: "representative",
       name: "Atlas",
@@ -2353,11 +2356,11 @@ describe("AgentOS native data flow", () => {
     expect(within(workRow).getByText("차단됨")).toHaveClass("text-halt");
     expect(within(runStatus).getByText("차단됨")).toHaveClass("text-halt");
     expect(runStatus).not.toHaveTextContent(/막힘|중단됨|에서 멈춤/u);
-    await user.click(within(runStatus).getByRole("button", { name: "폴더 신뢰" }));
+    await user.click(within(runStatus).getByRole("button", { name: "신뢰하기" }));
     const settings = await screen.findByRole("main", { name: "설정" });
-    const workspaceTrust = within(settings).getByRole("region", { name: "작업공간 신뢰" });
+    const workspaceTrust = within(settings).getByRole("region", { name: "워크스페이스 신뢰" });
     expect(workspaceTrust).toHaveFocus();
-    expect(within(workspaceTrust).getByRole("button", { name: "ops-runbook 신뢰" })).toBeInTheDocument();
+    expect(within(workspaceTrust).getByRole("button", { name: "ops-runbook 신뢰하기" })).toBeInTheDocument();
     expect(resumeRun).not.toHaveBeenCalled();
   });
 
@@ -2438,7 +2441,10 @@ describe("AgentOS native data flow", () => {
       title: `${status} 실행 업무`,
       run: { runId: `run-${status}-status`, status, stage: "delivery", leaseGeneration: 1 },
     }));
+    // base가 실행을 갖든 말든 이 Work에는 실행이 없어야 합니다. spread에 기대면 fixture가
+    // 바뀌는 순간 «실행 없는 업무»가 조용히 실행을 갖습니다.
     const withoutRun: WorkView = { ...base, approvals: [], id: "work-without-run", title: "실행 없는 업무" };
+    delete withoutRun.run;
     const works = [awaiting, ready, running, withoutRun, ...excluded];
     render(
       <App
@@ -2720,18 +2726,18 @@ describe("AgentOS native data flow", () => {
     render(<App service={service({ loadWorkspaces, decideWorkspaceTrust })} />);
 
     await user.click(screen.getByRole("button", { name: "설정" }));
-    const section = await screen.findByRole("region", { name: "작업공간 신뢰" });
-    for (const title of ["권한", "자가개선", "작업공간 신뢰"]) {
+    const section = await screen.findByRole("region", { name: "워크스페이스 신뢰" });
+    for (const title of ["권한", "자가개선", "워크스페이스 신뢰"]) {
       expect(screen.getByRole("heading", { name: title, level: 2 })).toBeInTheDocument();
     }
     const pendingRow = within(section).getByRole("row", { name: /검토 폴더/u });
     expect(pendingRow).toHaveTextContent("/tmp/pending");
-    expect(pendingRow).toHaveTextContent("신뢰 대기 (pending)");
+    expect(pendingRow).toHaveTextContent("확인 전");
     expect(pendingRow).toHaveTextContent("개정 1");
-    expect(within(section).getByRole("row", { name: /차단 폴더/u })).toHaveTextContent("차단됨 (blocked)");
-    expect(within(section).getByRole("row", { name: /신뢰 폴더/u })).toHaveTextContent("신뢰됨 (trusted)");
+    expect(within(section).getByRole("row", { name: /차단 폴더/u })).toHaveTextContent("차단됨");
+    expect(within(section).getByRole("row", { name: /신뢰 폴더/u })).toHaveTextContent("신뢰함");
 
-    const trustButton = within(pendingRow).getByRole("button", { name: "검토 폴더 신뢰" });
+    const trustButton = within(pendingRow).getByRole("button", { name: "검토 폴더 신뢰하기" });
     await user.click(trustButton);
     await user.click(trustButton);
     expect(decideWorkspaceTrust).toHaveBeenCalledOnce();
@@ -2740,7 +2746,7 @@ describe("AgentOS native data flow", () => {
 
     response.resolve({ ...pending, name: "서버가 돌려준 폴더", trust: "trusted", revision: 9 });
     const updatedRow = await within(section).findByRole("row", { name: /서버가 돌려준 폴더/u });
-    expect(updatedRow).toHaveTextContent("신뢰됨 (trusted)");
+    expect(updatedRow).toHaveTextContent("신뢰함");
     expect(updatedRow).toHaveTextContent("개정 9");
     expect(within(section).getByRole("row", { name: /차단 폴더/u })).toHaveTextContent("개정 2");
     expect(loadWorkspaces).toHaveBeenCalledOnce();
@@ -2755,18 +2761,18 @@ describe("AgentOS native data flow", () => {
     render(<App service={service({ loadWorkspaces: async () => [trusted], decideWorkspaceTrust })} />);
 
     await user.click(screen.getByRole("button", { name: "설정" }));
-    const section = await screen.findByRole("region", { name: "작업공간 신뢰" });
-    await user.click(within(section).getByRole("button", { name: "신뢰 폴더 신뢰 회수" }));
+    const section = await screen.findByRole("region", { name: "워크스페이스 신뢰" });
+    await user.click(within(section).getByRole("button", { name: "신뢰 폴더 신뢰 해제" }));
     expect(decideWorkspaceTrust).not.toHaveBeenCalled();
 
-    const confirmation = await screen.findByRole("alertdialog", { name: "신뢰 회수 확인" });
+    const confirmation = await screen.findByRole("alertdialog", { name: "신뢰를 해제할까요?" });
     expect(confirmation).toHaveTextContent("/tmp/trusted");
-    await user.click(within(confirmation).getByRole("button", { name: "신뢰 폴더 회수하고 차단" }));
+    await user.click(within(confirmation).getByRole("button", { name: "신뢰 폴더 신뢰 해제" }));
 
     expect(await within(section).findByRole("alert")).toHaveTextContent("workspace revision이 일치하지 않습니다");
     expect(decideWorkspaceTrust).toHaveBeenCalledWith(trusted, "blocked");
     const unchangedRow = within(section).getByRole("row", { name: /신뢰 폴더/u });
-    expect(unchangedRow).toHaveTextContent("신뢰됨 (trusted)");
+    expect(unchangedRow).toHaveTextContent("신뢰함");
     expect(unchangedRow).toHaveTextContent("개정 3");
   });
 
@@ -2778,14 +2784,14 @@ describe("AgentOS native data flow", () => {
     render(<App service={service({ loadWorkspaces: async () => [current], decideWorkspaceTrust })} />);
 
     await user.click(screen.getByRole("button", { name: "설정" }));
-    const section = await screen.findByRole("region", { name: "작업공간 신뢰" });
-    await user.click(within(section).getByRole("button", { name: "현재 폴더 신뢰" }));
+    const section = await screen.findByRole("region", { name: "워크스페이스 신뢰" });
+    await user.click(within(section).getByRole("button", { name: "현재 폴더 신뢰하기" }));
 
     expect(await within(section).findByRole("alert")).toHaveTextContent(
-      "작업공간 신뢰 응답의 식별자가 요청과 일치하지 않습니다.",
+      "워크스페이스 신뢰 응답의 식별자가 요청과 일치하지 않습니다.",
     );
     const unchangedRow = within(section).getByRole("row", { name: /현재 폴더/u });
-    expect(unchangedRow).toHaveTextContent("신뢰 대기 (pending)");
+    expect(unchangedRow).toHaveTextContent("확인 전");
     expect(unchangedRow).toHaveTextContent("개정 4");
     expect(within(section).queryByText("다른 폴더")).not.toBeInTheDocument();
     expect(decideWorkspaceTrust).toHaveBeenCalledWith(current, "trusted");
@@ -2806,7 +2812,7 @@ describe("AgentOS native data flow", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "설정" }));
-    const section = await screen.findByRole("region", { name: "작업공간 신뢰" });
+    const section = await screen.findByRole("region", { name: "워크스페이스 신뢰" });
     expect(within(section).getByRole("row", { name: /검토 폴더/u })).toBeInTheDocument();
     expect(screen.getByText("권한 조회 실패")).toBeInTheDocument();
   });
@@ -2826,7 +2832,7 @@ describe("AgentOS native data flow", () => {
     await user.click(screen.getByRole("button", { name: "설정" }));
     const permissions = await screen.findByRole("region", { name: "권한" });
     expect(within(permissions).getByRole("button", { name: "전체 권한" })).toBeInTheDocument();
-    const workspaces = screen.getByRole("region", { name: "작업공간 신뢰" });
+    const workspaces = screen.getByRole("region", { name: "워크스페이스 신뢰" });
     expect(within(workspaces).getByRole("alert")).toHaveTextContent("작업공간 목록 조회 실패");
   });
 
@@ -4370,12 +4376,12 @@ describe("AgentOS native data flow", () => {
     await user.click(screen.getByRole("button", { name: "새 Work 만들기" }));
     const dialog = screen.getByRole("dialog", { name: "새 Work" });
     await user.click(await within(dialog).findByRole("button", { name: /A 폴더/ }));
-    await user.click(within(dialog).getByRole("button", { name: "신뢰" }));
+    await user.click(within(dialog).getByRole("button", { name: "신뢰하기" }));
     await user.click(within(dialog).getByRole("button", { name: /B 폴더/ }));
     await user.click(within(dialog).getByRole("button", { name: "파일 첨부" }));
     trust.resolve({ ...pending, trust: "trusted", revision: 2 });
 
-    await waitFor(() => expect(within(dialog).getByRole("button", { name: /A 폴더/ })).toHaveTextContent("신뢰됨"));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: /A 폴더/ })).toHaveTextContent("신뢰함"));
     await waitFor(() =>
       expect(within(dialog).getByRole("button", { name: /B 폴더/ })).toHaveAttribute("aria-pressed", "true"),
     );
@@ -4470,7 +4476,7 @@ describe("AgentOS native data flow", () => {
     expect(within(dialog).getByText("src/current.ts")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "폴더 추가" }));
     expect(within(dialog).queryByText("src/current.ts")).not.toBeInTheDocument();
-    await user.click(within(dialog).getByRole("button", { name: "신뢰" }));
+    await user.click(within(dialog).getByRole("button", { name: "신뢰하기" }));
 
     expect(await within(dialog).findByText("workspace revision이 일치하지 않습니다")).toBeInTheDocument();
     expect(loadWorkspaces).toHaveBeenCalledTimes(2);

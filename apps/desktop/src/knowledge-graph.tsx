@@ -689,7 +689,7 @@ export function KnowledgeGraphCanvas({
     <div className="relative h-full w-full overflow-hidden" ref={wrapRef}>
       <canvas
         aria-describedby="knowledge-graph-help"
-        aria-label={`${label} — 노드 ${String(graph.nodes.length)}개, 연결 ${String(graph.edges.length)}개`}
+        aria-label={`${translate(label)} — ${translate("노드")} ${formatLocalizedNumber(graph.nodes.length)} · ${translate("연결")} ${formatLocalizedNumber(graph.edges.length)}`}
         className="cursor-grab"
         onKeyDown={(event) => {
           const step = event.shiftKey ? 120 : 40;
@@ -819,7 +819,7 @@ export function KnowledgeGraphCanvas({
           ] as const
         ).map((control) => (
           <button
-            aria-label={control.label}
+            aria-label={translate(control.label)}
             className="flex size-7 items-center justify-center rounded-[5px] border border-border bg-chrome text-[12px] text-muted hover:text-primary"
             key={control.label}
             onClick={() => {

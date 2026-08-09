@@ -136,7 +136,6 @@ import {
   type SpeakerView,
   type VerificationCriterionStatus,
   type QueuedDirectiveView,
-  type ReasoningEffort,
   type WorkStatus,
   type WorkView,
 } from "@/model";
@@ -146,7 +145,9 @@ import { nativeContextPicker, type NativeContextPicker } from "@/native-context-
 import {
   formatLocalizedCompactNumber,
   formatLocalizedDateTime,
+  formatLocalizedMonth,
   formatLocalizedNumber,
+  formatLocalizedWeekday,
   translate,
   useI18n,
 } from "@/i18n/context";
@@ -976,7 +977,9 @@ function HomeSurface({
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-[13px] font-medium">{item.title}</span>
                           {/* 차단 원인을 구별해 보입니다. 모델 부재와 폴더 신뢰는 할 일이 완전히 다릅니다. */}
-                          <span className="block truncate font-mono text-[11px] text-halt">{item.reason}</span>
+                          <span className="block truncate font-mono text-[11px] text-halt">
+                            {translate(item.reason)}
+                          </span>
                         </span>
                         <span className="shrink-0 text-[11px] text-halt">{translate("차단됨")}</span>
                       </button>
@@ -1247,7 +1250,7 @@ function BlockedInboxCard({
         </button>
       </h3>
       {/* 차단 원인을 구별해 보입니다. 모델 부재와 폴더 신뢰는 할 일이 완전히 다릅니다. */}
-      <p className="mt-1.5 text-[12px] leading-5 text-halt">{item.reason}</p>
+      <p className="mt-1.5 text-[12px] leading-5 text-halt">{translate(item.reason)}</p>
     </section>
   );
 }
@@ -1265,7 +1268,7 @@ function GrowthInboxCard({
   return (
     <section
       className="rounded-[7px] border border-gate-border bg-gate-wash px-3.5 py-3"
-      title={`개선 제안 ${item.suggestionId}`}
+      title={`${translate("개선 제안")} ${item.suggestionId}`}
     >
       <h3 className="text-[13px] font-medium">
         <button
@@ -1507,7 +1510,9 @@ function KnowledgeSurface({ onOpenWork, service }: { onOpenWork: (workId: string
                 </select>
                 {workspace && workspace.trust !== "trusted" ? (
                   <p className={`mt-1.5 text-[11px] ${workspace.trust === "blocked" ? "text-halt" : "text-gate"}`}>
-                    {workspace.trust === "blocked" ? "차단된 폴더입니다" : "신뢰 확인 전이라 읽지 않았습니다"}
+                    {translate(
+                      workspace.trust === "blocked" ? "차단된 폴더입니다" : "아직 신뢰하지 않아 읽지 않았습니다",
+                    )}
                   </p>
                 ) : null}
               </div>
@@ -1516,7 +1521,7 @@ function KnowledgeSurface({ onOpenWork, service }: { onOpenWork: (workId: string
                   const current = item.kind === lens;
                   return (
                     <button
-                      aria-label={`${item.title} 지도`}
+                      aria-label={`${translate(item.title)} ${translate("지도")}`}
                       aria-pressed={current}
                       className={`relative flex w-full items-center gap-2 px-3 py-2.5 text-left outline-none transition-colors duration-150 ${
                         current
@@ -1530,8 +1535,8 @@ function KnowledgeSurface({ onOpenWork, service }: { onOpenWork: (workId: string
                       type="button"
                     >
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] font-medium">{item.title}</span>
-                        <span className="block truncate text-[11px] text-muted">{item.hint}</span>
+                        <span className="block truncate text-[13px] font-medium">{translate(item.title)}</span>
+                        <span className="block truncate text-[11px] text-muted">{translate(item.hint)}</span>
                       </span>
                     </button>
                   );
@@ -1559,7 +1564,7 @@ function KnowledgeSurface({ onOpenWork, service }: { onOpenWork: (workId: string
       <div className="relative grid min-h-0 min-w-0 grid-rows-[46px_minmax(0,1fr)] border-r border-border">
         <header className="flex min-w-0 items-center gap-2 border-b border-border px-5">
           <h2 className="truncate text-[15px] font-semibold tracking-[-0.015em]">
-            {KNOWLEDGE_LENSES.find((item) => item.kind === lens)?.title ?? "지도"}
+            {translate(KNOWLEDGE_LENSES.find((item) => item.kind === lens)?.title ?? "지도")}
           </h2>
           {index?.status === "ready" && graph ? (
             /*
@@ -1623,9 +1628,11 @@ function KnowledgeSurface({ onOpenWork, service }: { onOpenWork: (workId: string
                   {translate("이 워크스페이스는 아직 색인되지 않았습니다.")}
                 </p>
                 <p className="mt-1.5 text-[12px] leading-5 text-muted">
-                  {workspace?.trust === "trusted"
-                    ? "현재 사용할 수 있는 색인이 없습니다. 새 업무가 이 폴더를 사용하면 자동으로 색인됩니다."
-                    : "폴더를 신뢰해야 조직이 내용을 읽습니다."}
+                  {translate(
+                    workspace?.trust === "trusted"
+                      ? "현재 사용할 수 있는 색인이 없습니다. 새 업무가 이 폴더를 사용하면 자동으로 색인됩니다."
+                      : "폴더를 신뢰해야 조직이 내용을 읽습니다.",
+                  )}
                 </p>
               </div>
             </div>
@@ -2310,7 +2317,7 @@ function OrgTempTeam({
         <span className="text-[11px] text-muted">{team.name}</span>
       </div>
       <p className="mt-1 text-[11px] text-muted">
-        {parent ? `${agentIdentityToken(parent.handle).name} 아래 편성 · ` : ""}
+        {parent ? `${agentIdentityToken(parent.handle).name} ${translate("아래 편성")} · ` : ""}
         {translate("업무가 끝나면 사라집니다")}
       </p>
     </button>
@@ -2361,7 +2368,7 @@ function OrgMapNode({
     >
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <button
-        aria-label={`지도에서 ${name} 선택`}
+        aria-label={`${translate("지도에서 선택")}: ${name}`}
         aria-pressed={selected}
         className="nopan block rounded-[5px]"
         onClick={() => {
@@ -2707,7 +2714,9 @@ function ExtensionSurface({
           {entries === undefined && !error ? <SurfaceLoading /> : null}
           {entries !== undefined && visible.length === 0 ? (
             <p className="px-3 py-8 text-center text-sm text-muted">
-              {all.length === 0 ? "설치된 확장도, 받을 수 있는 확장도 없습니다." : "검색과 일치하는 확장이 없습니다."}
+              {translate(
+                all.length === 0 ? "설치된 확장도, 받을 수 있는 확장도 없습니다." : "검색과 일치하는 확장이 없습니다.",
+              )}
             </p>
           ) : (
             <div className="divide-y divide-border border-b border-border">
@@ -2731,8 +2740,8 @@ function ExtensionSurface({
                   <span className="mt-0.5 flex items-baseline justify-between gap-2 text-[11px]">
                     <span className={item.installed ? "text-secondary" : "text-muted"}>
                       {item.installed
-                        ? `● ${extensionStateLabel(item.state)}`
-                        : `○ ${provenanceLabel[item.provenance] ?? "받을 수 있음"}`}
+                        ? `● ${translate(extensionStateLabel(item.state))}`
+                        : `○ ${translate(provenanceLabel[item.provenance] ?? "받을 수 있음")}`}
                     </span>
                     <span className="shrink-0 font-mono text-muted">{item.version}</span>
                   </span>
@@ -2755,7 +2764,9 @@ function ExtensionSurface({
               </span>
               <span className="flex-1" />
               {selected.installed ? (
-                <span className="shrink-0 text-[11px] text-secondary">{extensionStateLabel(selected.state)}</span>
+                <span className="shrink-0 text-[11px] text-secondary">
+                  {translate(extensionStateLabel(selected.state))}
+                </span>
               ) : (
                 <button
                   className="shrink-0 rounded-[5px] bg-gate px-3 py-1 text-[12px] font-medium text-gate-ink hover:brightness-110 disabled:opacity-50"
@@ -2795,9 +2806,11 @@ function ExtensionSurface({
                   </ul>
                 ) : (
                   <p className="text-[12px] leading-5 text-muted">
-                    {busy === selected.id
-                      ? "선언을 읽는 중…"
-                      : "이 확장이 조직에 무엇을 더하는지 계약이 알려주지 않습니다. 설치 레코드만 있습니다."}
+                    {translate(
+                      busy === selected.id
+                        ? "선언을 읽는 중…"
+                        : "이 확장이 조직에 무엇을 더하는지 계약이 알려주지 않습니다. 설치 레코드만 있습니다.",
+                    )}
                   </p>
                 )}
               </GrowthSection>
@@ -2809,7 +2822,7 @@ function ExtensionSurface({
                       <li className="grid grid-cols-[92px_minmax(0,1fr)] items-baseline gap-2 py-2" key={entry.kind}>
                         <span className="text-[12px] text-muted">{translate(permissionLabel[entry.kind])}</span>
                         <span className="min-w-0 font-mono text-[11px] text-primary">
-                          {entry.items.filter((item) => item.length > 0).join(" · ") || "사용함"}
+                          {entry.items.filter((item) => item.length > 0).join(" · ") || translate("사용함")}
                         </span>
                       </li>
                     ))}
@@ -2871,7 +2884,9 @@ function ExtensionSurface({
           {selected ? (
             <section>
               <h3 className="text-[10px] font-semibold tracking-[0.08em] text-muted">{translate("출처")}</h3>
-              <p className="mt-1.5 text-[12px] text-primary">{provenanceLabel[selected.provenance] ?? "알 수 없음"}</p>
+              <p className="mt-1.5 text-[12px] text-primary">
+                {translate(provenanceLabel[selected.provenance] ?? "알 수 없음")}
+              </p>
               <p className="mt-0.5 font-mono text-[11px] text-fg-3" title={translate("패키지 이름")}>
                 {selected.packageName}
               </p>
@@ -3151,9 +3166,11 @@ function GrowthSurface({
           {visible.length === 0 ? (
             // 제안이 하나도 없는 것과 필터에 걸리는 게 없는 것은 다른 사실입니다.
             <p className="px-3 py-8 text-center text-sm text-muted">
-              {suggestions.length === 0
-                ? "조직이 아직 바꾸자고 제안한 것이 없습니다."
-                : "승인을 기다리는 제안이 없습니다."}
+              {translate(
+                suggestions.length === 0
+                  ? "조직이 아직 바꾸자고 제안한 것이 없습니다."
+                  : "승인을 기다리는 제안이 없습니다.",
+              )}
             </p>
           ) : (
             // grid는 아이템의 min-width가 auto라 긴 제목이 열을 밀어냅니다. 업무 목록과 같은 방식을 씁니다.
@@ -3198,9 +3215,9 @@ function GrowthSurface({
               {/* 무엇을 바꾸는지는 위험도와 직결됩니다. 원시 enum이 아니라 사람의 말로 씁니다. */}
               <span
                 className="shrink-0 rounded-[3px] border border-control px-1.5 text-[10px] text-muted"
-                title={growthTargetToken(selected.targetKind).description}
+                title={translate(growthTargetToken(selected.targetKind).description)}
               >
-                {growthTargetToken(selected.targetKind).label}
+                {translate(growthTargetToken(selected.targetKind).label)}
               </span>
               <span className={`shrink-0 text-[11px] ${growthStatusTone(selected)}`}>
                 {growthStatusLabel(selected)}
@@ -3251,7 +3268,7 @@ function GrowthSurface({
                           : "border-danger text-danger"
                       }`}
                     >
-                      {growthEvaluationLabel(selected.evaluation.outcome)}
+                      {translate(growthEvaluationLabel(selected.evaluation.outcome))}
                     </span>
                     <span className="text-[11px] text-muted">
                       {translate("평가 전략")} {selected.evaluation.strategyVersionId.replace(/^strategy-/u, "")}
@@ -3361,7 +3378,7 @@ function GrowthSurface({
                         <dt className="text-[12px] text-danger">{translate("되돌림")}</dt>
                         <dd className="flex flex-wrap items-baseline gap-2 text-danger">
                           {/* 되돌린 사유는 도메인에 저장되지 않아 연결된 효과 판정에서 읽습니다. */}
-                          {effect?.result === "degraded" ? "효과 저하" : "명시적 되돌리기"}
+                          {translate(effect?.result === "degraded" ? "효과 저하" : "명시적 되돌리기")}
                           <span className="font-mono text-[11px]">{growthDate(selected.adoption.revertedAt)}</span>
                         </dd>
                       </div>
@@ -3418,7 +3435,7 @@ function GrowthSurface({
                       <span className="mx-1.5 text-muted">→</span>
                       <span className="font-mono tabular-nums text-primary">{effect.measure.score}</span>
                       <span className="ml-2 text-[11px] text-muted">
-                        {effect.measure.direction === "lower" ? "낮을수록 좋음" : "높을수록 좋음"}
+                        {translate(effect.measure.direction === "lower" ? "낮을수록 좋음" : "높을수록 좋음")}
                       </span>
                     </GrowthField>
                     <GrowthField label={translate("표본")}>
@@ -3451,7 +3468,7 @@ function GrowthSurface({
                   <div className="flex flex-wrap items-center gap-2">
                     {/* 막힌 것은 승인할 수 없습니다. 위에서 ⊘로 말한 것을 버튼이 뒤집지 않습니다. */}
                     <span className="flex-1 text-[11px] text-muted">
-                      {blockers.length ? "막힌 것을 푼 뒤 승인할 수 있습니다" : ""}
+                      {blockers.length ? translate("막힌 것을 푼 뒤 승인할 수 있습니다") : ""}
                     </span>
                     <DecisionActions
                       approveName={selected.summary}
@@ -3552,24 +3569,29 @@ function GrowthSurface({
                   <option value="procedure">{translate("절차")}</option>
                 </select>
               </label>
-              <Textarea
-                aria-label={translate("기억 내용")}
-                disabled={memorySaving}
-                maxLength={4000}
-                onChange={(event) => {
-                  setMemoryValue(event.target.value);
-                }}
-                placeholder={translate("다음 업무부터 기억할 내용을 적어주세요")}
-                rows={3}
-                value={memoryValue}
-              />
+              {/* Textarea는 테두리 없는 «방 입력창»용입니다. 여기서는 옆의 select와 같은 상자를
+                  둘러 줍니다. 그러지 않으면 글자를 넣는 순간 칸이 화면에서 사라집니다. */}
+              <div className="rounded-[5px] border border-border bg-surface-1 px-2 py-1.5 focus-within:border-control">
+                <Textarea
+                  aria-label={translate("기억 내용")}
+                  className="text-[12px]"
+                  disabled={memorySaving}
+                  maxLength={4000}
+                  onChange={(event) => {
+                    setMemoryValue(event.target.value);
+                  }}
+                  placeholder={translate("다음 업무부터 기억할 내용을 적어주세요")}
+                  rows={3}
+                  value={memoryValue}
+                />
+              </div>
               <Button
                 disabled={memorySaving || !memoryKey.trim() || !memoryValue.trim()}
                 size="sm"
                 type="submit"
                 variant="outline"
               >
-                {memorySaving ? "저장 중…" : "기억 저장"}
+                {translate(memorySaving ? "저장 중…" : "기억 저장")}
               </Button>
             </form>
             {memoryError ? (
@@ -3604,12 +3626,16 @@ function GrowthSurface({
             <section aria-label={translate("개선 정책")} className="mt-6">
               <h2 className="mb-2 text-[10px] font-semibold tracking-[0.08em] text-muted">{translate("개선 정책")}</h2>
               <p className="text-[12px] leading-5 text-secondary">
-                {growth.configuration.reflectionEnabled
-                  ? "완료된 실행에서 개선 후보를 찾습니다."
-                  : "개선 후보 수집이 중지돼 있습니다."}
-                {growth.configuration.adoptionMode === "review"
-                  ? " 승인은 사람의 검토를 거칩니다."
-                  : " 정책이 허용한 범위에서 자동 승인합니다."}
+                {translate(
+                  growth.configuration.reflectionEnabled
+                    ? "완료된 실행에서 개선 후보를 찾습니다."
+                    : "개선 후보 수집이 중지돼 있습니다.",
+                )}
+                {translate(
+                  growth.configuration.adoptionMode === "review"
+                    ? " 승인은 사람의 검토를 거칩니다."
+                    : " 정책이 허용한 범위에서 자동 승인합니다.",
+                )}
               </p>
               <label className="mt-3 grid gap-1 text-[11px] text-muted">
                 {translate("반영 방식")}
@@ -3675,7 +3701,7 @@ function GrowthSourceRow({ onOpenWork, reference }: { onOpenWork: (workId: strin
       </span>
       {kind === "work" ? (
         <OpenButton
-          label={`업무 ${id} 열기`}
+          label={`${translate("업무")} ${id} ${translate("열기")}`}
           onOpen={() => {
             onOpenWork(id);
           }}
@@ -3816,8 +3842,8 @@ const growthSuggestionStatusLabel: Record<string, string> = {
  * 그것을 앞세웁니다.
  */
 function growthStatusLabel(suggestion: GrowthView["suggestions"][number]): string {
-  if (suggestion.adoption?.status === "reverted") return "되돌림";
-  return growthSuggestionStatusLabel[suggestion.status] ?? suggestion.status;
+  if (suggestion.adoption?.status === "reverted") return translate("되돌림");
+  return translate(growthSuggestionStatusLabel[suggestion.status] ?? suggestion.status);
 }
 
 /**
@@ -4038,7 +4064,9 @@ function BudgetSurface({ service }: { service: DesktopService }) {
 
       <div className="grid min-h-0 min-w-0 grid-rows-[46px_minmax(0,1fr)]">
         <header className="flex items-center gap-3 border-b border-border px-5">
-          <h2 className="text-[15px] font-semibold tracking-[-0.008em] text-primary">{selected?.name ?? "전체"}</h2>
+          <h2 className="text-[15px] font-semibold tracking-[-0.008em] text-primary">
+            {selected?.name ?? translate("전체")}
+          </h2>
           <div className="ml-auto inline-flex gap-0.5 rounded-[5px] border border-border p-0.5">
             {RANGES.map((range) => (
               <button
@@ -4052,7 +4080,7 @@ function BudgetSurface({ service }: { service: DesktopService }) {
                 }}
                 type="button"
               >
-                {range.label}
+                {translate(range.label)}
               </button>
             ))}
           </div>
@@ -4116,7 +4144,7 @@ function UsageStats({ attempts }: { attempts: readonly RouteAttemptView[] }) {
     {
       label: "캐시 히트",
       value: tokenText(cached),
-      sub: written === 0 ? undefined : `캐시 생성 ${tokenText(written)}`,
+      sub: written === 0 ? undefined : `${translate("캐시 생성")} ${tokenText(written)}`,
     },
     { label: "비용", value: costText(cost) },
     { label: "활동일", value: countText(activeDays) },
@@ -4126,7 +4154,7 @@ function UsageStats({ attempts }: { attempts: readonly RouteAttemptView[] }) {
     <div className="grid grid-cols-2 gap-2 px-5 py-4 min-[900px]:grid-cols-3 min-[1560px]:grid-cols-6">
       {cells.map((cell) => (
         <div className="rounded-[5px] border border-border px-3 py-2.5" key={cell.label}>
-          <div className="whitespace-nowrap text-[11px] text-muted">{cell.label}</div>
+          <div className="whitespace-nowrap text-[11px] text-muted">{translate(cell.label)}</div>
           <div className="mt-1 whitespace-nowrap font-mono text-[18px] tabular-nums text-primary">{cell.value}</div>
           {cell.sub === undefined ? null : <div className="mt-0.5 text-[11px] text-muted">{cell.sub}</div>}
         </div>
@@ -4139,8 +4167,8 @@ function UsageStats({ attempts }: { attempts: readonly RouteAttemptView[] }) {
  * 날짜별 밀도. 조직이 언제 일했는지는 합계가 말해주지 않습니다.
  * 값이 없는 날은 «0»이 아니라 «없음»으로 둡니다 — 배경색 그대로입니다.
  */
-const WEEKDAY_LABEL = ["", "월", "", "수", "", "금", ""];
-const MONTH_LABEL = ["1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월"];
+// 월·수·금만 적습니다. 일곱 줄을 다 적으면 잔디보다 글자가 커집니다.
+const WEEKDAY_SHOWN = [false, true, false, true, false, true, false];
 const HEATMAP_CELL = 11;
 const HEATMAP_GAP = 3;
 
@@ -4220,9 +4248,9 @@ function DailyActivity({ attempts }: { attempts: readonly RouteAttemptView[] }) 
        */}
       <div className="flex gap-1.5">
         <div className="mt-[15px] flex shrink-0 flex-col gap-[3px]">
-          {WEEKDAY_LABEL.map((label, weekday) => (
+          {WEEKDAY_SHOWN.map((shown, weekday) => (
             <span className="h-[11px] text-[9px] leading-[11px] text-muted" key={weekday}>
-              {label}
+              {shown ? formatLocalizedWeekday(weekday) : ""}
             </span>
           ))}
         </div>
@@ -4235,7 +4263,7 @@ function DailyActivity({ attempts }: { attempts: readonly RouteAttemptView[] }) 
               <div className="flex w-[11px] shrink-0 flex-col gap-[3px]" key={week}>
                 {/* 월 이름이 칸보다 넓습니다. 폭을 칸에 묶고 글자만 넘치게 해야 열이 벌어지지 않습니다. */}
                 <span className="h-3 w-[11px] whitespace-nowrap text-[9px] leading-3 text-muted">
-                  {isNewMonth ? MONTH_LABEL[columnStart.getUTCMonth()] : ""}
+                  {isNewMonth ? formatLocalizedMonth(columnStart.getUTCMonth()) : ""}
                 </span>
                 {Array.from({ length: 7 }, (_, weekday) => {
                   const key = dayAt(week, weekday);
@@ -4363,9 +4391,7 @@ function AttemptRow({ attempt, onOpen }: { attempt: RouteAttemptView; onOpen: (a
         {attemptModelLabel(attempt)}
       </td>
       <td className="whitespace-nowrap px-3 py-1.5 text-[12px] text-muted">
-        {attempt.effort === undefined
-          ? "—"
-          : ((EFFORT_LABEL[attempt.effort as ReasoningEffort] as string | undefined) ?? attempt.effort)}
+        {attempt.effort === undefined ? "—" : translate(EFFORT_LABEL[attempt.effort] ?? attempt.effort)}
       </td>
       <td className="whitespace-nowrap px-3 py-1.5 font-mono text-[12px] text-muted">
         {attemptProviderLabel(attempt)}
@@ -4374,7 +4400,7 @@ function AttemptRow({ attempt, onOpen }: { attempt: RouteAttemptView; onOpen: (a
         className={`whitespace-nowrap px-3 py-1.5 text-[12px] ${failed || interrupted ? "text-danger" : "text-muted"}`}
       >
         {failed ? (
-          (FAILURE_LABEL[attempt.failureClass ?? ""] ?? "실패")
+          translate(FAILURE_LABEL[attempt.failureClass ?? ""] ?? "실패")
         ) : interrupted ? (
           "중단"
         ) : (
@@ -4434,8 +4460,8 @@ function BreakdownList({
               <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-secondary">{id}</span>
               <span className="shrink-0 font-mono text-[12px] tabular-nums text-muted">
                 {value.cost === 0
-                  ? `${countText(value.calls)}회`
-                  : `${countText(value.calls)}회 · ${costText(value.cost)}`}
+                  ? `${countText(value.calls)}${translate("회")}`
+                  : `${countText(value.calls)}${translate("회")} · ${costText(value.cost)}`}
               </span>
             </div>
             <div className="mt-2 h-[3px] w-full rounded-full bg-surface-2">
@@ -4492,13 +4518,13 @@ function AttemptDetail({ attempt, onClose }: { attempt: RouteAttemptView | undef
               )}
               <DetailRow label={translate("프로바이더")}>{attemptProviderLabel(attempt)}</DetailRow>
               <DetailRow label={translate("추론 강도")}>
-                {attempt.effort === undefined
-                  ? "—"
-                  : ((EFFORT_LABEL[attempt.effort as ReasoningEffort] as string | undefined) ?? attempt.effort)}
+                {attempt.effort === undefined ? "—" : translate(EFFORT_LABEL[attempt.effort] ?? attempt.effort)}
               </DetailRow>
               {attempt.failureClass === undefined ? null : (
                 <DetailRow label={translate("오류")}>
-                  <span className="text-danger">{FAILURE_LABEL[attempt.failureClass] ?? attempt.failureClass}</span>
+                  <span className="text-danger">
+                    {translate(FAILURE_LABEL[attempt.failureClass] ?? attempt.failureClass)}
+                  </span>
                 </DetailRow>
               )}
               {attempt.fallbackFrom === undefined ? null : (
@@ -5251,7 +5277,7 @@ function ProviderSurface({ service }: { service: DesktopService }) {
 
   return (
     <main
-      aria-label={translate("프로바이더 표면")}
+      aria-label={translate("프로바이더")}
       className="col-span-3 grid min-h-0 min-w-0 grid-cols-[242px_minmax(0,1fr)_300px] bg-canvas min-[1440px]:grid-cols-[264px_minmax(0,1fr)_332px]"
     >
       <section className="grid min-h-0 grid-rows-[46px_auto_minmax(0,1fr)_auto] border-r border-border bg-chrome">
@@ -5994,10 +6020,10 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
     try {
       const updated = await service.decideWorkspaceTrust(workspace, decision);
       if (updated.workspaceId !== workspace.workspaceId)
-        throw new Error("작업공간 신뢰 응답의 식별자가 요청과 일치하지 않습니다.");
+        throw new Error("워크스페이스 신뢰 응답의 식별자가 요청과 일치하지 않습니다.");
       setWorkspaces((current) => current?.map((item) => (item.workspaceId === workspace.workspaceId ? updated : item)));
     } catch (cause) {
-      setWorkspaceError(surfaceErrorMessage(cause, "작업공간 신뢰 상태를 저장하지 못했습니다."));
+      setWorkspaceError(surfaceErrorMessage(cause, "워크스페이스 신뢰 상태를 저장하지 못했습니다."));
     } finally {
       workspaceCommandRef.current = undefined;
       setWorkspaceSavingId(undefined);
@@ -6080,7 +6106,7 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
                   {/* 고른 값과 실제로 걸린 값이 다를 때만 말합니다. 같으면 위 그룹이 이미 말했습니다. */}
                   {autonomy.emergencyStopActive || autonomy.permissionLimitReason !== undefined ? (
                     <p className="mt-2 text-[11px] text-gate">
-                      {autonomy.emergencyStopActive ? "긴급 정지로 제한됨" : "제한됨"}
+                      {translate(autonomy.emergencyStopActive ? "긴급 정지로 제한됨" : "제한됨")}
                       {autonomy.permissionLimitReason === undefined ? "" : ` · ${autonomy.permissionLimitReason}`}
                     </p>
                   ) : null}
@@ -6099,31 +6125,31 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
             ) : null}
           </section>
 
-          <GrowthSection headingLevel={2} sectionRef={workspaceTrustSectionRef} title={translate("작업공간 신뢰")}>
+          <GrowthSection headingLevel={2} sectionRef={workspaceTrustSectionRef} title={translate("워크스페이스 신뢰")}>
             <p className="mb-3 text-[12px] leading-5 text-muted">
               {translate("신뢰한 폴더에서만 에이전트가 파일 도구를 사용할 수 있습니다.")}
             </p>
             {workspaceError ? <SurfaceError message={workspaceError} /> : null}
             {!workspaces && !workspaceError ? <SurfaceLoading /> : null}
             {workspaces?.length === 0 ? (
-              <p className="text-[12px] text-muted">{translate("등록된 작업공간이 없습니다.")}</p>
+              <p className="text-[12px] text-muted">{translate("등록된 워크스페이스가 없습니다.")}</p>
             ) : null}
             {workspaces && workspaces.length > 0 ? (
               <div className="overflow-x-auto">
                 <table
-                  aria-label={translate("작업공간 신뢰 목록")}
+                  aria-label={translate("워크스페이스 신뢰 목록")}
                   className="w-full min-w-[640px] border-y border-border text-left"
                 >
                   <thead>
                     <tr className="border-b border-border text-[11px] text-muted">
                       <th className="px-2 py-1.5 font-medium" scope="col">
-                        {translate("작업공간")}
+                        {translate("워크스페이스")}
                       </th>
                       <th className="px-2 py-1.5 font-medium" scope="col">
                         {translate("경로")}
                       </th>
                       <th className="px-2 py-1.5 font-medium" scope="col">
-                        {translate("신뢰 상태")}
+                        {translate("신뢰")}
                       </th>
                       <th className="px-2 py-1.5 font-medium" scope="col">
                         {translate("개정")}
@@ -6153,10 +6179,10 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
                         >
                           {translate(
                             workspace.trust === "pending"
-                              ? "신뢰 대기 (pending)"
+                              ? "확인 전"
                               : workspace.trust === "blocked"
-                                ? "차단됨 (blocked)"
-                                : "신뢰됨 (trusted)",
+                                ? "차단됨"
+                                : "신뢰함",
                           )}
                         </td>
                         <td className="whitespace-nowrap px-2 py-2 font-mono text-[11px] text-muted">
@@ -6165,7 +6191,7 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
                         <td className="px-2 py-1.5 text-right">
                           {workspace.trust === "trusted" ? (
                             <Button
-                              aria-label={`${workspace.name} ${translate("신뢰 회수")}`}
+                              aria-label={`${workspace.name} ${translate("신뢰 해제")}`}
                               className="h-7 px-2.5"
                               disabled={workspaceSavingId !== undefined}
                               onClick={() => {
@@ -6174,11 +6200,11 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
                               size="sm"
                               variant="danger"
                             >
-                              {translate("신뢰 회수")}
+                              {translate("신뢰 해제")}
                             </Button>
                           ) : (
                             <Button
-                              aria-label={`${workspace.name} ${translate("신뢰")}`}
+                              aria-label={`${workspace.name} ${translate("신뢰하기")}`}
                               className="h-7 px-2.5"
                               disabled={workspaceSavingId !== undefined}
                               onClick={() => {
@@ -6187,7 +6213,7 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
                               size="sm"
                               variant="outline"
                             >
-                              {translate("신뢰")}
+                              {translate("신뢰하기")}
                             </Button>
                           )}
                         </td>
@@ -6210,17 +6236,19 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{translate("신뢰 회수 확인")}</AlertDialogTitle>
+            <AlertDialogTitle>{translate("신뢰를 해제할까요?")}</AlertDialogTitle>
+            {/* 이름 뒤에 조사를 붙여 문장을 잇지 않습니다. 조사는 한국어에만 있고, 이어 붙인
+                문장은 다른 언어에서 어순이 깨집니다. 이름은 경로와 함께 아래에 세웁니다. */}
             <AlertDialogDescription>
-              {workspaceRevoking?.name}
-              {translate("의 신뢰를 회수하면 이 폴더를 사용하는 Work가 차단됩니다.")}
-              <span className="mt-1 block font-mono text-[11px]">{workspaceRevoking?.path}</span>
+              {translate("이 폴더를 쓰는 Work가 차단됩니다.")}
+              <span className="mt-1.5 block text-[12px] text-primary">{workspaceRevoking?.name}</span>
+              <span className="block font-mono text-[11px]">{workspaceRevoking?.path}</span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel size="sm">{translate("취소")}</AlertDialogCancel>
             <AlertDialogAction
-              aria-label={`${workspaceRevoking?.name ?? "작업공간"} 회수하고 차단`}
+              aria-label={`${workspaceRevoking?.name ?? translate("워크스페이스")} ${translate("신뢰 해제")}`}
               disabled={workspaceSavingId !== undefined}
               onClick={() => {
                 if (!workspaceRevoking) return;
@@ -6231,7 +6259,7 @@ function SettingsSurface({ focusWorkspaceTrust, service }: { focusWorkspaceTrust
               size="sm"
               variant="danger"
             >
-              {translate("회수하고 차단")}
+              {translate("신뢰 해제")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -6422,9 +6450,11 @@ function WorkList({
         ) : (
           <div className="px-3 py-12 text-center">
             <Briefcase aria-hidden="true" className="mx-auto mb-3 text-muted" size={26} />
-            <p className="text-sm text-secondary">{query ? "검색 결과가 없습니다." : "완료된 Work가 없습니다."}</p>
+            <p className="text-sm text-secondary">
+              {translate(query ? "검색 결과가 없습니다." : "완료된 Work가 없습니다.")}
+            </p>
             <p className="mt-1 text-xs text-muted">
-              {query ? "검색어를 바꿔보세요." : "완료된 업무가 여기에 표시됩니다."}
+              {translate(query ? "검색어를 바꿔보세요." : "완료된 업무가 여기에 표시됩니다.")}
             </p>
           </div>
         )}
@@ -6581,7 +6611,7 @@ function WorkActivity({
               <span aria-hidden="true" className="hidden h-4 w-px shrink-0 bg-border min-[1280px]:block" />
               <span
                 className="hidden shrink-0 items-center gap-1.5 min-[1280px]:flex"
-                title={`협업방 참가 ${String(room.participants.length)}명`}
+                title={`${translate("협업방 참가")} ${String(room.participants.length)}`}
               >
                 <SpeakerRow limit={5} speakers={room.participants} />
                 <span className="font-mono text-[11px] text-muted">
@@ -6658,7 +6688,10 @@ function WorkActivity({
           </nav>
         ) : null}
       </div>
-      <section aria-label={room ? `협업방 ${room.name}` : "Work 활동"} className="min-h-0 overflow-y-auto px-5 py-3">
+      <section
+        aria-label={room ? `${translate("협업방")} ${room.name}` : translate("Work 활동")}
+        className="min-h-0 overflow-y-auto px-5 py-3"
+      >
         <div className="mx-auto max-w-[860px]">
           {roomError ? <SurfaceError message={roomError} /> : null}
           {room && activities.length === 0 ? (
@@ -6726,12 +6759,12 @@ const runStageLabel: Record<string, string> = {
 };
 
 function runStageText(stage: string): string {
-  return runStageLabel[stage] ?? stage;
+  return translate(runStageLabel[stage] ?? stage);
 }
 
 /** 이 원인은 재시도로 풀리지 않습니다. 무엇을 먼저 해야 하는지가 버튼 라벨이어야 합니다. */
 function blockedActionText(reason: string | undefined): string | undefined {
-  if (reason === "workspace-untrusted") return "폴더 신뢰";
+  if (reason === "workspace-untrusted") return "신뢰하기";
   return undefined;
 }
 
@@ -6747,7 +6780,7 @@ function blockedReasonText(reason: string | undefined): string {
     case "evidence-invalid":
       return "업무에 연결된 근거를 검증하지 못했습니다.";
     case "workspace-untrusted":
-      return "워크스페이스 신뢰 확인이 필요합니다.";
+      return "이 폴더를 아직 신뢰하지 않았습니다.";
     case "assurance-verifier-rejected":
       return "산출물의 모순을 보완한 새 Work가 필요합니다.";
     default:
@@ -6788,9 +6821,9 @@ function RunStatusCard({
           <div className="min-w-0 flex-1">
             <p className="flex items-baseline gap-1.5 text-[13px] text-halt">
               <span className="shrink-0 font-medium text-halt">
-                {assuranceRejected ? "검증에서 보완 필요" : "차단됨"}
+                {translate(assuranceRejected ? "검증에서 보완 필요" : "차단됨")}
               </span>
-              <span>{blockedReasonText(run.blockedReason)}</span>
+              <span>{translate(blockedReasonText(run.blockedReason))}</span>
             </p>
             {!assuranceRejected || run.blockedDetail === undefined ? null : (
               <p className="mt-1 text-[12px] leading-5 text-secondary">{run.blockedDetail}</p>
@@ -6809,7 +6842,9 @@ function RunStatusCard({
               }}
               type="button"
             >
-              {pendingRunAction === "resume" ? "재개 중" : (blockedActionText(run.blockedReason) ?? "다시 시도")}
+              {translate(
+                pendingRunAction === "resume" ? "재개 중" : (blockedActionText(run.blockedReason) ?? "다시 시도"),
+              )}
             </button>
           )}
         </div>
@@ -7061,11 +7096,11 @@ function AgentsActivity({ agents, title }: { agents: AgentView[]; title: string 
               <p className="flex items-center gap-1.5">
                 <span className="truncate text-xs font-medium">{agent.name}</span>
                 <span className="shrink-0 rounded-[3px] border border-control px-1 text-[10px] text-muted">
-                  {agent.role}
+                  {translate(agent.role)}
                 </span>
               </p>
               <p className={agent.state === "active" ? "text-[11px] text-primary" : "text-[11px] text-muted"}>
-                {agent.state === "active" ? "진행 중" : "대기"}
+                {translate(agent.state === "active" ? "진행 중" : "대기")}
               </p>
             </div>
           </div>
@@ -7098,7 +7133,7 @@ function ApprovalActivity({ decision, description, disabled, onApprove, onReject
             <h3 className="text-sm font-medium">{title}</h3>
             {decision ? (
               <Badge tone={decision === "approved" ? "success" : "danger"}>
-                {decision === "approved" ? "승인됨" : "거절됨"}
+                {translate(decision === "approved" ? "승인됨" : "거절됨")}
               </Badge>
             ) : (
               <span className="text-xs font-medium text-gate">{translate("승인 대기")}</span>
@@ -7181,7 +7216,9 @@ function EventActivity({
   );
 }
 
-const EFFORT_LABEL: Record<ReasoningEffort, string> = { low: "낮음", medium: "보통", high: "높음" };
+// 값이 셋 밖일 수 있습니다. Record<ReasoningEffort, string>으로 두면 조회가 항상 성공한다고
+// 타입이 거짓말하고, 그걸 막으려 붙인 단언을 lint가 다시 지웁니다.
+const EFFORT_LABEL: Record<string, string | undefined> = { low: "낮음", medium: "보통", high: "높음" };
 
 interface ComposerProps {
   /** 끝난 Work는 지시를 받지 않습니다. */
@@ -7229,11 +7266,13 @@ function Composer({
           >
             <span className="min-w-0 flex-1 truncate text-[12px] text-secondary">{directive.content}</span>
             <span className="shrink-0 text-[10px] text-muted">
-              {directive.status === "applying"
-                ? "반영 중"
-                : directive.applyAt === "current-stage"
-                  ? "현재 단계"
-                  : "다음 단계"}
+              {translate(
+                directive.status === "applying"
+                  ? "반영 중"
+                  : directive.applyAt === "current-stage"
+                    ? "현재 단계"
+                    : "다음 단계",
+              )}
             </span>
             <button
               className="inline-flex shrink-0 items-center gap-1 rounded-[5px] px-1.5 py-0.5 text-[11px] text-muted outline-none transition-colors duration-150 hover:text-primary"
@@ -7268,7 +7307,7 @@ function Composer({
             </span>
             {workspace.trusted ? null : (
               <span className="rounded-[5px] border border-gate/40 px-2 py-0.5 text-[11px] text-gate">
-                {translate("신뢰 안 됨")}
+                {translate("신뢰 안 함")}
               </span>
             )}
           </div>
@@ -7285,7 +7324,7 @@ function Composer({
               onChange(event.target.value);
             }}
             disabled={closed}
-            placeholder={closed ? "끝난 업무입니다" : "무엇이든 요청하세요"}
+            placeholder={translate(closed ? "끝난 업무입니다" : "무엇이든 요청하세요")}
             value={value}
           />
           <div className="flex items-center gap-1.5 px-2 pb-2">
@@ -7334,8 +7373,11 @@ function Composer({
             </div>
           </div>
         </div>
+        {/* 실행 중인 Work에는 실행 상태 줄도 함께 서므로 이 줄에도 이름을 답니다.
+            이름 없는 상태 영역이 둘이면 어느 쪽을 읽는지 가릴 수 없습니다. */}
         <p
           aria-atomic="true"
+          aria-label={translate("알림")}
           aria-live="polite"
           className="mt-1.5 min-h-4 text-right text-[11px] text-muted"
           role="status"
@@ -7364,7 +7406,7 @@ function InspectorRoom({ room }: { room: RoomView }) {
                 <AgentAvatar speaker={participant} />
                 <span className="truncate text-xs font-medium text-primary">{participant.name}</span>
                 <span className="shrink-0 rounded-[3px] border border-control px-1.5 text-[10px] text-muted">
-                  {participant.role}
+                  {translate(participant.role)}
                 </span>
               </li>
             ))}
@@ -7383,7 +7425,7 @@ function InspectorRoom({ room }: { room: RoomView }) {
             {room.budgets.map((budget) => (
               <div key={budget.label}>
                 <p className="flex items-center justify-between text-xs text-secondary">
-                  <span>{budget.label}</span>
+                  <span>{translate(budget.label)}</span>
                   <span className="font-mono text-[11px] text-muted">{budget.display}</span>
                 </p>
                 <span aria-hidden="true" className="mt-1 block h-[3px] overflow-hidden rounded-sm bg-bg-3">
@@ -7627,7 +7669,7 @@ function WorkKnowledgeInspector({
               <li key={reference.referenceId}>
                 <button
                   aria-expanded={hasRelations ? expanded : undefined}
-                  aria-label={`${reference.relativePath} ${hasRelations ? "연결된 지식 보기" : "출처 보기"}`}
+                  aria-label={`${reference.relativePath} ${translate(hasRelations ? "연결된 지식 보기" : "출처 보기")}`}
                   className="flex w-full items-center gap-2 px-3.5 py-3 text-left outline-none hover:bg-surface-2 disabled:cursor-default disabled:hover:bg-transparent"
                   disabled={!hasRelations && !sharedContextAvailable}
                   onClick={() => {
@@ -7731,7 +7773,7 @@ function InspectorTasks({ progress, tasks }: { progress: number; tasks: TaskView
       </summary>
       <div className="px-4 pb-2">
         <div
-          aria-label={`작업 진행률 ${String(progress)}%`}
+          aria-label={`${translate("작업 진행률")} ${String(progress)}%`}
           aria-valuemax={100}
           aria-valuemin={0}
           aria-valuenow={progress}
@@ -7772,7 +7814,7 @@ function InspectorAgents({ agents }: { agents: AgentView[] }) {
             <span className="flex min-w-0 flex-1 items-center gap-1.5">
               <span className="truncate text-xs font-medium text-primary">{agent.name}</span>
               <span className="shrink-0 rounded-[3px] border border-control px-1.5 text-[10px] text-muted">
-                {agent.role}
+                {translate(agent.role)}
               </span>
             </span>
             <span
@@ -7786,7 +7828,7 @@ function InspectorAgents({ agents }: { agents: AgentView[] }) {
                 aria-hidden="true"
                 className={`size-1.5 rounded-full ${agent.state === "active" ? "bg-fg-3" : "bg-fg-4"}`}
               />
-              {agent.state === "active" ? "진행 중" : "대기"}
+              {translate(agent.state === "active" ? "진행 중" : "대기")}
             </span>
             <CaretRight aria-hidden="true" className="text-muted" size={13} />
           </li>
@@ -7796,15 +7838,22 @@ function InspectorAgents({ agents }: { agents: AgentView[] }) {
   );
 }
 
+/**
+ * 머리글이 «기준»이라고 말하면 숫자도 기준을 세야 합니다. 판정 개수를 세면 기준 하나가
+ * 차단됐는데도 1/1이 되어, 다 통과했다고 읽힙니다. 제외된 기준은 통과할 필요가 없으므로
+ * 분모에서 뺍니다.
+ */
 function InspectorVerifications({ values }: { values: WorkView["verifications"] }) {
-  const complete = values.filter((item) => item.state === "done").length;
+  const criteria = values.flatMap((item) => item.criteria);
+  const required = criteria.filter((item) => item.status !== "excluded");
+  const passed = required.filter((item) => item.status === "passed").length;
   return (
     <details className="border border-border bg-surface-1" open>
       <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between px-4 text-sm font-semibold outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/70">
         <span>
           {translate("검증 기준")}{" "}
-          <span className="ml-1 font-mono font-normal text-muted">
-            {complete}/{values.length}
+          <span className={`ml-1 font-mono font-normal ${passed === required.length ? "text-muted" : "text-halt"}`}>
+            {passed}/{required.length}
           </span>
         </span>
         <CaretDown aria-hidden="true" className="text-muted" size={15} />
@@ -8149,18 +8198,25 @@ function NewWorkDialog({
         >
           <label className="block text-sm font-medium" htmlFor="new-work-text">
             {translate("업무 요청")}
-            <Textarea
-              autoFocus
-              className="mt-2 min-h-28 border border-control bg-surface-1 px-3 py-2"
-              disabled={starting}
-              id="new-work-text"
-              onChange={(event) => {
-                setText(event.target.value);
-              }}
-              placeholder={translate("예: 파트너 계약의 주요 위험을 검토해줘")}
-              required
-              value={text}
-            />
+            {/*
+             * 상자는 감싸서 만듭니다. cn()은 tailwind-merge가 아니라 문자열을 잇기만 하므로
+             * Textarea의 border-0·bg-transparent가 남고, 여기서 준 border는 버려집니다.
+             * 그러면 제품의 주 입력칸이 화면에서 보이지 않습니다.
+             */}
+            <div className="mt-2 rounded-md border border-control bg-surface-1 px-3 py-2 focus-within:border-ring">
+              <Textarea
+                autoFocus
+                className="min-h-24"
+                disabled={starting}
+                id="new-work-text"
+                onChange={(event) => {
+                  setText(event.target.value);
+                }}
+                placeholder={translate("예: 파트너 계약의 주요 위험을 검토해줘")}
+                required
+                value={text}
+              />
+            </div>
           </label>
           <fieldset className="space-y-2">
             <legend className="text-sm font-medium">
@@ -8207,7 +8263,7 @@ function NewWorkDialog({
                       <span className="block font-medium">
                         {item.name}{" "}
                         <span className="font-normal text-muted">
-                          ({item.trust === "trusted" ? "신뢰됨" : "신뢰 필요"})
+                          ({translate(item.trust === "trusted" ? "신뢰함" : "확인 전")})
                         </span>
                       </span>
                       <span className="block font-mono text-xs text-muted">{item.path}</span>
@@ -8243,7 +8299,7 @@ function NewWorkDialog({
                     type="button"
                     variant="primary"
                   >
-                    {translate("신뢰")}
+                    {translate("신뢰하기")}
                   </Button>
                   <Button
                     disabled={starting || registeringWorkspace}
@@ -8315,7 +8371,7 @@ function NewWorkDialog({
               {translate("취소")}
             </DialogClose>
             <Button disabled={!text.trim() || starting || registeringWorkspace} type="submit" variant="primary">
-              {starting ? "시작 중" : "실행 시작"}
+              {translate(starting ? "시작 중" : "실행 시작")}
             </Button>
           </div>
         </form>

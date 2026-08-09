@@ -470,6 +470,9 @@ const works: WorkView[] = [
     status: "active",
     revision: 1,
     sourceStatus: "running",
+    // 계획이 돌고 Agent가 붙어 있는 Work에는 실행 기록이 있습니다. 이것을 빼 두면 홈은
+    // «지금 도는 것 0»이라고 말하고 업무 목록은 같은 Work를 «진행 중»이라고 말합니다.
+    run: { runId: "run-churn", status: "running", stage: "delivery", leaseGeneration: 2 },
     team: "고객 운영팀",
     updatedAt: "10:24",
     summary: "최근 90일의 이탈 신호를 분석하고 실행 가능한 개선안을 정리합니다.",
@@ -703,6 +706,7 @@ const works: WorkView[] = [
     status: "active",
     revision: 1,
     sourceStatus: "running",
+    run: { runId: "run-weekly", status: "running", stage: "delivery", leaseGeneration: 1 },
     team: "운영 기획팀",
     updatedAt: "09.02",
     summary: "운영 지표 변화와 이번 주 대응 항목을 한 문서로 정리합니다.",

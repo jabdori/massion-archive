@@ -74,22 +74,22 @@ export function DecisionActions({
   return (
     <div className="flex shrink-0 items-center gap-1.5">
       <button
-        aria-label={`${approveName} 거절`}
+        aria-label={`${approveName} ${translate("거절")}`}
         className="rounded-[5px] border border-control px-3 py-1 text-[12px] text-secondary hover:border-fg-3 hover:text-primary disabled:opacity-50"
         disabled={disabled || rejectDisabled}
         onClick={onReject}
         type="button"
       >
-        {busy ? "처리 중" : "거절"}
+        {translate(busy ? "처리 중" : "거절")}
       </button>
       <button
-        aria-label={`${approveName} 승인`}
+        aria-label={`${approveName} ${translate("승인")}`}
         className="rounded-[5px] bg-gate px-3 py-1 text-[12px] font-medium text-gate-ink hover:brightness-110 disabled:opacity-50"
         disabled={disabled || approveDisabled}
         onClick={onApprove}
         type="button"
       >
-        {busy ? "처리 중" : "승인"}
+        {translate(busy ? "처리 중" : "승인")}
       </button>
     </div>
   );
@@ -221,7 +221,7 @@ export function SpeakerName({ speaker }: { speaker: SpeakerView }) {
     <>
       <span className={`text-[12px] font-medium ${speakerText(speaker)}`}>{speaker.name}</span>
       <span className="rounded-[3px] border border-control px-1.5 text-[10px] font-medium text-muted">
-        {speaker.role}
+        {translate(speaker.role)}
       </span>
       {/* 조직이 모델을 배치하므로 "누가 말했나"에는 "무엇으로 말했나"가 따라붙습니다. */}
       <SpeakerModel speaker={speaker} />
@@ -500,7 +500,7 @@ export function AgentMessageContent({
 export function RoomChapter({ label, time, until }: { label: string; time: string; until?: string | undefined }) {
   return (
     <div className="flex items-center gap-2.5 py-1">
-      <span className="text-[10px] font-semibold tracking-[0.08em] text-muted">{label}</span>
+      <span className="text-[10px] font-semibold tracking-[0.08em] text-muted">{translate(label)}</span>
       <span aria-hidden="true" className="h-px flex-1 bg-border" />
       {/* 범위는 두 끝이 다를 때만 범위입니다. 끝이 없으면 대시가 허공에 뜹니다. */}
       <time className="font-mono text-[11px] text-muted">
@@ -686,14 +686,14 @@ export function ProposalActivity({
         <p className="text-[13px] leading-5 text-primary">{content}</p>
 
         <section
-          aria-label={`조직 변경 제안 ${proposalName}`}
+          aria-label={`${translate("조직 변경 제안")} ${proposalName}`}
           className={`mt-2 rounded-[7px] border ${decided ? "border-border bg-surface-1" : "border-gate-border bg-gate-wash"}`}
         >
           <header className="flex items-center border-b border-gate-border px-3.5 py-2.5">
             <h4 className="min-w-0 flex-1 text-[13px] font-medium">
               {proposalName} {translate("신설")}
             </h4>
-            <span className="text-[11px] font-medium text-gate">{decided ? "처리됨" : "승인 필요"}</span>
+            <span className="text-[11px] font-medium text-gate">{translate(decided ? "처리됨" : "승인 필요")}</span>
           </header>
 
           <div className="divide-y divide-border border-b border-gate-border px-3.5">
@@ -756,7 +756,7 @@ export function ProposalActivity({
               <div>
                 <p className="text-[10px] font-semibold tracking-[0.08em] text-muted">{translate("되돌리기")}</p>
                 <p className="mt-1 font-mono text-[11px] text-muted">
-                  {change.revertable ? "Revert 가능" : "Revert 불가"}
+                  {translate(change.revertable ? "Revert 가능" : "Revert 불가")}
                 </p>
               </div>
             )}
@@ -831,7 +831,7 @@ export function RoomReference({
        * 카드 전체를 버튼으로 두지 않습니다. 오클릭 한 번에 읽던 대화의 맥락을 잃습니다.
        * 진입은 명시적 버튼으로만 합니다.
        */}
-      <OpenButton label={`협업방 ${name} 열기`} onOpen={onOpen} />
+      <OpenButton label={`${translate("협업방")} ${name} ${translate("열기")}`} onOpen={onOpen} />
     </div>
   );
 }

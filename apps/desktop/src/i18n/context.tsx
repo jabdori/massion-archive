@@ -47,6 +47,20 @@ export function formatLocalizedCompactNumber(value: number): string {
   return formatCompactNumber(value, activeLocale);
 }
 
+/** 달력 축의 요일·월 이름. 배열로 박아 두면 언어를 바꿔도 한국어가 남습니다. */
+export function formatLocalizedWeekday(weekday: number): string {
+  const sunday = Date.UTC(2024, 0, 7);
+  return new Intl.DateTimeFormat(localeTag(activeLocale), { weekday: "short", timeZone: "UTC" }).format(
+    new Date(sunday + weekday * 86_400_000),
+  );
+}
+
+export function formatLocalizedMonth(month: number): string {
+  return new Intl.DateTimeFormat(localeTag(activeLocale), { month: "short", timeZone: "UTC" }).format(
+    new Date(Date.UTC(2024, month, 1)),
+  );
+}
+
 export function formatLocalizedDateTime(value: string | Date): string {
   return formatDateTime(value, activeLocale);
 }

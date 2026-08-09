@@ -92,7 +92,11 @@ function SidebarMenuButton({
       data-active={active || undefined}
       aria-current={active ? "page" : undefined}
       className={cn(
-        "flex h-[27px] w-full items-center gap-2 rounded-[5px] px-2.5 text-left text-[13px] text-secondary outline-none transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground data-[active=true]:bg-sidebar-accent data-[active=true]:text-sidebar-foreground group-data-[collapsed=true]/sidebar:justify-center group-data-[collapsed=true]/sidebar:px-0 group-data-[collapsed=true]/sidebar:[&>span:not(.sr-only)]:hidden",
+        // hover와 선택이 같은 배경·같은 글자색이면 레일이 «어디에 있나»에 답하지 못합니다
+        // (DESIGN.md 4열 셸). 포인터는 누르고 나면 늘 레일 위에 남으므로 예외가 아니라 기본
+        // 상황입니다. 위계는 크기가 아니라 무게와 색으로 만듭니다 — hover는 한 단계 낮추고
+        // 선택만 글자 무게를 올립니다.
+        "flex h-[27px] w-full items-center gap-2 rounded-[5px] px-2.5 text-left text-[13px] text-secondary outline-none transition-colors hover:bg-surface-1 hover:text-primary data-[active=true]:bg-sidebar-accent data-[active=true]:font-medium data-[active=true]:text-sidebar-foreground group-data-[collapsed=true]/sidebar:justify-center group-data-[collapsed=true]/sidebar:px-0 group-data-[collapsed=true]/sidebar:[&>span:not(.sr-only)]:hidden",
         className,
       )}
       type="button"

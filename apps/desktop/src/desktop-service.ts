@@ -4344,7 +4344,11 @@ export function createFixtureDesktopService(): DesktopService {
         });
       }),
     installRegistry: () =>
-      fixturePromise(() => ({ outcome: "succeeded", installationId: "installation-fixture-0001" })),
+      fixturePromise(() => {
+        // 브라우저 개발 화면에는 확장 원장이 없습니다. 설치됐다고 알리면 목록은 그대로인데
+        // 화면만 «설치를 요청했습니다»라고 말합니다 — 일어나지 않은 일을 사실로 그립니다.
+        throw new Error("Fixture는 확장 설치를 구성하지 않았습니다.");
+      }),
     /* 도메인은 지시를 status 'queued'로 남기고, 투영이 활동 흐름의 message 한 줄로 옮깁니다. */
     submitDirective: (work, content, mode) =>
       fixturePromise(() => {
@@ -5944,7 +5948,7 @@ function inboxBlockedReason(reason: unknown, detail: unknown): string {
     case "evidence-invalid":
       return "업무에 연결된 근거를 검증하지 못했습니다.";
     case "workspace-untrusted":
-      return "워크스페이스 신뢰 확인이 필요합니다.";
+      return "이 폴더를 아직 신뢰하지 않았습니다.";
     case "assurance-verifier-rejected":
       return "산출물의 모순을 보완한 새 Work가 필요합니다.";
     default:

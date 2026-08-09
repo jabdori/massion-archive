@@ -27,14 +27,14 @@ describe("AgentOS 데스크톱", () => {
     expect(screen.getByRole("button", { name: "Organization" })).toBeInTheDocument();
     expect(within(settings).getByRole("region", { name: "Language" })).toBeInTheDocument();
     expect(within(settings).getAllByRole("button", { name: "Automatic" }).length).toBeGreaterThan(0);
-    expect(within(settings).getByText("Trusted (trusted)")).toBeInTheDocument();
+    expect(within(settings).getByText("Trusted")).toBeInTheDocument();
     expect(within(settings).getByText("Finds Growth candidates in completed runs.")).toBeInTheDocument();
     expect(
       within(settings).getByText("Use English for the interface and responses from Agents in new Work."),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Provider" }));
-    const providers = await screen.findByRole("main", { name: "Provider overview" });
+    const providers = await screen.findByRole("main", { name: "Provider" });
     await user.type(within(providers).getByRole("textbox", { name: "Search Providers" }), "ＣＯＤＥＸ");
     expect(within(providers).getAllByText("OpenAI Codex").length).toBeGreaterThan(0);
 
@@ -332,7 +332,7 @@ describe("AgentOS 데스크톱", () => {
     renderApp();
 
     await user.click(screen.getByRole("button", { name: "CRM 고객 데이터 읽기 승인" }));
-    expect(screen.getByRole("status")).toHaveTextContent("승인되었습니다");
+    expect(screen.getByRole("status", { name: "알림" })).toHaveTextContent("승인되었습니다");
     expect(screen.queryByRole("button", { name: "CRM 고객 데이터 읽기 승인" })).not.toBeInTheDocument();
   });
 
@@ -372,13 +372,13 @@ describe("AgentOS 데스크톱", () => {
     await user.type(screen.getByRole("textbox", { name: "추가 지시" }), "산업군별 이탈률도 분리해줘");
     await user.click(screen.getByRole("button", { name: "보내기" }));
 
-    expect(screen.getByRole("status")).toHaveTextContent("다음 단계에 반영하도록 예약했습니다");
+    expect(screen.getByRole("status", { name: "알림" })).toHaveTextContent("다음 단계에 반영하도록 예약했습니다");
     expect(screen.getByRole("textbox", { name: "추가 지시" })).toHaveValue("");
     expect(screen.getAllByText("산업군별 이탈률도 분리해줘").length).toBeGreaterThan(0);
 
     const cards = screen.getAllByRole("button", { name: /현재 작업 조정/ });
     await user.click(cards[cards.length - 1] as HTMLElement);
-    expect(screen.getByRole("status")).toHaveTextContent(
+    expect(screen.getByRole("status", { name: "알림" })).toHaveTextContent(
       "대기 지시를 안전한 실행 경계에서 지금 반영하도록 변경했습니다",
     );
   });
