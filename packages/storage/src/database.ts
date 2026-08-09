@@ -73,7 +73,8 @@ export type MassionDatabaseLifecycleErrorCode =
   | "DATABASE_CLOSED"
   | "DATABASE_CLOSE_FAILED"
   | "DATABASE_TRANSACTION_REENTRANT"
-  | "DATABASE_CLOSE_IN_TRANSACTION";
+  | "DATABASE_CLOSE_IN_TRANSACTION"
+  | "DATABASE_TRANSACTION_SEALED";
 
 export class MassionDatabaseLifecycleError extends Error {
   public override readonly name = "MassionDatabaseLifecycleError";
@@ -87,10 +88,56 @@ export class MassionDatabaseLifecycleError extends Error {
 }
 
 class TransactionExecutor implements QueryExecutor {
+  private tail: Promise<void> = Promise.resolve();
+  private sealed = false;
+  private failed = false;
+  private failure: unknown;
+
   public constructor(private readonly transaction: SurrealTransaction) {}
 
-  public async query<R = unknown[]>(surql: string, bindings?: Record<string, unknown>): Promise<R> {
-    return (await this.transaction.query(surql, bindings)) as R;
+  public query<R = unknown[]>(surql: string, bindings?: Record<string, unknown>): Promise<R> {
+    if (this.sealed) {
+      return Promise.reject(
+        new MassionDatabaseLifecycleError(
+          "DATABASE_TRANSACTION_SEALED",
+          "종료된 MassionDatabase transaction에는 query를 추가할 수 없습니다",
+        ),
+      );
+    }
+    const task = this.tail.then(async () => {
+      if (this.failed) throw this.failure;
+      try {
+        return (await this.transaction.query(surql, bindings)) as R;
+      } catch (error) {
+        this.fail(error);
+        throw error;
+      }
+    });
+    this.tail = task.then(
+      () => undefined,
+      () => undefined,
+    );
+    return task;
+  }
+
+  public seal(): void {
+    this.sealed = true;
+  }
+
+  public abort(error: unknown): void {
+    this.sealed = true;
+    this.fail(error);
+  }
+
+  public async drain(): Promise<void> {
+    await this.tail;
+    if (this.failed) throw this.failure;
+  }
+
+  private fail(error: unknown): void {
+    if (this.failed) return;
+    this.failed = true;
+    this.failure = error;
   }
 }
 
@@ -137,11 +184,15 @@ export class MassionDatabase implements QueryExecutor, AsyncDisposable {
   private async executeTransaction<T>(operation: (transaction: QueryExecutor) => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
       const transaction = await this.client.beginTransaction();
+      const executor = new TransactionExecutor(transaction);
       try {
-        const result = await operation(new TransactionExecutor(transaction));
+        const result = await operation(executor);
+        executor.seal();
+        await executor.drain();
         await transaction.commit();
         return result;
       } catch (error) {
+        executor.abort(error);
         // 서버가 이미 버린 transaction을 다시 cancel하면 같은 not-found 경고만 한 번 더 만듭니다.
         if (!isLostTransaction(error)) await cancelBestEffort(transaction);
         if (!isCompatibleRetryableConflict(error) || attempt >= 3) throw error;

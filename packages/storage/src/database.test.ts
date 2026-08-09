@@ -255,6 +255,147 @@ describe("SurrealDB 연결", () => {
     ]);
   });
 
+  it("한 interactive transaction 안의 query도 호출 순서대로 하나씩 실행한다", async () => {
+    const firstGate = deferred();
+    const firstEntered = deferred();
+    const log: string[] = [];
+    let active = 0;
+    let maximumActive = 0;
+    const database = new MassionDatabase({
+      beginTransaction: async () => ({
+        query: async (surql: string) => {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          log.push(`start:${surql}`);
+          if (surql === "first") {
+            firstEntered.resolve();
+            await firstGate.promise;
+          }
+          log.push(`finish:${surql}`);
+          active -= 1;
+          return [];
+        },
+        commit: async () => undefined,
+        cancel: async () => undefined,
+      }),
+    } as never);
+
+    const result = database.transaction(async (transaction) => {
+      const queries = Promise.all([transaction.query("first"), transaction.query("second")]);
+      await firstEntered.promise;
+      await nextTurn();
+      expect(maximumActive).toBe(1);
+      firstGate.resolve();
+      return await queries;
+    });
+
+    await expect(result).resolves.toEqual([[], []]);
+    expect(maximumActive).toBe(1);
+    expect(log).toEqual(["start:first", "finish:first", "start:second", "finish:second"]);
+  });
+
+  it("callback이 기다리지 않은 query 실패도 commit하지 않는다", async () => {
+    const failure = new Error("detached query failed");
+    let commits = 0;
+    let cancellations = 0;
+    const database = new MassionDatabase({
+      beginTransaction: async () => ({
+        query: async () => {
+          throw failure;
+        },
+        commit: async () => {
+          commits += 1;
+        },
+        cancel: async () => {
+          cancellations += 1;
+        },
+      }),
+    } as never);
+
+    await expect(
+      database.transaction(async (transaction) => {
+        void transaction.query("detached");
+      }),
+    ).rejects.toBe(failure);
+    expect(commits).toBe(0);
+    expect(cancellations).toBe(1);
+  });
+
+  it("첫 query 실패 뒤에는 같은 transaction에 후속 query를 보내지 않는다", async () => {
+    const failure = new Error("first query failed");
+    const queries: string[] = [];
+    const database = new MassionDatabase({
+      beginTransaction: async () => ({
+        query: async (surql: string) => {
+          queries.push(surql);
+          if (surql === "first") throw failure;
+          return [];
+        },
+        commit: async () => undefined,
+        cancel: async () => undefined,
+      }),
+    } as never);
+
+    await expect(
+      database.transaction(
+        async (transaction) => await Promise.all([transaction.query("first"), transaction.query("second")]),
+      ),
+    ).rejects.toBe(failure);
+    expect(queries).toEqual(["first"]);
+  });
+
+  it("callback 종료 뒤에는 보관된 executor가 query를 추가하지 못한다", async () => {
+    let executor: { query(surql: string): Promise<unknown> } | undefined;
+    let queries = 0;
+    const database = new MassionDatabase({
+      beginTransaction: async () => ({
+        query: async () => {
+          queries += 1;
+          return [];
+        },
+        commit: async () => undefined,
+        cancel: async () => undefined,
+      }),
+    } as never);
+
+    await database.transaction(async (transaction) => {
+      executor = transaction;
+    });
+
+    await expect(executor?.query("late")).rejects.toMatchObject({
+      name: "MassionDatabaseLifecycleError",
+      code: "DATABASE_TRANSACTION_SEALED",
+    });
+    expect(queries).toBe(0);
+  });
+
+  it("callback 오류는 멈춘 query를 기다리지 않고 cancel한다", async () => {
+    const entered = deferred();
+    const failure = new Error("operation failed");
+    let cancellations = 0;
+    const database = new MassionDatabase({
+      beginTransaction: async () => ({
+        query: async () => {
+          entered.resolve();
+          return await new Promise(() => {});
+        },
+        commit: async () => undefined,
+        cancel: async () => {
+          cancellations += 1;
+        },
+      }),
+    } as never);
+
+    await expect(
+      database.transaction(async (transaction) => {
+        void transaction.query("blocked");
+        await entered.promise;
+        throw failure;
+      }),
+    ).rejects.toBe(failure);
+    expect(cancellations).toBe(1);
+  });
+
   it("한 transaction의 bounded retry가 끝날 때까지 다음 FIFO caller를 들이지 않는다", async () => {
     const firstEntered = deferred();
     const allowConflict = deferred();
