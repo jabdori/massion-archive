@@ -311,6 +311,60 @@ WARN Transaction 019fd3cd-… not found in WebSocket transactions map (have 0 tr
 
 검수의 한계도 기록합니다. 8라운드 내내 **코드만 읽고 실행 화면을 보지 않았습니다.** 그래서 "키가 있을 때 지울 수 있는가"와 "키가 여럿일 때"를 놓쳤고, 사용자가 실제 앱에서 즉시 발견했습니다.
 
+### 0.C.15 2026-08-09(2회차) — 릴리스 게이트 복구와 협업방 배선
+
+전수 분석에서 출발해 **닫을 수 있는 결함을 전부 닫은** 회차입니다. 커밋 16건, 전부 push 전 상태.
+
+**먼저 알아야 할 사실: `verify:security`가 이 회차 전부터 빨간 상태였습니다.** `runtime → @voltagent/core → gray-matter → js-yaml@3.15.0`의 high 등급 CVE(GHSA-5p4m-2wfm-xmqj)이고, 이 스크립트는 릴리스 조건이므로 저장소는 **어떤 경로로도 출시할 수 없었습니다.** `gray-matter>js-yaml` override가 `^3.14.1`에 고정돼 있었고 백포트가 3.15.1에 들어와 그 위였습니다. 하한을 올려 통과시켰고, `nanoid`(dev 전이)도 함께 정산했습니다.
+
+#### 0.C.15.1 데이터 무결성·크래시 결함 셋
+
+- **Work revision 불변량 파손.** `transitionTask`의 `ready→failed` 수렴이 WorkEvent를 2건 만들면서 `work.revision`은 1만 올렸습니다. `auditWork`가 `revision == events.length`를 강제하고 `recoverWork`가 그것을 fail-closed로 쓰므로, **이 전이를 지난 Work는 이후 Records·Assurance 단계가 통째로 실패**했습니다. 생산 경로(`CoreDeliveryStage.convergeFailure`)가 실재합니다. revision을 호출자 산술이 아니라 원장에서 파생하도록 고쳤습니다.
+- **Provider 재제거가 라우터·예산 패널을 영구히 죽임.** `retired = hasAttempts && provider.enabled`가 「계보를 지켜야 하나」와 「첫 제거인가」를 한 변수로 묶어, 두 번째 제거 때 호출 기록이 있어도 `model_profile`을 지웠습니다. `listAttempts`가 고아 행에서 던져 목록 전체가 죽습니다. 쓰는 쪽(고아를 만들지 않음)과 읽는 쪽(이미 생긴 고아를 견디되 이름을 지어내지 않음) 둘 다 고쳤습니다.
+- **optimization batch 승격 게이트 우회.** `if (policy)` 하나가 정책 부재 시 주 모델·완료·privacy receipt·최소 표본·개선 폭 검사를 전부 건너뛰고 `limited`·`active` batch를 만들었습니다. `recommend()`가 정책 미설정 시 실재하지 않는 `"implicit-default"`를 넣어 **정상 사용에서도 열려** 있었습니다. shadow는 이미 fail-closed였고 승격만 fail-open이었습니다.
+
+#### 0.C.15.2 출시 차단 GAP 해소 — Runtime 협업방 배선
+
+`REQ-AGENT-HARNESS-001`. `CollaborationRuntimeRecorder`가 `delegate_task` 델타를 관찰해 인계·답변을 협업방에 남기고 composition root가 주입합니다. 내구성 경계는 [ADR-004](../../architecture/ADR-004-runtime-collaboration-durability.md)가 소유합니다.
+
+**이 작업에서 배운 것 둘.**
+
+1. **스텁 테스트 7개가 통과한 뒤 실제 도메인 통합 테스트가 거부했습니다.** `recipient_agent_id`는 `handoff`에만 허용됩니다. 스텁만 봤으면 생산에서만 조용히 실패했을 겁니다. 이후 모든 기록기 테스트에 실제 `WorkService` 통합본을 붙였습니다.
+2. **Codex 적대적 리뷰가 제가 틀린 것 셋을 잡았습니다.**
+   - 직렬화 키를 `executionId`로 잡았는데 **실제 경합 자원은 방**입니다. 같은 Work 32개 동시 실행에서 27건이 write conflict로 사라지는 것을 리뷰가 재현했습니다. 조직 단위 큐로 바꾸고 그 재현을 테스트로 고정했습니다.
+   - `drain()`을 만들어 놓고 **종료 경로에 조립하지 않았습니다.** 이 저장소의 지배적 결함(구현했지만 조립 안 함)을 제가 그대로 반복했습니다.
+   - **ADR-004가 사실과 달랐습니다.** "crash 뒤 복구가 같은 실행을 다시 돌려 메시지가 재생성된다"고 썼는데 `RuntimeRecovery`는 재실행하지 않고 terminal로 전이시킵니다. ADR을 정정하고 「정상 종료는 닫고 비정상 종료는 알려진 상한」으로 다시 적었습니다.
+   - 결과 배열이 대상보다 짧으면 `JSON.stringify(null)`이 걸려 문자열 `"null"`이 실제 답변처럼 기록됐습니다 — 같은 파일 주석이 금지한 그것입니다.
+
+#### 0.C.15.3 계약 결손 셋
+
+- **확장 Capability.** `ExtensionInstallationViewV1`이 다섯 필드뿐이라 헌법 6절의 「조직에 추가된 Capability를 먼저」가 설치된 확장에 대해 성립하지 않았습니다. 선언은 `extension_version.manifest_json`에 처음부터 있었고 설치 view만 안 읽었습니다. 같은 변경으로 도메인 view를 그대로 흘려 `organizationId`가 클라이언트로 새던 것도 막았습니다.
+- **`growth.revert`.** 명령 레지스트리와 CLI에는 있는데 타입 계약과 데스크톱에 없어 **채택은 화면에서 하고 취소는 터미널에서 하는** 상태였습니다.
+- **계약 드리프트 가드 신설.** 데스크톱이 계약 밖 무타입 경로로 던지는 26개 operation을 `apps/desktop/src/contract-boundary.test.ts`가 debt ledger로 고정합니다. 새로 생기면 실패하고, 계약으로 옮겨도 실패해서 줄어든 사실이 남습니다.
+
+#### 0.C.15.4 그 밖
+
+- Extension credential 스캔이 **1MiB 초과·NUL 포함 파일을 통째로 건너뛰던** 두 우회로를 닫았습니다. 보안 검사를 크기로 끄면 그 크기가 곧 우회 방법입니다.
+- idle에서 outbox가 수렴하지 않던 것(§19.1, pending 27,032)을 고쳤습니다. 루프는 있었는데 상한까지 채워도 다시 무장하지 않았습니다.
+- `/health/ready`를 즉시 단언하던 flaky 테스트를 고쳤습니다. **`pnpm verify` 안에 있어서 게이트 자체가 간헐적으로 거짓말을 했습니다.**
+- 설정 표면이 렌더에 쓰지도 않는 조회 7개를 매번 발사하던 것을 제거했습니다.
+- 문서 정정: README 테스트 개수 6개가 전부 과소(desktop 89→282 등), README·CHANGELOG의 표면 6개→9개, PRODUCT.md가 제거된 전역 긴급 정지를 약속, 헌법 §9.1·9.3·9.4·9.5·9.6의 낡은 진단, 아키텍처 문서가 ADR 3건을 참조하지 않던 것, `@massion/foundation`을 살아 있는 의존으로 그리던 것(import 0건).
+
+#### 0.C.15.5 남은 것 — 이 회차가 닫지 못한 것
+
+| 항목 | 왜 |
+|---|---|
+| Apple Developer ID 서명·공증·Gatekeeper | 사용자의 인증서가 필요 |
+| 실제 Tauri UAT(환불 Work 완주) | 사람이 앱을 켜고 자연어로 요청해야 함 |
+| 장시간 메모리 soak(40GB 제보) | 몇 시간짜리 관측 |
+| 시각 검수 | 프로덕션 vite 빌드까지 했으나 브라우저 도구가 이 환경에서 열리지 않음 |
+| 예산 알림 임계값 | 새 저장소·명령이 필요한 기능 작업. 경로 예산(`totalBudgetMicros`)은 도메인·CLI에 있고 데스크톱만 안 부름 |
+| 조직 편성 명령 | `organization.command`가 타입 맵에 없어 조직 화면은 여전히 읽기 전용 |
+| ExtensionCapabilityBroker 조립 | worker→host capability 요청 채널이 프로토콜에 없음. 시그니처 불일치와 컴파일 타임 가드는 이번에 닫음 |
+| 협업방 crash 손실 창 | ADR-004가 알려진 상한으로 기록. 정상 종료는 닫힘 |
+
+**데스크톱 소스 변경은 `.app` 번들에 아직 없습니다.** `tauri:build`를 돌리고 exit code를 읽은 뒤 앱을 교체해야 화면에 반영됩니다(§0.E.9·§0.D 22).
+
 ## 0.D 사용자 결정 로그와 범위 변화
 
 다음 결정은 채팅 과정에서 반복적으로 확정됐습니다. 다음 에이전트는 오래된 plan보다 이를 우선합니다.
