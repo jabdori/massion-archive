@@ -368,6 +368,13 @@ export interface GovernanceAutonomyViewV1 {
 }
 
 /** 확장이 조직에 더한 능력. `kind`는 SDK의 contribution·permission 선언 그룹 이름입니다. */
+/** 조직 편성이 옮기거나 남기는 참조. `split`·`merge`가 기존 참조를 어디로 보낼지 정합니다. */
+export interface OrganizationReferenceDispositionV1 {
+  readonly referenceId: string;
+  readonly action: "retain" | "move";
+  readonly targetHandle?: string;
+}
+
 export interface ExtensionCapabilityViewV1 {
   readonly kind: string;
   readonly items: readonly string[];
@@ -806,6 +813,72 @@ export interface ApplicationCommandMapV1 {
   };
   readonly "growth.suggestion.approve": {
     readonly payload: { readonly suggestionId: string; readonly expectedRevision: number; readonly reason: string };
+  };
+  /**
+   * 조직 편성. `kind`가 결정하는 판별 합집합이며 도메인의 `OrganizationCommand`를 그대로 투영합니다.
+   *
+   * 헌법 §9.1은 조직 화면이 「읽기 전용」인 이유로 이 명령이 계약에 없다는 것을 들었습니다.
+   * 레지스트리에는 owner + `organization:write`로 살아 있었지만 타입 맵에 없어, 타입이 걸린
+   * 클라이언트만 쓰는 데스크톱에서는 부를 수 없었습니다. 유일한 실사용 경로가 CLI였습니다.
+   *
+   * `expectedRevision`은 현재 Organization Version입니다. 낙관적 잠금이라 화면이 스냅샷에서
+   * 읽은 값을 그대로 실어야 하고, 어긋나면 도메인이 거부합니다.
+   */
+  readonly "organization.command": {
+    readonly payload:
+      | {
+          readonly kind: "create";
+          readonly handle: string;
+          readonly name: string;
+          readonly responsibility: string;
+          readonly parentHandle: string;
+          readonly scope: "persistent" | "work";
+          readonly workId?: string;
+          readonly role?: "orchestrator" | "coordinator" | "operator";
+          readonly outputs?: readonly string[];
+          readonly governanceApprovalId?: string;
+        }
+      | {
+          readonly kind: "activate" | "deactivate" | "retire" | "restore";
+          readonly handle: string;
+          readonly governanceApprovalId?: string;
+        }
+      | {
+          readonly kind: "move";
+          readonly handle: string;
+          readonly parentHandle: string;
+          readonly governanceApprovalId?: string;
+        }
+      | {
+          readonly kind: "change-role" | "promote";
+          readonly handle: string;
+          readonly role: "orchestrator" | "coordinator" | "operator";
+          readonly governanceApprovalId?: string;
+        }
+      | {
+          readonly kind: "promote-scope";
+          readonly handle: string;
+          readonly workId: string;
+          readonly governanceApprovalId?: string;
+        }
+      | {
+          readonly kind: "split";
+          readonly sourceHandle: string;
+          readonly newHandle: string;
+          readonly name: string;
+          readonly responsibility: string;
+          readonly childHandles: readonly string[];
+          readonly referencePlan: readonly OrganizationReferenceDispositionV1[];
+          readonly governanceApprovalId?: string;
+        }
+      | {
+          readonly kind: "merge";
+          readonly survivorHandle: string;
+          readonly sourceHandle: string;
+          readonly referencePlan: readonly OrganizationReferenceDispositionV1[];
+          readonly governanceApprovalId?: string;
+        }
+      | { readonly kind: "revert"; readonly targetVersion: number; readonly governanceApprovalId?: string };
   };
   /**
    * 채택을 되돌립니다. 헌법 4.8은 자가개선 루프의 마지막 걸음으로 «악화되거나 현재 유효 권한

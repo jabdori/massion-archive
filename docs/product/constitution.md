@@ -364,7 +364,7 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 
 - 남은 격차는 화면 추가보다 **계약과 실제 실행 연결**에 집중돼 있습니다. 표면을 완성본 기준으로 만들면서 도메인에는 있고 Application 계약이나 생산 호출 경로가 버리는 것이 반복해서 드러났습니다. 현재 네 인계 문서가 개선, 협업·조직, 확장, 설정 범위를 소유합니다(9.3·9.4·9.5, [설정 조회 계약](../phases/30-surface-parity-agent-ux/settings-contract-handoff.md)).
 - 조직 화면은 **구조(A) + 지도(B) 하이브리드**로 완성본 기준으로 그립니다(2026-07-24). 본문은 자식이 있는 노드를 접을 수 있는 중첩 구조, 우측은 전체 위치를 보여주는 지도이며 A가 읽기의 중심임을 유지하도록 55:45로 나눕니다. `NodeRole`은 총괄·조율·실행만 뜻하므로 `coordinator`를 부서나 팀으로 번역하지 않습니다. 에이전트는 `agentIdentityToken`으로 업무 화면과 같은 이름을 쓰고, scope:"work" 임시 팀은 분리·점선으로 구분합니다.
-- 다만 **읽기 전용**입니다. 편성·분리·병합은 명령 레지스트리에 `organization.command`로 있지만 `ApplicationCommandMapV1`에 없어 타입 클라이언트만 쓰는 데스크톱에서는 부를 수 없습니다. 유일한 실사용 경로는 CLI의 `org:apply`입니다.
+- (해소 2026-08-09) 편성·분리·병합·되돌리기가 `ApplicationCommandMapV1`의 `organization.command`로 노출됐고 데스크톱 서비스가 `applyOrganizationChange`로 부릅니다. `expectedVersion`이 Organization Version 낙관적 잠금이라 스냅샷과 어긋나면 도메인이 거부합니다. **남은 것은 화면의 편성 UI**입니다 — 계약과 서비스는 열렸고 조직 표면이 아직 그 입력을 그리지 않습니다.
 - (정정 2026-08-09) 이 절은 원래 「`parent_handle`은 조회가 가져오지 않고 `scope`·`work_id`는 `OrganizationNodeViewV1`에 없어 실 데이터로 계층·임시/영속을 그릴 수 없다」고 적었습니다. **셋 다 지금은 있습니다** — 계약(`contracts.ts` `OrganizationNodeViewV1`), 조회 투영(`query-registry.ts`), 데스크톱 투영(`desktop-service.ts`) 세 층이 모두 나르고 테스트가 고정합니다. 조직 화면은 계층과 임시/영속 구분을 실 데이터로 그립니다. 남은 것은 **쓰기(편성 명령)뿐**입니다.
 - 확장 화면은 Capability를 먼저 보이지만 **설치된 확장의 Capability는 계약이 주지 않아 비어 있습니다.** 9.5를 보십시오.
 - 설정에 있던 `로컬 환경` 구역은 daemon 상태·데이터 위치를 볼 **조회 자체가 없어** 2026-07-30에 제거했습니다. 조회가 열리면 어느 표면이 소유할지 다시 정합니다 — 이것은 사람이 정한 경계가 아니므로 설정으로 돌아가지 않습니다.

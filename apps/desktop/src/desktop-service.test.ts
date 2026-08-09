@@ -2509,6 +2509,32 @@ describe("Application desktop service", () => {
     );
   });
 
+  it("조직 편성은 Organization Version을 낙관적 잠금으로 실어 typed command로 보낸다", async () => {
+    const native = transport();
+    const service = createApplicationDesktopService(native, { createId: () => "request-0001" });
+
+    await service.applyOrganizationChange({
+      expectedVersion: 7,
+      change: {
+        kind: "create",
+        handle: "refund-analysis",
+        name: "환불 분석",
+        responsibility: "환불 지연 구간 조사",
+        parentHandle: "delivery-coordination",
+        scope: "persistent",
+      },
+    });
+
+    // 조직 화면이 읽기 전용이던 이유가 이 명령이 타입 계약에 없어서였습니다. CLI만 부를 수 있었습니다.
+    expect(native.command).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: "organization.command",
+        expectedRevision: 7,
+        payload: expect.objectContaining({ kind: "create", handle: "refund-analysis" }),
+      }),
+    );
+  });
+
   it("개선 상세의 승인은 revision과 사유를 typed command로 보낸다", async () => {
     const native = transport();
     const service = createApplicationDesktopService(native, { createId: () => "request-0001" });

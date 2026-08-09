@@ -2,6 +2,7 @@ import {
   ApplicationClient,
   agentIdentityToken,
   agentRoleToken,
+  type ApplicationCommandMapV1,
   type ApprovalViewV1,
   type ArtifactViewV1,
   type AssignmentViewV1,
@@ -1405,6 +1406,15 @@ export interface DesktopService {
   decideWorkspaceTrust(workspace: DesktopWorkspaceView, decision: "trusted" | "blocked"): Promise<DesktopWorkspaceView>;
   loadOrganization(): Promise<OrganizationView>;
   /**
+   * 조직 편성. 헌법 §9.1이 조직 화면을 「읽기 전용」이라 적은 이유가 이 명령이 계약에 없어서였고,
+   * 그 사이 유일한 실사용 경로는 CLI였습니다. `expectedVersion`은 스냅샷에서 읽은 Organization
+   * Version이며 낙관적 잠금이라 어긋나면 도메인이 거부합니다.
+   */
+  applyOrganizationChange(input: {
+    readonly expectedVersion: number;
+    readonly change: ApplicationCommandMapV1["organization.command"]["payload"];
+  }): Promise<void>;
+  /**
    * 이 Work의 모든 협업방과 각 방의 메시지.
    * 한 Work에 방이 여럿일 수 있습니다. 에이전트끼리 직접 붙는 2인 방도 같은 방입니다.
    */
@@ -1712,6 +1722,9 @@ export function createApplicationDesktopService(
 
     async loadOrganization() {
       return projectOrganization(await client.query("organization.graph.snapshot", {}));
+    },
+    async applyOrganizationChange(input) {
+      await client.command("organization.command", input.change, { expectedRevision: input.expectedVersion });
     },
 
     async loadRooms(workId) {
@@ -3353,6 +3366,12 @@ export function createFixtureDesktopService(): DesktopService {
       }),
 
     loadOrganization: () => fixturePromise(() => ({ version: 1, nodes: fixtureOrganizationNodes })),
+    applyOrganizationChange: (input) =>
+      fixturePromise(() => {
+        // 브라우저 개발 화면에는 조직 원장이 없습니다. 편성 결과를 지어내면 화면이 실제로는
+        // 일어나지 않은 조직 변경을 사실처럼 보여 줍니다.
+        throw new Error(`Fixture는 조직 편성을 구성하지 않았습니다: ${input.change.kind}`);
+      }),
     loadAutonomy: () =>
       fixturePromise(() => ({
         mode: "automatic",
