@@ -40,7 +40,7 @@ export function runtimeAgentHandle(name: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(name);
     if (!Array.isArray(parsed) || parsed.length !== 3) return undefined;
-    const handle = parsed[2];
+    const handle: unknown = (parsed as readonly unknown[])[2];
     return typeof handle === "string" && handle.length > 0 ? handle : undefined;
   } catch {
     return undefined;

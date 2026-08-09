@@ -1460,12 +1460,14 @@ function extensionCapabilities(group: unknown): readonly ExtensionCapabilityView
 /** 도메인 view를 그대로 흘리면 organizationId가 클라이언트로 샙니다. 계약이 선언한 것만 내보냅니다. */
 function publicExtensionInstallation(value: unknown): ExtensionInstallationViewV1 {
   const record = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  // `String(unknown)`은 객체를 "[object Object]"로 접습니다. 문자열이 아니면 지어내지 않고 비웁니다.
+  const text = (candidate: unknown): string => (typeof candidate === "string" ? candidate : "");
   return {
-    installationId: String(record.installationId ?? ""),
-    packageName: String(record.packageName ?? ""),
-    state: String(record.state ?? ""),
+    installationId: text(record.installationId),
+    packageName: text(record.packageName),
+    state: text(record.state),
     ...(typeof record.activeVersionId === "string" ? { activeVersionId: record.activeVersionId } : {}),
-    activationGeneration: Number(record.activationGeneration ?? 0),
+    activationGeneration: typeof record.activationGeneration === "number" ? record.activationGeneration : 0,
     contributions: extensionCapabilities(record.contributions),
     permissions: extensionCapabilities(record.permissions),
   };

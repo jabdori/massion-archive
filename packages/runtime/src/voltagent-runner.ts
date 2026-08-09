@@ -330,7 +330,8 @@ function boundedToolPayload(field: "toolInput" | "toolOutput", value: unknown): 
   if (value === undefined || value === null) return {};
   let encoded: string;
   try {
-    encoded = JSON.stringify(value) ?? "";
+    // 위에서 undefined·null을 걸렀으므로 여기 결과는 언제나 문자열입니다.
+    encoded = JSON.stringify(value);
   } catch {
     return {};
   }
