@@ -392,9 +392,8 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 
 - 협업방 도메인은 완성돼 있습니다. 메시지 10종, `reply`·`caused-by` 인과, 동시 커밋의 고유 sequence, 라운드·token·비용·deadline 한계, 참여·이탈, 불변 Shared Context Reference와 versioned lease가 모두 계약과 테스트로 존재합니다.
 - VoltAgent 위임도 구현돼 있습니다. 조직 그래프가 supervisor·subAgent로 배선되어 에이전트가 실제로 서로에게 일을 넘깁니다.
-- **그러나 둘이 연결돼 있지 않습니다.** 생산 경로에서 협업 메시지를 기록하는 곳은 `core-pipeline.ts`의 두 지점(사용자 요청, Representative handoff)과 Surface가 부르는 공개 command뿐이고, `packages/runtime/src`는 `postMessage`를 호출하지 않습니다.
-- 따라서 실제 방에는 Work당 메시지 두 건만 남습니다. 에이전트끼리 묻고 반론하고 인계하는 장면은 VoltAgent 메모리에서 끝나고 사라집니다.
-- 이것은 4.4가 정한 "모델의 transcript만으로 조직 상태나 완료를 복원하지 않는다"를 지키지 못하는 지점입니다. 재시작하면 협업 과정이 사라지고, 감사할 수 없으며, 사용자가 볼 수 없습니다.
+- **(해소 2026-08-09) 둘을 연결했습니다.** `CollaborationRuntimeRecorder`가 `ExecutionDeltaObserver`로 `delegate_task` 위임·답변을 관찰해 협업방에 `handoff`·`answer` 두 메시지로 남기고, `apps/server`의 composition root가 기존 실행 스트림과 함께 주입합니다. 인과(`replyToMessageId`·`causedByMessageId`), `executionId` 계보, 방 예산에 쓰이는 token 수가 모두 실려 재시작 뒤에도 보존됩니다. 내구성 경계 결정은 [ADR-004](../architecture/ADR-004-runtime-collaboration-durability.md)가 소유합니다.
+- 남은 것: `challenge`·`decision`·`evidence` 같은 발화는 VoltAgent 기본 위임에서 나오지 않으므로 매핑하지 않았습니다. 없는 대화를 지어내지 않는다는 것이 그 이유입니다. 방에 참여하지 않은 동적 편성 Agent에게 위임하면 도메인이 거부하고 기록만 실패합니다 — 편성 Agent를 방에 참여시키는 것은 별도 작업입니다.
 - `SharedContextReference`와 `ResourceLease`는 생산 호출이 0건입니다. 도메인 포함과 실제 사용을 구분해야 합니다.
 - 이 갭은 `REQ-AGENT-HARNESS-001`이 요구하는 범위이며 요구사항 추적표에서 `in-progress`입니다.
 

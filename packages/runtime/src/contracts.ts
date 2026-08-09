@@ -69,6 +69,13 @@ export interface ExecutionDelta {
   readonly toolName?: string;
   readonly toolCallId?: string;
   readonly summary?: string;
+  /**
+   * Tool 호출 인자와 결과의 canonical JSON입니다. `summary`는 화면이 흘려보는 미리보기라 짧게
+   * 자르지만, 협업 기록기는 위임 대상과 답변 본문을 여기서 읽으므로 더 넉넉한 상한을 씁니다.
+   * 이 둘이 없으면 `delegate_task`에서 «누구에게 무엇을 시켰는지»를 알 수 없습니다.
+   */
+  readonly toolInput?: string;
+  readonly toolOutput?: string;
   readonly occurredAt: string;
 }
 

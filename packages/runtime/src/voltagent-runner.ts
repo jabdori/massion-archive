@@ -320,6 +320,24 @@ export interface RoutedExecutionContextResolver {
   }>;
 }
 
+/**
+ * Tool 인자·결과를 협업 기록이 읽을 수 있는 크기로 자릅니다. 상한을 넘으면 잘린 문자열이 아니라
+ * 필드 자체를 비웁니다 — 반쪽 JSON을 넘기면 읽는 쪽이 파싱에 실패하고 그 이유를 알 수 없습니다.
+ */
+const TOOL_PAYLOAD_LIMIT = 8_000;
+
+function boundedToolPayload(field: "toolInput" | "toolOutput", value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return {};
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value) ?? "";
+  } catch {
+    return {};
+  }
+  if (encoded.length === 0 || encoded.length > TOOL_PAYLOAD_LIMIT) return {};
+  return { [field]: encoded };
+}
+
 export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
   private readonly active = new Map<string, ActiveExecution>();
   private readonly deltaSequences = new Map<string, number>();
@@ -1676,6 +1694,7 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
         kind: "tool-call",
         ...(toolName === undefined ? {} : { toolName }),
         ...(toolCallId === undefined ? {} : { toolCallId }),
+        ...boundedToolPayload("toolInput", part.input ?? part.args),
       });
     else if (part.type === "tool-result")
       this.emitDelta(context, executionId, agentHandle, {
@@ -1683,6 +1702,7 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
         ...(toolName === undefined ? {} : { toolName }),
         ...(toolCallId === undefined ? {} : { toolCallId }),
         summary: JSON.stringify(part.output ?? part.result ?? null).slice(0, 500),
+        ...boundedToolPayload("toolOutput", part.output ?? part.result),
       });
     else if (part.type === "error") this.emitDelta(context, executionId, agentHandle, { kind: "error" });
     else if (part.type === "finish")

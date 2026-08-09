@@ -396,7 +396,7 @@ flowchart TB
 | 협업방 생성 | 구현됨 | `packages/work` | `core-pipeline.ts`가 Work마다 `Core Office` 방 하나를 보장. 사용자 + Core Office 8명 참가 |
 | 사용자 요청·Representative handoff 기록 | 구현됨 | `packages/work` | `core-pipeline.ts` 두 지점. `replyTo`·`causedBy`로 인과 연결 |
 | 사용자 관찰·개입 | 구현됨 | `packages/work` | 공개 command `collaboration.room.open` · `room.join` · `message.post`를 Surface가 호출 |
-| **에이전트 간 직접 대화 기록** | **미구현** | `packages/work`에 10종 메시지 타입·인과·순서 계약 존재 | **없음.** `packages/runtime/src`에 `postMessage` 호출 0건. VoltAgent 위임은 메모리에서 끝남 |
+| **에이전트 간 직접 대화 기록** | 구현됨 (2026-08-09) | `packages/work`에 10종 메시지 타입·인과·순서 계약 존재 | `packages/application/src/collaboration-recorder.ts`가 `delegate_task` 델타를 관찰해 `handoff`·`answer`로 기록. 주입은 `apps/server/src/product.ts`. 결정은 [ADR-004](ADR-004-runtime-collaboration-durability.md) |
 | **다자 협업 라운드** | **미구현** | 방에 `max_parallel` · `max_rounds` · `round_count` 존재 | **없음.** 라운드를 진행시키는 실행 경로가 없음 |
 | **공유 상태** | **미구현** | `SharedContextReference` · `ResourceLease` 계약과 테스트 존재 | **없음.** 생산 호출 0건 |
 | 병렬 실행 | 부분 | `packages/work`의 Task·Assignment | Task 병렬은 동작. 협업방 안의 병렬 발언은 위 항목에 종속 |

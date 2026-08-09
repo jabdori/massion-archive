@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ApplicationProduct,
   CoreAssuranceStage,
+  CollaborationRuntimeRecorder,
   ExecutionStreamRegistry,
   CoreDeliveryStage,
   CoreEvidenceStage,
@@ -123,6 +124,7 @@ import {
   RuntimeExecutionStore,
   VoltAgentRunner,
   type AgentExecutionInput,
+  type ExecutionDeltaObserver,
   type StructuredOutputSpec,
 } from "@massion/runtime";
 import {
@@ -657,6 +659,31 @@ export async function createMassionDaemon(
     );
     modelFactoryReference.current = modelFactory;
     const executionStream = new ExecutionStreamRegistry();
+    // Agent 사이의 위임·답변을 Work의 협업방에 남깁니다. 여기 없으면 그 대화는 VoltAgent 메모리에서
+    // 끝나고 재시작에 사라집니다 — 헌법 4.4가 금지하는 상태입니다. 결정은 ADR-004가 소유합니다.
+    const collaborationRecorder = new CollaborationRuntimeRecorder({
+      executions: {
+        get: async (context, executionId) => (await runtimeExecutions.getRecovery(context, executionId)).execution,
+      },
+      works,
+      onFailure: (reason) => {
+        // 실행을 죽이지 않되 삼키지도 않습니다. 협업 기록이 빠진 방은 관측 가능해야 합니다.
+        process.stdout.write(
+          `${JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: "error",
+            event: "collaboration.record.failed",
+            reason: reason instanceof Error ? reason.message : String(reason),
+          })}\n`,
+        );
+      },
+    });
+    const deltaObserver: ExecutionDeltaObserver = {
+      observe(context, delta) {
+        executionStream.observe(context, delta);
+        collaborationRecorder.observe(context, delta);
+      },
+    };
     const routedRunner = new VoltAgentRunner(
       topologyRuntime,
       runtimeExecutions,
@@ -664,7 +691,7 @@ export async function createMassionDaemon(
       modelRegistry,
       directExecutionLifecycle,
       subscriptionExecutionContext,
-      { subscriptionApprovals: subscriptionPermissionBridge, deltaObserver: executionStream },
+      { subscriptionApprovals: subscriptionPermissionBridge, deltaObserver },
     );
     const topologies = new Map<string, OrganizationAgentTopology>();
     const synchronize = async (context: Parameters<typeof graph.listNodes>[0]) => {

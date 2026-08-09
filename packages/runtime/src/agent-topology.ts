@@ -31,6 +31,22 @@ export function runtimeAgentName(organizationId: string, handle: string, workId?
   return JSON.stringify([organizationId, workId ?? null, handle]);
 }
 
+/**
+ * `runtimeAgentName`의 역함수. VoltAgent가 `delegate_task` 인자에 실어 보내는 것은 agent name이고,
+ * 협업방·화면이 정체성으로 쓰는 것은 조직 handle이라 그 사이를 되돌릴 곳이 한 군데는 있어야 합니다.
+ * 이름 규칙을 아는 곳을 여기 하나로 유지합니다.
+ */
+export function runtimeAgentHandle(name: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(name);
+    if (!Array.isArray(parsed) || parsed.length !== 3) return undefined;
+    const handle = parsed[2];
+    return typeof handle === "string" && handle.length > 0 ? handle : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class OrganizationAgentTopology {
   public constructor(
     private readonly organizationId: string,
