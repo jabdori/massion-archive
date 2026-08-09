@@ -1,16 +1,13 @@
 # Massion AgentOS AAA v1 Master Handoff
 
-> 기준 시각: 2026-08-05 (Asia/Seoul)  
+> 기준 시각: 2026-08-09 (Asia/Seoul)  
 > 저장소: `/Volumes/Crucial P3 PLUS/workspace.backup-20260502/massion/.worktrees/phase-30-reconciled`  
 > 브랜치: `feat/phase-30-reconciled`  
-> Master 보강 시작 source HEAD: `92ed55d5d06145947b1598c4f7a112311692b7bc`
-> Master 보강 commit: `git log -1 --oneline -- docs/phases/30-surface-parity-agent-ux/aaa-v1-continuation-handoff-2026-08-05.md`로 확인
-> 제품 상태: **완료 아님 — 목표 일시 정지(paused), 아래 임계 경로부터 재개 필요**
+> 현재 HEAD: `1bfae9fd6` (2026-08-05 기준선 `92ed55d5d`에서 커밋 23건)
+> 제품 상태: **완료 아님 — 아래 임계 경로부터 재개 필요**
 >
-> **후속 세션 기록(2026-08-09)**: [`provider-surface-and-fallback-handoff-2026-08-09.md`](provider-surface-and-fallback-handoff-2026-08-09.md)가
-> 이 문서의 §7.4·§10 단계 1~2를 실제로 실행한 결과입니다. Codex fallback 배선, Provider 표면 전반,
-> SurrealDB 트랜잭션 유실을 다루며 커밋 22건을 남겼습니다. 두 문서가 충돌하면 더 최근 실행 기록인
-> 그쪽이 이깁니다. 단계 3(§7.5 협업방 배선) 이후는 이 문서가 그대로 정본입니다.
+> 이 문서가 유일한 정본 인계서입니다. 2026-08-05 master 인계서에 2026-08-09 세션(§10 단계 1~2 실행,
+> Provider 표면 전반, SurrealDB 트랜잭션 유실)을 병합했습니다. 별도 세션 문서는 두지 않습니다.
 
 이 문서는 다음 구현 에이전트가 이전 채팅 전체를 읽지 않고도 프로젝트의 배경·의도·의사결정·구현 과정·실패·검증·현재 상태를 복원하고 작업을 안전하게 이어가기 위한 master handoff입니다. 오래된 계획 문서나 fixture와 충돌할 때는 현재 소스 코드, Git 상태, 실제 데이터베이스와 런타임 증거를 우선합니다.
 
@@ -268,6 +265,52 @@ React/Vite renderer
 - 첫 인계서는 실행 runbook 중심으로 작성됐고, 전체 배경·결정·연혁이 부족하다는 사용자 지적을 받았습니다.
 - 본 master handoff는 그 누락을 보완한 것입니다.
 
+### 0.C.14 2026-08-09 — Codex fallback 실행, Provider 표면 재건, 트랜잭션 유실
+
+사용자의 Codex 구독이 소진돼 모든 Work가 막힌 상태에서 재개했습니다. 요청은 "대체 Provider로 넘어가게 하라"였고, 조사가 fallback 배선 → Provider 표면 전반 → 트랜잭션 인프라로 번졌습니다.
+
+- §7.4 truth table의 Codex 어댑터·runner 몫을 실제로 닫았습니다(0.C.14.1).
+- Provider 표면에서 **백엔드에 이미 있는 것을 화면이 버리는** 결함을 다섯 건 찾아 연결했습니다(0.C.14.2).
+- 아무 command나 무작위로 500을 내던 원인이 SurrealDB 트랜잭션 유실임을 로그로 규명했습니다(0.C.14.3).
+- 사용자 요청으로 독립 시각 검수를 8라운드 돌려 BLOCK 18건을 전부 닫았습니다(0.C.14.4).
+- 커밋 23건, 전부 push. 테스트는 desktop 278 · router 94 · application 554 · server 344 · storage 22 · runtime 257.
+
+이 회차의 가장 큰 손실은 코드가 아니라 **검증 순서**였습니다. 8라운드 동안 코드만 고치고 번들을 다시 만들지 않아, 사용자는 그 전 번들을 계속 보며 이미 고친 것을 결함으로 지적했습니다. 검수 에이전트는 소스를 읽고, 구현자는 테스트를 돌리고, 사용자는 실행 화면을 봤습니다 — 셋이 서로 다른 것을 보고 있었습니다.
+
+#### 0.C.14.1 fallback을 막던 두 겹
+
+`apps/server/src/codex-app-server-agent.ts`가 turn 실패를 `sideEffectsStarted: safeAuthenticationFailure ? false : true`로 보고했습니다. 그 조건은 **401일 때만** 참이라, 401이 아닌 모든 실패 — 정확히 구독 소진(429) 포함 — 이 "이미 부작용이 시작됐다"로 보고돼 router gate가 fallback을 막았습니다. **router는 옳았고 어댑터가 사실을 왜곡**하고 있었습니다. 어댑터는 승인 요청·non-userMessage item·agent delta·output token·알 수 없는 notification 단계까지 부작용을 정교하게 추적하고 있었는데, 그 관측값이 resolve 지점에서 통째로 버려졌습니다.
+
+`packages/runtime/src/voltagent-runner.ts`의 세 catch는 `sideEffectsStarted: lease.kind === "agent-runtime"`로 **lease 종류만 보고** 부작용을 단정했습니다. Codex가 정상 완료했는데 응답만 스키마에 안 맞는 경우도 fallback이 막혔고, schema validate 실패는 marker 없는 원문을 reject해 `failureSignal`이 `unknown`으로 분류하며 두 번째로 막았습니다.
+
+#### 0.C.14.2 화면이 버리고 있던 것 다섯
+
+| 무엇 | 증상 |
+|---|---|
+| 지원 provider manifest 15개 중 14개 | 투영이 `openai-codex` 하나만 골라내 나머지는 등록 전까지 보이지 않음 |
+| `endpointId`(register 응답) | 서버가 base_url을 정규화해 저장하는데 UI가 입력 원문으로 되찾아 `addCredential`이 서버에 도달조차 못 함 |
+| `router.credentials` 자체 | 투영이 `catalog.credentials`(존재하지 않는 필드)를 읽어 키가 항상 0건 |
+| credential `version`/`secretVersion` | query 투영에서 빠져 있어 제거도 표시도 불가 |
+| `credential.disable`·`account.disconnect` | command는 서버에 있는데 화면 경로가 없어 넣을 수는 있고 뺄 수는 없었음 |
+
+여기에 키를 `find()`로 **단수 취급**한 결함이 겹쳤습니다. Z.AI는 실제로 키가 2개인데 화면은 1개만 알았고, 그래서 새 키를 넣으려는 사람에게 "키 교체"가 뜨고 계정은 목록·키는 단수라는 **한 화면 두 문법**이 생겼습니다.
+
+#### 0.C.14.3 트랜잭션이 사라지는 문제
+
+제거·등록 등 아무 command나 무작위로 500이 나고 화면에는 "요청을 처리하지 못했습니다"만 떴습니다. SurrealDB 로그가 원인을 그대로 말했습니다.
+
+```
+WARN Transaction 019fd3cd-… not found in WebSocket transactions map (have 0 transactions)
+```
+
+`bde95f8b1`이 `forkSession`을 제거한 뒤 모든 트랜잭션이 WebSocket 하나를 공유하므로, 서버 쪽 맵이 비면 진행 중이던 트랜잭션이 통째로 사라집니다. 그 시점에 커밋된 것은 없어 재시도가 안전한데 재시도 목록에 없었습니다. **왜 맵이 비는지는 미해결**이며, §0.I.1의 "transaction warning 누적 1,462"와 같은 뿌리로 추정합니다.
+
+#### 0.C.14.4 시각 검수 8라운드
+
+독립 에이전트("AAA 아니면 FAIL")로 BLOCK 8 → 3 → 3 → 1 → 1 → 1 → 1 → 0. 렌더 결함이 다수였습니다 — 존재하지 않는 `warning` 토큰을 참조해 경고 배너가 아예 안 그려짐, `--color-muted`가 `--color-fg-3`와 같은 값이라 활성/비활성 삼항이 no-op, 좌우 카운트가 다른 소스라 같은 화면이 `7/7`과 `6/7`을 동시 표시, `cn()`이 tailwind-merge가 아니라 모든 `className` override가 무효.
+
+검수의 한계도 기록합니다. 8라운드 내내 **코드만 읽고 실행 화면을 보지 않았습니다.** 그래서 "키가 있을 때 지울 수 있는가"와 "키가 여럿일 때"를 놓쳤고, 사용자가 실제 앱에서 즉시 발견했습니다.
+
 ## 0.D 사용자 결정 로그와 범위 변화
 
 다음 결정은 채팅 과정에서 반복적으로 확정됐습니다. 다음 에이전트는 오래된 plan보다 이를 우선합니다.
@@ -295,6 +338,9 @@ React/Vite renderer
 | 19 | 40.99GB 실행 중 메모리 문제를 실제 결함 후보로 취급 | 단기 sample로 완료 금지; 장시간 component별 evidence 필요 |
 | 20 | 전체 목표가 완료되지 않았으므로 되살릴 것 | 두 Work 이정표 뒤 9개 surface·negative matrix·release gate까지 완료해야 함 |
 | 21 | 오래된 `Massion.app`으로 현재 작업을 검증하지 말 것 | bundle에 source 수정이 포함됐는지 hash/content와 build exit를 확인하고 같은 candidate만 UAT |
+| 22 | 화면을 고쳤으면 **번들을 다시 만들고 exit code를 읽은 뒤** 앱을 교체할 것 | 2026-08-09에 8라운드 수정이 미빌드 상태로 남아 사용자가 옛 화면을 보고 이미 고친 것을 결함으로 지적함. `BUILD_EXIT`를 캡처만 하고 읽지 않아 잘못된 앱을 두 번 전달 |
+| 23 | 시각 판단은 **실행 화면**으로 할 것 | 코드 검수만으로는 "뭔가 있을 때 지울 수 있는가" 같은 질문이 나오지 않음. 8라운드 검수가 놓친 결함을 사용자가 앱에서 즉시 발견 |
+| 24 | 무료 endpoint가 죽으면 **후보에서 정산**하고 대체를 찾을 것 | HF DeepSeek 무료 endpoint는 retired. GLM 우선, OpenRouter 무료 모델을 대체 후보로 |
 
 ### 0.D.1 현재 동결된 임계 순서
 
@@ -342,6 +388,30 @@ TUI·Web·광범위 미관·서명·모든 UAT를 동시에 열면 사용자에�
 ### 0.E.8 단기 메모리 sample로 40GB 문제 완료 선언
 
 15분 fresh run에서 재현하지 못한 것은 좋은 표적 신호일 뿐 장시간 누수 부재의 증거가 아닙니다. raw sample, slope, peak, 반복 Work와 component별 RSS가 필요합니다.
+
+### 0.E.9 코드를 고치고 번들을 다시 만들지 않음
+
+2026-08-09에 8라운드에 걸쳐 표면을 고쳤으나 `tauri:build`를 돌리지 않아, 사용자는 그 전 번들을 계속 봤습니다. "제거 확인이 다이얼로그로 안 뜬다", "키 추가가 없다"는 지적은 **이미 고쳤지만 화면에 없던 것**들이었습니다. 검수는 소스를, 구현자는 테스트를, 사용자는 실행 화면을 봤습니다.
+
+### 0.E.10 build exit code를 캡처하고 읽지 않음
+
+`BUILD_EXIT=1`이 출력에 그대로 있었는데 다음 단계로 넘어가 잘못된 앱을 두 번 전달했습니다. §5.1이 같은 함정을 이미 경고하고 있었습니다.
+
+### 0.E.11 «고쳤다»는 보고가 코드와 다름
+
+시각 전용 변경은 타입도 lint도 문자열을 보지 않습니다. 2026-08-09에 세 번 어긋났습니다 — `bg-muted` 미반영, `dialog.tsx` 미반영, `ProviderField` 대신 `GrowthField` 수정. **`git diff --stat`으로 의도한 파일이 목록에 있는지** 확인하는 절차를 중간에 도입해 prettier 재포맷으로 깨진 치환을 즉시 잡았습니다.
+
+### 0.E.12 재시도 판정을 넓게 잡음
+
+`Transaction not found`를 재시도 대상에 넣을 때 `/\btransaction\b[^]*\bnot found\b/`로 넓게 매칭했더니 한 번만 실패해야 할 것들까지 4번씩 재시도해 application 테스트 3건이 깨졌습니다. **재시도 판정을 넓히는 것은 조용히 의미를 바꾸는 변경**입니다. 문장 시작에 고정해 서버 고유 표현만 매칭하도록 좁혔습니다.
+
+### 0.E.13 파일을 잘라먹음
+
+`open(p,'w')` 후 write에서 예외가 나 `desktop-service.ts`(242KB)가 0바이트가 됐습니다. `git checkout`으로 복구했습니다. 스크립트로 파일을 다시 쓸 때는 **읽기·변환·검증을 모두 마친 뒤에만** 열어야 합니다.
+
+### 0.E.14 눈에 먼저 띈 경고를 원인으로 지목
+
+빌드 실패 때 `Tarball download 15 KiB/s` 경고를 원인으로 결론지었으나, 진짜 오류는 스택 위쪽의 `ENOTDIR`이었습니다(§18.1).
 
 ## 0.F Git 이력·rebase·브랜치·tag 사실
 
@@ -414,7 +484,7 @@ source baseline HEAD에는 874개 commit이 있으며 active branch delta는 147
 | 조직 | `partial` | hierarchy·scope·work ID·staffing proposal의 contract→Desktop wiring | fixture 없는 proposal 승인·거절, Organization Version, revert, restart UAT |
 | 개선(Growth) | `partial` | domain, 상세 evidence·signal·effect query, typed configure/approve/reject, Desktop 실제 버튼, 일부 adoption/effect cohort | 최신 candidate의 review/auto 실제 UAT, follow-up effect, revert 제품 경로와 restart 보존 |
 | 확장 | `partial` | install·inspect·approval·worker·health·rollback | 설치 Capability를 Agent Runtime이 소비해 실제 Work에 기여하는 경로 |
-| 프로바이더 | `blocked` | connection·account·key·Router·Codex login | model on/off contract, Codex 오류 분류·fallback·lineage, retired HF unavailable 처리 |
+| 프로바이더 | `partial` | connection·account·key·Router·Codex login, 지원 manifest 목록 노출, 키·계정 추가/제거, 2단계 provider 제거, Codex 오류 분류·fallback 배선(2026-08-09) | model on/off contract, **fallback 체인 실검증**, OpenRouter를 route 후보로 등록 |
 | 예산 | `fixture-only` | Router 내부 reservation/cost object와 목표 UI | guard command, `route_attempt` query, threshold persistence, actual hard limit block |
 | 설정 | `partial` | execution policy, Growth mode UI 일부, en/ko 기반 | policy 실제 행동 변화, system locale, restart, Agent output language 전체 UAT |
 | 전역 수신함 | `partial` | approval·blocked·Growth review를 하나의 view로 투영하는 shell | 실제 single-state-source 생성·해소·badge 일치 UAT |
@@ -428,7 +498,7 @@ source baseline HEAD에는 874개 commit이 있으며 active branch delta는 147
 | 협업방·handoff | `blocked` | room·participant·user request·Representative handoff는 있으나 Runtime delegate/answer 영속 0 |
 | Knowledge·RAG·Memory | `partial` | production knowledge·citation·memory lineage 일부 동작; 관계 graph와 전체 K UAT 미완 |
 | Growth 자가개선 | `partial` | 상세 조회와 review command·Desktop 연결 및 일부 effect 증거; 최신 review/auto·follow-up effect·revert·restart UAT 미완 |
-| Provider·fallback | `blocked` | router gate는 안전하지만 adapter/runner 분류와 queued 보상이 실제 fallback을 막음 |
+| Provider·fallback | `partial` | adapter·runner 분류를 2026-08-09에 고쳐 429/5xx·output 실패가 fallback 가능으로 분류됨. **실제 route attempt로 이어지는 실행 증거는 아직 없음**. queued orphan 보상은 미착수 |
 | Budget | `fixture-only` | 실제 limit command/query가 없음 |
 | Settings·i18n | `partial` | locale foundation과 일부 persistence; 전체 UX/runtime language contract 미검증 |
 | Extension | `partial` | 안전한 install lifecycle은 있으나 Capability→Runtime Work 연결 없음 |
@@ -619,6 +689,35 @@ git tag --list
 | `bde95f8b1` | `fix(storage): avoid transaction session teardown stalls` | transaction별 session attach/detach 제거, rollback 오류 보존, storage 21 통과/1 skipped, 검수 PASS |
 | `f8ce0368d` | `fix(application): return commands before event projection` | command 응답을 역사적 projection backlog에서 분리, 조직별 coalescing; application 52 files 통과/1 skipped, 533 통과/1 skipped, 검수 PASS |
 
+### 4.0 2026-08-09 세션에서 완료·검증된 변경
+
+| 커밋 | 변경 | 검증 근거 |
+|---|---|---|
+| `e7bb4bd2d` | `fix(server): classify Codex transport failures for safe fallback` | 429/5xx/stream이 상태 코드를 보존한 fallback 가능 실패로 분류. server 368 통과 |
+| `d424c202f` | `fix(runtime): settle structured output failures by observed side effects` | `SubscriptionStructuredOutputError`로 관측 부작용 전달. runtime 257 통과 |
+| `980e1b0dc` | `fix(desktop): use the registered endpoint ID when adding a credential` | register 응답의 `endpointId` 사용, 등록 idempotency, 내부오류 로깅, DeepSeek UI 제거 |
+| `2e6e91ad3` | `feat(router): remove a directly registered provider` | provider·endpoint·credential·model profile·candidate 정리, 계보·구독 두 안전장치 |
+| `73ee3e962` | `fix(application): report provider removal refusals to the user` | 거부를 conflict로 번역해 사유 노출 |
+| `7c535f944` | `fix(desktop): make provider removal deliberate and reversible-safe` | 확인 단계·danger 색·notice 정리, 지원 manifest 목록 노출, 은퇴 방식 |
+| `da26f7204` | `fix(desktop): repair dead tokens and dead ends on the provider surface` | `warning`·`--color-muted` 죽은 토큰 복구, 저장 안 되는 토글 제거, 카운트 단일 소스 |
+| `9be0dbfb0` | `fix(desktop): make dialog overrides land and stop denying a saved key` | `cn()`이 tailwind-merge가 아님을 실측, base 직접 수정, 키 존재 판정을 자격 기준으로 |
+| `f905ab9c5` | `fix(desktop): stop Korean leaking into the English locale and guard the class` | 미등록 문구 등록, 색·translate 가드 확장(접두사 필터 삭제) |
+| `5c6bfc0ce` | `fix(desktop): let dialog callers set their own width` | base의 `w-full` 제거. 프로덕션 CSS 방출 순서로 근거 확인 |
+| `b4ff3cacf` | `fix(desktop): render status messages through the translator` | `{error}`·`{notice}` 네 지점 + 렌더 지점 가드 |
+| `550da60c6` | `fix(desktop): translate the literals the surface renders directly` | JSX 리터럴 16곳, 한글 리터럴 부류 전체 가드 |
+| `ff8de2e60` | `feat(desktop): offer a retry when the provider surface fails to load` | design.md §5의 retry 상태. 회귀 테스트 포함 |
+| `3613f7d9b` | `style(desktop): finish the provider surface's visual leftovers` | AccountCard 행 통일, 점 3갈래, 막대 3px |
+| `46e92b3d5` | `feat(desktop): let the user take a key or an account back out` | `credential.disable`·`account.disconnect`를 화면에 연결 |
+| `7cd32e448` | `fix(router): let a retired provider be removed for good` | 비활성 provider 조회, 2단계 제거 |
+| `bf7e855d8` | `fix(storage): retry a transaction the server has lost` | 트랜잭션 유실을 재시도 대상으로. storage 22 · application 554 · server 344 통과 |
+| `9fb3f017b` | `fix(router): keep verification evidence when removing a provider` | 불변 증거 보존. 증거가 있는 조건을 테스트로 재현 |
+| `428eb0007` | `fix(desktop): read registered keys from the query that returns them` | `router.credentials`를 투영에 연결 + query에 version 두 필드 추가 |
+| `b13622de9` | `fix(desktop): model provider keys as the list they are` | 키를 목록으로. "키 추가"로 통일, 행마다 제거 |
+| `d5219bbe5` | `style(desktop): brace the void-returning key remove handler` | lint |
+| `1bfae9fd6` | `docs(handoff): record the provider surface and fallback session` | 이 문서에 병합됨 |
+
+실측 결과: desktop **278** · router **94** · application **554** · server **344** · storage **22** · runtime **257** 통과. typecheck·ESLint·Prettier 통과. `tauri:build` **exit 0**(2026-08-09 10:14).
+
 ### 4.1 시작 복구(startup recovery) 결함
 
 기존에는 `ApplicationRunStartupRecoveryService.start()`가 외부 모델 복구를 기다린 뒤 HTTP listen으로 넘어가 readiness가 30초 안에 열리지 않았습니다. 복구를 background로 옮기고 close 동작과 readiness 계약을 고정했습니다.
@@ -754,9 +853,11 @@ ApplicationRun
 
 이전에 복구된 다른 Work에서는 사람 이름과 모델명, `Atlas → Lyra` 인계, 동적 Agent `Umbra`·`Brook`, Task 2/2, Artifact, 진행 중 Assurance가 실제 데이터로 보였습니다. 이는 일부 풍부한 배선이 존재한다는 근거이지, 환불 시나리오 완주나 전체 v1의 증거는 아닙니다.
 
-## 7. 현재 최우선 코드 결함: Codex fallback과 모델 계보
+## 7. Codex fallback과 모델 계보 — 2026-08-09에 배선 완료, 실행 증거 미확보
 
-별도 디버거가 읽기 전용으로 원인을 추적했으며 아직 수정 커밋은 없습니다.
+> **상태 갱신(2026-08-09)**: 아래 §7.2~§7.3이 진단한 어댑터·runner 결함은 `e7bb4bd2d`·`d424c202f`로 닫혔고, §7.4 truth table 중 Codex 어댑터와 runner 몫은 표적 테스트로 고정됐습니다. **router 보안 gate는 지시대로 건드리지 않았습니다.** 남은 것은 두 가지입니다 — (1) 실제 Work에서 route attempt chain이 이어지는 실행 증거, (2) queued orphan 보상(§7.4의 store 경계 행). 아래 진단은 그대로 두어 무엇을 왜 고쳤는지 추적할 수 있게 합니다.
+>
+> HF DeepSeek 무료 endpoint는 retired가 확정돼(HTTP 404) provider 등록을 **완전히 제거**했습니다. 현재 route 후보는 5개 route × (Codex, GLM) = 10개입니다. OpenRouter는 provider·endpoint·키까지 등록됐으나 **model profile과 route candidate가 없어 후보로 참여하지 않습니다.**
 
 ### 7.1 현재 후보
 
@@ -841,6 +942,17 @@ Hugging Face 연동과 model ID는 이미 `apps/server/src/deepseek-community-pr
 
 fallback 묶음이 끝난 뒤, 실제 Work 검증 전에 이 GAP을 별도의 출시 차단 원자 묶음으로 닫아야 합니다. 권장 최소 경로는 기존 `ExecutionDeltaObserver` seam과 이미 있는 Work command·execution delta·idempotent command ID 계약을 재사용하는 것입니다. 다만 fire-and-forget in-memory queue만으로는 delta 직후 crash에서 메시지가 영구 유실됩니다. 실행을 기록 실패로 죽이지 않는 원칙을 유지하면서 durable outbox/event enqueue, terminal 전 drain/ack, 또는 명시적 degraded 상태와 recovery source 가운데 저장소의 기존 패턴에 맞는 최소 durability 경계를 사용해야 합니다.
 
+> **2026-08-09 조사 메모(착수 못 함)**: seam 위치를 확인했습니다.
+>
+> ```
+> ExecutionDelta          contracts.ts:62  — "휘발성 신호, 도메인 정본 아님, 저장소에 기록하지 않음"
+> ExecutionDeltaObserver  contracts.ts:75  — "동기 fire-and-forget: 예외·배압을 실행 경로에 전파하지 않음"
+> ExecutionStreamRegistry execution-stream.ts:17 — 이미 observer를 구현
+> works.postMessage       core-pipeline.ts:341, 483 — commandId/workId/roomId/messageType/authorKind/authorId/content
+> ```
+>
+> 핵심 제약은 계약 자체에 적혀 있습니다. delta는 **휘발성**이고 observer는 **fire-and-forget**이라, 그 자리에서 저장하면 아래가 경고한 유실이 그대로 발생합니다. 계층도 걸립니다 — runner(`packages/runtime`)는 works 도메인을 모르므로 application이 observer를 통해 받아야 합니다.
+
 최소 truth table:
 
 | Runtime 사건 | 영속 결과 |
@@ -898,7 +1010,9 @@ Work 완주 뒤 새 번들에서 먼저 15분 idle+active 표적 회귀를 수�
 3. 현재 DB와 `/tmp/massion-refund-project-20260804`를 보존합니다.
 4. 새로운 조사 축을 열지 않습니다.
 
-### 단계 1 — 생성된 최신 번들 실행과 command 응답 검증
+### 단계 1 — 생성된 최신 번들 실행과 command 응답 검증 ✅ 2026-08-09 완료
+
+> `/health/ready`가 실행 26초 만에 200(§4.1 수정의 실전 확인), workspace register HTTP 응답 1.1초로 3초 이내. **단 pending outbox는 idle에서 수렴하지 않았습니다** — 40초 관측에서 27,032건 그대로. 원인은 §19.1에 적었습니다.
 
 ```bash
 open -n '/Volumes/Crucial P3 PLUS/workspace.backup-20260502/massion/.worktrees/phase-30-reconciled/apps/desktop/src-tauri/target/release/bundle/macos/Massion.app'
@@ -926,7 +1040,9 @@ access token:   ~/.config/massion-v1/access.token
 
 token 값은 terminal이나 채팅에 출력하지 마세요. 정확한 기존 HTTP envelope는 관련 integration test와 server route에서 확인해 재사용하세요. 추측으로 payload를 만들지 않습니다.
 
-### 단계 2 — Codex fallback·queued orphan 묶음만 수정
+### 단계 2 — Codex fallback·queued orphan 묶음만 수정 ⚠️ 2026-08-09 부분 완료
+
+> 어댑터·runner 분류는 닫혔습니다(`e7bb4bd2d`, `d424c202f`). **queued orphan 보상과 실제 route attempt 계보 투영은 미착수**입니다. 아래 절차는 남은 두 항목에 그대로 적용됩니다.
 
 1. 7.4의 truth table 전체를 RED로 만듭니다.
 2. Codex adapter가 공식 error 종류와 실제 부작용 관측 여부를 정확히 반환하게 합니다.
@@ -1144,7 +1260,7 @@ happy path 두 건만으로 AAA v1을 판정하지 않습니다. 다음 경계 �
 아래 문구를 그대로 전달해도 됩니다.
 
 ```text
-이 저장소의 docs/phases/30-surface-parity-agent-ux/aaa-v1-continuation-handoff-2026-08-05.md를 정본 인계서로 읽고 Massion AgentOS AAA v1 목표를 재개하세요. root task의 goal은 완료가 아니라 paused 상태이며 새 task에서 goal이 null이면 이 문서 15절의 objective로 새 goal을 생성하세요. 질문하지 말고 먼저 Git·runtime 기준선을 검증한 뒤, 문서의 단계 1인 최신 Tauri 번들의 command 응답 재검증부터 시작하세요. 그 결과가 통과하면 새 범위를 열지 말고 Codex fallback·queued orphan·실제 모델 계보 묶음과 Runtime Agent 협업방 배선 묶음을 각각 RED→최소 구현→표적 테스트·포맷→통합 독립 검수→일괄 수정→최종 재검수→영어 Conventional Commit·push 순으로 닫으세요. build는 root 단일 직렬 큐에서만 실행하고 TUI·레거시 Web·비차단 미관 작업은 제외하세요. 이후 /tmp/massion-refund-project-20260804의 자연스러운 요청으로 Task·Artifact·Assurance·Records 완주를 검증하고, 별도 실제 파일 프로젝트에서 조직 capability gap을 먼저 증명한 뒤 명시적 배치 지시 없이 동적 Agent의 제안·승인·협업 참여·기여 계보를 검증하세요. 이것은 첫 임계 이정표일 뿐 전체 완료가 아닙니다. 이후 단계 9의 지식·조직·Growth·확장·Provider·예산·설정 계약, 단계 10의 negative matrix, 단계 13의 설치·VoiceOver·서명 gate까지 실제 증거로 닫으세요. fixture는 기대 품질 기준이지 실제 증거가 아닙니다. 전체 완료 전 goal을 complete로 바꾸지 마세요.
+이 저장소의 docs/phases/30-surface-parity-agent-ux/aaa-v1-continuation-handoff-2026-08-05.md를 정본 인계서로 읽고 Massion AgentOS AAA v1 목표를 재개하세요. root task의 goal은 완료가 아니라 paused 상태이며 새 task에서 goal이 null이면 이 문서 15절의 objective로 새 goal을 생성하세요. 질문하지 말고 먼저 Git·runtime 기준선을 검증하세요. 단계 1과 단계 2의 어댑터·runner 몫은 2026-08-09에 닫혔으므로(§4.0), 남은 것은 fallback 체인 실행 증거와 queued orphan 보상입니다. 앱을 한 번 실행해 프로바이더 화면을 직접 본 뒤 시작하세요 — 코드만 읽고 판단하면 실행 화면에만 보이는 결함을 놓칩니다. 그 결과가 통과하면 새 범위를 열지 말고 Codex fallback·queued orphan·실제 모델 계보 묶음과 Runtime Agent 협업방 배선 묶음을 각각 RED→최소 구현→표적 테스트·포맷→통합 독립 검수→일괄 수정→최종 재검수→영어 Conventional Commit·push 순으로 닫으세요. build는 root 단일 직렬 큐에서만 실행하고 TUI·레거시 Web·비차단 미관 작업은 제외하세요. 이후 /tmp/massion-refund-project-20260804의 자연스러운 요청으로 Task·Artifact·Assurance·Records 완주를 검증하고, 별도 실제 파일 프로젝트에서 조직 capability gap을 먼저 증명한 뒤 명시적 배치 지시 없이 동적 Agent의 제안·승인·협업 참여·기여 계보를 검증하세요. 이것은 첫 임계 이정표일 뿐 전체 완료가 아닙니다. 이후 단계 9의 지식·조직·Growth·확장·Provider·예산·설정 계약, 단계 10의 negative matrix, 단계 13의 설치·VoiceOver·서명 gate까지 실제 증거로 닫으세요. fixture는 기대 품질 기준이지 실제 증거가 아닙니다. 전체 완료 전 goal을 complete로 바꾸지 마세요.
 ```
 
 ## 15. 인계 시점의 목표 상태
@@ -1159,7 +1275,13 @@ Massion AgentOS를 실제 사용 가능한 AAA급 개인용 macOS v1로 완성�
 
 ## 16. Active development commit ledger
 
-아래는 현재 `main`과의 merge-base `4ae8650deec7f1668b09997d257b6f6f26ec7f79` 이후 `92ed55d5d`까지 feature branch의 147개 commit 전체입니다. 날짜는 author date의 일자이며, 순서는 ancestry의 오래된 것부터입니다. amend/rebase 전 SHA가 아니라 현재 공개 feature history의 SHA를 사용합니다.
+2026-08-09 세션이 `92ed55d5d` 위에 23개 commit을 더했습니다. 시간순 목록은 §4.0에 있고, 재현은 다음과 같습니다.
+
+```bash
+git log --reverse --format='%h|%s' 92ed55d5d..1bfae9fd6
+```
+
+아래는 그 이전, 현재 `main`과의 merge-base `4ae8650deec7f1668b09997d257b6f6f26ec7f79` 이후 `92ed55d5d`까지 feature branch의 147개 commit 전체입니다. 날짜는 author date의 일자이며, 순서는 ancestry의 오래된 것부터입니다. amend/rebase 전 SHA가 아니라 현재 공개 feature history의 SHA를 사용합니다.
 
 ```text
 5a5ade5a6|2026-07-30|fix(application): restore strict type boundaries for the full build
@@ -1310,6 +1432,66 @@ bde95f8b1|2026-08-04|fix(storage): avoid transaction session teardown stalls
 f8ce0368d|2026-08-04|fix(application): return commands before event projection
 92ed55d5d|2026-08-05|docs(handoff): capture AAA v1 continuation state
 ```
+
+## 18. 환경 함정 (코드 아님, 2026-08-09 관측)
+
+### 18.1 끊어진 pnpm store 심볼릭 링크
+
+```
+/Volumes/Crucial P3 PLUS/.pnpm-store → /private/tmp/massion-pnpm-store-current (없음)
+```
+
+7월 16일에 만들어진 링크의 대상이 `/tmp`에 있어 사라졌고, pnpm이 그 자리에 디렉터리를 만들려다 `ENOTDIR`로 죽어 **`tauri:build`가 두 번 실패**했습니다. 새 의존성을 추가하면서 처음 그 경로를 타게 돼 드러났습니다. 링크를 삭제해(사용자 승인) 기본 store(`~/Library/pnpm/store/v11`)를 쓰게 했습니다. **다시 나타나면 같은 곳을 보십시오.**
+
+### 18.2 dev server의 CSS가 불완전
+
+`vite dev`(5173)의 스타일시트에 **`.w-full` 규칙 자체가 없었습니다**(449 규칙 vs 프로덕션 1339). `app.tsx`에 36회 쓰이므로 소스에서 빠질 수 없습니다. 그래서 dev에서 잰 다이얼로그 폭·radius·색은 근거가 되지 못합니다. **시각 확인은 프로덕션 빌드(`vite build` → `vite preview`)에서만** 하십시오.
+
+### 18.3 renderer는 바이너리에 압축 임베드
+
+`strings massion-desktop | grep …`로는 renderer 문자열이 하나도 안 잡힙니다(기존 문구도 0건). 번들 반영 확인은 `apps/desktop/dist/assets/*.js`를 보십시오.
+
+### 18.4 화면 캡처
+
+`screencapture`는 화면 기록 권한이 필요하고, `-R`은 물리 픽셀이 아니라 **논리 좌표**를 씁니다. 창 크기 조정(`System Events`)에는 별도 접근성 권한이 필요합니다.
+
+## 19. 미해결로 남긴 결함
+
+### 19.1 idle에서 outbox가 수렴하지 않음
+
+pending **27,032건**(2026-08-09 관측, §0.I.1 기준 6,076건에서 증가). `packages/application/src/product.ts`의 `scheduleProjection`이 **command dispatch와 run schedule에서만** 호출되고 한 호출당 `projectPending(ctx, 1_000)` 상한이 걸려 있어, idle에는 호출자가 없습니다. 40초 관측에서 0건 감소. DoD의 "idle에서 bounded 수렴" 미충족이며, 비우려면 command를 28번 날려야 합니다.
+
+### 19.2 트랜잭션 유실의 근본 원인
+
+`bf7e855d8`이 재시도로 증상을 막았지만 **왜 WebSocket transactions map이 비는지는 모릅니다.** 연결 재수립인지, 동시 트랜잭션 경합인지, 서버 타임아웃인지 미규명. §0.I.1의 transaction warning 누적과 같은 뿌리로 추정합니다.
+
+### 19.3 OpenRouter가 route 후보가 아님
+
+provider·endpoint·키(`기본 키`, api_key, active, v1)까지 등록됐으나 **model profile과 route candidate가 없습니다.** `router.model.register` + `router.candidate.add`로 `nvidia/nemotron-3-ultra-550b-a55b:free`를 5개 route에 GLM 다음 우선순위로 넣어야 합니다. **UI에 model/candidate 등록 경로가 없어** command로 해야 합니다.
+
+### 19.4 room.tsx의 미등록 translate 문구 20건
+
+`styles.test.ts`의 translate 가드를 파일 전체로 켜면 즉시 걸립니다. 일부는 문장 조각을 이어붙이는 구조라 등록만으로 안 풀립니다(조사·어순). 가드 범위를 프로바이더 표면으로 한정하고 사유를 주석에 남겼습니다 — **첫날부터 실패하는 가드는 꺼지기 때문입니다.**
+
+### 19.5 종료가 25~30초 걸리고 실패로 끝남
+
+`server.shutdown.started` 후 30초 뒤 `server.shutdown.failed`. 앱 교체마다 재현됐습니다. §단계 8의 종료 수명주기 계약 항목입니다.
+
+### 19.6 검수가 남긴 미관 항목
+
+반그리드 간격, `--danger`=`--halt` 오버로드, 임의 px 30건. 값은 전부 스케일 위라 화면에는 보이지 않고 유지보수성 항목입니다.
+
+## 20. 신설한 가드 (`apps/desktop/src/styles.test.ts`)
+
+기존 가드가 2026-08-09의 결함을 하나도 못 잡았습니다. 스캔 대상에 `components/ui/`가 없었고, 최종 단언이 접두사 화이트리스트로 걸러졌는데 **`warning`이 그 목록에 없었습니다.**
+
+| 가드 | 무엇을 막는가 |
+|---|---|
+| 색 유틸리티 전수 | 정의되지 않은 토큰. 접두사 필터 삭제, 색이 아닌 유틸리티는 `nonColor` 정규식으로 제외 |
+| translate 키 존재 | `translate("…")` 인자가 카탈로그에 없는 경우 |
+| 한글 리터럴 감쌈 | 부류 전체 — 한글 리터럴이 `translate()` 밖에 있는가. 괄호 깊이를 걸어 삼항 전체 감싸기를 인정하고, 상태 경유·상수 정의 두 간접 경로를 인식 |
+
+**셋 다 결함을 일부러 재주입해 실패하는 것까지 확인했습니다.** "테스트를 추가했다"와 "테스트가 잡는다"는 다른 주장입니다.
 
 ## 17. 실행 명령·DB 조회·보존 위치 Reference
 
