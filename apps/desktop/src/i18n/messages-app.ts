@@ -20,7 +20,6 @@ export const appEnglishMessages = {
   "새 한도(달러)": "New limit (USD)",
   "한도 저장": "Save limit",
   "저장 중": "Saving",
-  없음: "None",
   "한도를 넘으면 이 경로의 새 호출이 차단됩니다. 지금까지 쓴 금액은 그대로 남습니다.":
     "New calls on this route are blocked past the limit. What has already been spent stays.",
   "한도는 0 이상의 숫자여야 합니다.": "The limit must be a number of zero or more.",
