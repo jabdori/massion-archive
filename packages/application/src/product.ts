@@ -43,6 +43,12 @@ import { CollaborationGraphSnapshotProjector } from "./snapshot.js";
 import { registerWorkDirectiveCommands } from "./work-directive-commands.js";
 import { WorkDirectiveStore } from "./work-directive-store.js";
 
+/**
+ * 한 번에 투영할 최대 event 수. `ApplicationEventProjector.projectPending`의 상한과 같아야
+ * "꽉 채웠다 = 남은 것이 있다"는 판정이 성립합니다.
+ */
+const PROJECTION_BATCH = 1_000;
+
 export interface ApplicationProductDependencies {
   readonly database: MassionDatabase;
   readonly identities: IdentityService;
@@ -256,7 +262,7 @@ export class ApplicationProduct implements AsyncDisposable {
         },
         events: {
           async read(context, input) {
-            await projector.projectPending(context, 1_000);
+            await projector.projectPending(context, PROJECTION_BATCH);
             return await events.read(context, input);
           },
         },
@@ -341,7 +347,12 @@ export class ApplicationProduct implements AsyncDisposable {
         let pending: TenantContext | undefined;
         while ((pending = this.pendingProjectionContexts.get(organizationId)) !== undefined) {
           this.pendingProjectionContexts.delete(organizationId);
-          await this.projector.projectPending(pending, 1_000);
+          // 상한까지 꽉 채웠다는 것은 남은 것이 있다는 뜻이므로 곧바로 다시 겁니다. 예전에는 한 번만
+          // 투영하고 멈춰, 다음 명령이 올 때까지 나머지가 그대로 남았습니다. 명령이 없는 idle에는
+          // 부를 사람이 없어 outbox가 영원히 수렴하지 않습니다(2026-08-09 관측: pending 27,032건,
+          // 40초 동안 0건 감소 — 비우려면 명령을 28번 보내야 했습니다).
+          if ((await this.projector.projectPending(pending, PROJECTION_BATCH)) === PROJECTION_BATCH)
+            this.pendingProjectionContexts.set(organizationId, pending);
         }
       } finally {
         this.activeProjectionOrganizations.delete(organizationId);

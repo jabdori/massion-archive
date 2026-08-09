@@ -282,6 +282,54 @@ describe("ApplicationProduct", () => {
     expect(projectPending).toHaveBeenCalledTimes(1);
   });
 
+  it("한 번에 다 못 비운 outbox는 명령을 더 받지 않아도 계속 비운다", async () => {
+    await using database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
+    const identities = await IdentityService.create(database);
+    const organizations = await OrganizationService.create(database);
+    const graph = await OrganizationGraphService.create(database, organizations);
+    const policies = await PolicyStore.create(database, organizations);
+    const owner = await identities.registerPersonalUser({
+      email: "projection-drain@example.com",
+      displayName: "Projection drain owner",
+    });
+    const context = await organizations.resolveTenantContext(owner.user.user_id, owner.organization.organization_id);
+    const executors = Object.fromEntries(
+      (["intake", "context-strategy", "evidence", "delivery", "assurance", "records"] as const).map((stage) => [
+        stage,
+        { execute: async () => ({ outcome: "advanced" as const, workId: "projection-drain-work-0001" }) },
+      ]),
+    ) as never;
+    await using product = await ApplicationProduct.create({
+      database,
+      identities,
+      organizations,
+      graph,
+      policies,
+      tokenKey: { keyId: "projection-drain-key", key: randomBytes(32) },
+      executors,
+      domain: {} as never,
+    });
+    // 상한(1,000)까지 꽉 채운 두 번을 지나 세 번째에 남은 것이 없다고 답합니다. 예전에는 한 번만
+    // 투영하고 멈춰, 남은 것을 비우려면 사람이 명령을 다시 보내야 했습니다(관측: pending 27,032건).
+    const remaining = [1_000, 1_000, 7];
+    const projectPending = vi
+      .spyOn(product.projector, "projectPending")
+      .mockImplementation(async () => remaining.shift() ?? 0);
+
+    await product.commands.dispatch(context, ["work:write"], {
+      schemaVersion: "massion.application.v1",
+      commandId: "projection-drain-start-0001",
+      correlationId: "projection-drain-correlation-0001",
+      operation: "run.start",
+      payload: { request: { text: "outbox 수렴 검증" } },
+    });
+    await product.drain();
+
+    expect(projectPending.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(remaining).toHaveLength(0);
+    projectPending.mockRestore();
+  });
+
   it("인증·명령·Core run·event를 하나의 실제 HTTP 제품 경계로 조립한다", async () => {
     await using database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
     const identities = await IdentityService.create(database);
