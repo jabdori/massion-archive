@@ -5430,7 +5430,13 @@ function ProviderOverviewTab({
         ) : (
           <ul>
             {keys.map((key) => (
-              <CredentialRow credential={key} key={key.credentialId} onRemove={() => onRemoveKey(key)} />
+              <CredentialRow
+                credential={key}
+                key={key.credentialId}
+                onRemove={() => {
+                  onRemoveKey(key);
+                }}
+              />
             ))}
           </ul>
         )}
