@@ -140,7 +140,7 @@ describe("Organization Governance Gate", () => {
     expect(permits).toHaveLength(0);
   });
 
-  it("외부 transaction에서 발생한 승인 필요 기록은 rollback 뒤에도 유지한다", async () => {
+  it("외부 transaction 전에 발생한 승인 필요 기록은 이후 원자 적용과 분리해 유지한다", async () => {
     const command = {
       commandId: crypto.randomUUID(),
       expectedVersion: 1,
@@ -154,7 +154,7 @@ describe("Organization Governance Gate", () => {
     let required: GovernanceApprovalRequiredError | undefined;
 
     try {
-      await database.transaction(async (transaction) => await graph.execute(context, command, transaction));
+      await graph.authorizeExecution(context, command);
     } catch (error) {
       if (error instanceof GovernanceApprovalRequiredError) required = error;
       else throw error;

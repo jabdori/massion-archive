@@ -91,7 +91,7 @@ export class GovernanceGate {
     executor?: QueryExecutor,
   ): Promise<GovernanceAuthorization> {
     if (input.action !== "work.read" && input.action !== "emergency.stop" && input.action !== "emergency.stop.disable")
-      await this.emergency.assertExecutionAllowed(context);
+      await this.emergency.assertExecutionAllowed(context, executor);
     const request = this.request(context, input);
     return await this.authorizeRequest(context, input, request, executor);
   }
@@ -123,8 +123,8 @@ export class GovernanceGate {
     executor?: QueryExecutor,
   ): Promise<GovernanceAuthorization> {
     if (input.approvalId) {
-      const approval = await this.approvals.get(context, input.approvalId);
-      const decision = await this.governance.getDecision(context, approval.decision_id);
+      const approval = await this.approvals.get(context, input.approvalId, executor);
+      const decision = await this.governance.getDecision(context, approval.decision_id, executor);
       if (approval.resource_revision !== input.resource.revision)
         throw new Error("resource revision precondition이 일치하지 않습니다");
       if (decision.requestHash !== hashPolicyRequest(request))

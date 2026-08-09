@@ -172,6 +172,53 @@ describe("CoreWorkCoordinator", () => {
     });
   });
 
+  it("승인 재개 stage 실패 뒤 새 retry prefix에도 원래 approval 입력을 보존한다", async () => {
+    await using database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
+    const identities = await IdentityService.create(database);
+    const organizations = await OrganizationService.create(database);
+    const owner = await identities.registerPersonalUser({
+      email: "coordinator-approval-retry@example.com",
+      displayName: "Approval retry",
+    });
+    const context = await organizations.resolveTenantContext(owner.user.user_id, owner.organization.organization_id);
+    const store = await ApplicationRunStore.create(database, organizations);
+    const calls: Array<{ readonly commandId: string; readonly resumeInput?: unknown }> = [];
+    let resumedAttempts = 0;
+    const coordinator = new CoreWorkCoordinator(store, {
+      ...executors([]),
+      delivery: {
+        async execute(_context, input) {
+          calls.push({ commandId: input.commandId, resumeInput: input.resumeInput });
+          if (input.resumeInput === undefined) {
+            return { outcome: "awaiting-approval", approvalId: "approval-core-retry-0001" };
+          }
+          resumedAttempts += 1;
+          if (resumedAttempts === 1) throw new Error("승인 뒤 delivery checkpoint 실패");
+          return { outcome: "advanced" };
+        },
+      },
+    });
+    const waiting = await coordinator.start(context, {
+      commandId: "core-run-approval-retry-start-0001",
+      correlationId: "core-run-approval-retry-correlation-0001",
+      request: {},
+    });
+    const approvalInput = { approvalId: "approval-core-retry-0001" };
+    const blocked = await coordinator.resume(context, waiting.runId, approvalInput);
+    expect(blocked).toMatchObject({ status: "blocked", blockedReason: "delivery-stage-failed" });
+
+    const retryAttemptId = "core-run-approval-retry-attempt-0001";
+    await expect(coordinator.retryBlocked(context, blocked.runId, retryAttemptId)).resolves.toMatchObject({
+      status: "completed",
+      stage: "terminal",
+    });
+    expect(calls).toEqual([
+      { commandId: `${waiting.runId}:delivery`, resumeInput: undefined },
+      { commandId: `${waiting.runId}:delivery`, resumeInput: approvalInput },
+      { commandId: `${waiting.runId}:delivery:retry:${retryAttemptId}`, resumeInput: approvalInput },
+    ]);
+  });
+
   it("승인 재개 입력을 정확한 approvalId allowlist로 검증하고 불일치하면 executor 전에 거부한다", async () => {
     await using database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
     const identities = await IdentityService.create(database);

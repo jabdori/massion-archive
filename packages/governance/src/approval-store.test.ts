@@ -308,7 +308,30 @@ describe("Approval Inbox", () => {
         now: () => new Date("2026-07-10T00:00:00.000Z"),
       });
       const originalTransaction = database.transaction.bind(database);
+      const originalQuery = database.query.bind(database);
       let raced = false;
+      let applyConcurrentOperation = false;
+      database.query = async <R = unknown[]>(surql: string, bindings?: Record<string, unknown>): Promise<R> => {
+        if (applyConcurrentOperation) {
+          applyConcurrentOperation = false;
+          if (concurrentOperation !== "cancel") {
+            await activeApprovals.vote(context, {
+              commandId: crypto.randomUUID(),
+              approvalId: request.approval_id,
+              expectedRevision: request.revision,
+              vote: "approve",
+              reason: "동시 승인",
+            });
+          } else {
+            await approvals.cancel(context, {
+              commandId: crypto.randomUUID(),
+              approvalId: request.approval_id,
+              reason: "동시 취소",
+            });
+          }
+        }
+        return await originalQuery<R>(surql, bindings);
+      };
       database.transaction = async <T>(transactionOperation: (transaction: QueryExecutor) => Promise<T>): Promise<T> =>
         await originalTransaction(
           async (transaction) =>
@@ -318,21 +341,7 @@ describe("Approval Inbox", () => {
                   expect(surql).toContain("status = 'pending'");
                   expect(surql).toContain("revision = $current_revision");
                   raced = true;
-                  if (concurrentOperation !== "cancel") {
-                    await activeApprovals.vote(context, {
-                      commandId: crypto.randomUUID(),
-                      approvalId: request.approval_id,
-                      expectedRevision: request.revision,
-                      vote: "approve",
-                      reason: "동시 승인",
-                    });
-                  } else {
-                    await approvals.cancel(context, {
-                      commandId: crypto.randomUUID(),
-                      approvalId: request.approval_id,
-                      reason: "동시 취소",
-                    });
-                  }
+                  applyConcurrentOperation = true;
                   return [[]] as unknown as R;
                 }
                 return await transaction.query<R>(surql, bindings);

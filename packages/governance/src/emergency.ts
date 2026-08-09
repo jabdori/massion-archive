@@ -143,9 +143,9 @@ export class EmergencyControl {
     });
   }
 
-  public async assertExecutionAllowed(context: TenantContext): Promise<void> {
-    await this.organizations.verifyTenantContext(context);
-    const current = await this.optionalState(this.database, context.organizationId);
+  public async assertExecutionAllowed(context: TenantContext, executor: QueryExecutor = this.database): Promise<void> {
+    await this.organizations.verifyTenantContext(context, undefined, executor);
+    const current = await this.optionalState(executor, context.organizationId);
     if (current?.active) throw new Error(`조직이 긴급 중단 상태입니다: ${current.reason}`);
   }
 

@@ -394,7 +394,7 @@ describe("DynamicStaffingCoordinator", () => {
     ]);
   });
 
-  it("승인 전 Work를 건드리지 않고 저장한 같은 graph command를 정상 approvalId로 재개한다", async () => {
+  it("승인 전 Work를 건드리지 않고 재시도 command도 원래 approval proposal을 원자 재개한다", async () => {
     await using database = await createDatabase({
       url: "mem://",
       namespace: "massion",
@@ -495,7 +495,18 @@ describe("DynamicStaffingCoordinator", () => {
     expect(storedWaiting).toMatchObject({ status: "awaiting-approval", approval_id: waiting.approvalId });
     const originalGraphCommand = storedWaiting?.graph_command_json;
 
-    await expect(staffing.prepare(approverContext, { ...command, approvalId: crypto.randomUUID() })).rejects.toThrow();
+    await expect(
+      staffing.prepare(approverContext, {
+        commandId: "dynamic-staffing-approval-unknown-retry-0001",
+        workId: command.workId,
+        approvalId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    const [afterUnknownApproval] = await database.query<[{ readonly command_id: string }[]]>(
+      "SELECT command_id FROM dynamic_staffing_proposal WHERE organization_id = $organization_id AND work_id = $work_id;",
+      { organization_id: context.organizationId, work_id: created.work.work_id },
+    );
+    expect(afterUnknownApproval).toEqual([{ command_id: command.commandId }]);
     expect(await works.getWork(context, created.work.work_id)).toEqual(before);
     expect(await works.listAssignments(context, created.work.work_id)).toEqual([]);
     expect((await works.recoverWork(context, created.work.work_id)).messages).toEqual([]);
@@ -520,15 +531,84 @@ describe("DynamicStaffingCoordinator", () => {
     expect((await works.recoverWork(context, created.work.work_id)).messages).toEqual([]);
     expect((await graph.getCurrentSnapshot(context)).version.version).toBe(1);
 
+    const rejectedCreated = await works.createWork(context, {
+      commandId: "dynamic-staffing-rejected-work-0001",
+      text: "거절된 동적 Staffing은 적용하지 마세요",
+      surface: "test",
+      organizationVersionId: bootstrap.version.version_id,
+    });
+    const rejectedRoom = await works.openRoom(context, {
+      commandId: "dynamic-staffing-rejected-room-0001",
+      workId: rejectedCreated.work.work_id,
+      expectedRevision: rejectedCreated.work.revision,
+      title: "Core Office",
+      coordinatorHandle: "representative",
+      participants: CORE_OFFICE_HANDLES.map((handle) => ({
+        kind: "agent" as const,
+        subjectId: handle,
+        role: handle === "representative" ? ("coordinator" as const) : ("participant" as const),
+      })),
+      limits: { maxParallel: 8, maxTokens: 100_000, maxCostMicros: 1_000_000, maxRounds: 100 },
+    });
+    await works.applyStrategyProjection(context, {
+      commandId: "dynamic-staffing-rejected-plan-0001",
+      workId: rejectedCreated.work.work_id,
+      expectedRevision: rejectedRoom.work.revision,
+      contextVersionId: "context-dynamic-staffing-rejected-0001",
+      strategyGenerationId: "strategy-dynamic-staffing-rejected-0001",
+      strategyChecksum: "d".repeat(64),
+      plan: strategyPlan("rejected-analysis", ["rejected-analysis"]),
+    });
+    const rejectedWaiting = await staffing.prepare(context, {
+      commandId: "dynamic-staffing-rejected-prepare-0001",
+      workId: rejectedCreated.work.work_id,
+    });
+    if (rejectedWaiting.outcome !== "awaiting-approval") {
+      throw new Error("거절 검증용 Dynamic Staffing approval이 필요하지 않습니다");
+    }
+    await approvals.vote(approverContext, {
+      commandId: "dynamic-staffing-rejected-vote-0001",
+      approvalId: rejectedWaiting.approvalId,
+      vote: "reject",
+      reason: "이 동적 Staffing 제안은 적용하지 않습니다",
+    });
+    await expect(
+      staffing.prepare(approverContext, {
+        commandId: "dynamic-staffing-rejected-retry-0001",
+        workId: rejectedCreated.work.work_id,
+        approvalId: rejectedWaiting.approvalId,
+      }),
+    ).rejects.toThrow();
+    const [[rejectedProposal]] = await database.query<[{ readonly status: string }[]]>(
+      "SELECT status FROM dynamic_staffing_proposal WHERE organization_id = $organization_id AND proposal_id = $proposal_id;",
+      { organization_id: context.organizationId, proposal_id: rejectedWaiting.proposalId },
+    );
+    expect(rejectedProposal?.status).toBe("awaiting-approval");
+    expect(await works.listAssignments(context, rejectedCreated.work.work_id)).toEqual([]);
+    expect((await works.recoverWork(context, rejectedCreated.work.work_id)).messages).toEqual([]);
+    expect((await graph.getCurrentSnapshot(context)).version.version).toBe(1);
+
     await approvals.vote(approverContext, {
       commandId: "dynamic-staffing-approval-vote-0001",
       approvalId: waiting.approvalId,
       vote: "approve",
       reason: "동적 Staffing 제안을 검토했습니다",
     });
-    const resumed = await staffing.prepare(approverContext, { ...command, approvalId: waiting.approvalId });
+    const [resumed, concurrentReplay] = await Promise.all([
+      staffing.prepare(approverContext, {
+        commandId: "dynamic-staffing-approval-retry-0001",
+        workId: command.workId,
+        approvalId: waiting.approvalId,
+      }),
+      staffing.prepare(approverContext, {
+        commandId: "dynamic-staffing-approval-retry-0002",
+        workId: command.workId,
+        approvalId: waiting.approvalId,
+      }),
+    ]);
 
     expect(resumed).toMatchObject({ outcome: "ready", proposalId: waiting.proposalId });
+    expect(concurrentReplay).toEqual(resumed);
     const [[storedApplied]] = await database.query<
       [{ readonly status: string; readonly graph_command_json: string }[]]
     >(
@@ -541,6 +621,11 @@ describe("DynamicStaffingCoordinator", () => {
     expect((await works.recoverWork(context, created.work.work_id)).messages).toEqual([
       expect.objectContaining({ message_type: "proposal", author_id: "context-strategy" }),
     ]);
+    const [afterRetry] = await database.query<[{ readonly command_id: string }[]]>(
+      "SELECT command_id FROM dynamic_staffing_proposal WHERE organization_id = $organization_id AND work_id = $work_id;",
+      { organization_id: context.organizationId, work_id: created.work.work_id },
+    );
+    expect(afterRetry).toEqual([{ command_id: command.commandId }]);
     await expect(staffing.prepare(approverContext, { ...command, approvalId: waiting.approvalId })).resolves.toEqual(
       resumed,
     );
@@ -1536,12 +1621,20 @@ describe("DynamicStaffingCoordinator", () => {
         `crash-${checkpoint}`,
         strategyPlan(`crash-${checkpoint}-task`, [`crash-${checkpoint}-capability`]),
       );
+      let authorizationCount = 0;
+      const authorizedGraph = await OrganizationGraphService.create(database, fixture.organizations, {
+        authorize: async () => {
+          authorizationCount += 1;
+          return { outcome: "allow" };
+        },
+      });
       let crash = true;
       let assignmentPersisted = false;
       const graph = {
-        getCurrentSnapshot: fixture.graph.getCurrentSnapshot.bind(fixture.graph),
+        getCurrentSnapshot: authorizedGraph.getCurrentSnapshot.bind(authorizedGraph),
+        authorizeExecution: authorizedGraph.authorizeExecution.bind(authorizedGraph),
         execute: async (...args: Parameters<OrganizationGraphService["execute"]>) => {
-          const result = await fixture.graph.execute(...args);
+          const result = await authorizedGraph.execute(...args);
           if (checkpoint === "graph" && crash) {
             crash = false;
             throw new Error("graph checkpoint crash");
@@ -1620,6 +1713,7 @@ describe("DynamicStaffingCoordinator", () => {
         ),
       ).toHaveLength(1);
       expect(await fixture.works.listAssignments(fixture.context, fixture.work.work_id)).toHaveLength(1);
+      expect(authorizationCount).toBe(2);
     },
   );
 

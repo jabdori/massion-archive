@@ -262,6 +262,10 @@ export interface GraphChangeResult {
   readonly impact: ImpactReport;
 }
 
+export interface OrganizationChangeAuthorization {
+  readonly kind: "organization-change-authorization";
+}
+
 export interface OrganizationGovernanceGate {
   authorize(
     context: TenantContext,
@@ -423,6 +427,10 @@ function changedHandles(before: readonly OrganizationNode[], after: readonly Org
 
 export class OrganizationGraphService {
   private readonly workScopeReleaseQueues = new Map<string, Promise<unknown>>();
+  private readonly preparedAuthorizations = new WeakMap<
+    OrganizationChangeAuthorization,
+    { readonly organizationId: string; readonly userId: string; readonly commandHash: string }
+  >();
 
   private constructor(
     private readonly database: MassionDatabase,
@@ -464,14 +472,14 @@ export class OrganizationGraphService {
     context: TenantContext,
     command: OrganizationCommand,
     executor?: QueryExecutor,
-  ): Promise<void> {
-    if (!this.governance) return;
+  ): Promise<unknown> {
+    if (!this.governance) return undefined;
     const workIds =
       command.kind === "install-profile"
         ? [...new Set(command.nodes.filter((node) => node.scope === "work").map((node) => node.workId))]
         : [];
     const workId = workIds.length === 1 ? workIds[0] : undefined;
-    await this.governance.authorize(
+    return await this.governance.authorize(
       context,
       {
         commandId: command.commandId,
@@ -491,6 +499,24 @@ export class OrganizationGraphService {
       },
       executor,
     );
+  }
+
+  public async authorizeExecution(
+    context: TenantContext,
+    command: OrganizationCommand,
+  ): Promise<OrganizationChangeAuthorization> {
+    if (command.governanceApprovalId) {
+      throw new Error("승인 ID가 있는 조직 변경은 원자 적용 transaction에서 검증해야 합니다");
+    }
+    await this.verify(context, true);
+    await this.authorizeChange(context, command);
+    const authorization = { kind: "organization-change-authorization" as const };
+    this.preparedAuthorizations.set(authorization, {
+      organizationId: context.organizationId,
+      userId: context.userId,
+      commandHash: logicalCommandHash(command),
+    });
+    return authorization;
   }
 
   public async bootstrap(context: TenantContext): Promise<GraphChangeResult> {
@@ -724,6 +750,7 @@ export class OrganizationGraphService {
     context: TenantContext,
     command: OrganizationCommand,
     executor?: QueryExecutor,
+    authorization?: OrganizationChangeAuthorization,
   ): Promise<GraphChangeResult> {
     if (executor) {
       if (context.role !== "owner") throw new Error("조직 그래프 변경은 owner만 수행할 수 있습니다");
@@ -786,12 +813,24 @@ export class OrganizationGraphService {
       const observedVersions = await listVersions(executor, context.organizationId);
       const observedReplay = replay(observedVersions);
       if (observedReplay) return observedReplay;
+      if (!command.governanceApprovalId && this.governance) {
+        const prepared = authorization ? this.preparedAuthorizations.get(authorization) : undefined;
+        if (
+          !prepared ||
+          prepared.organizationId !== context.organizationId ||
+          prepared.userId !== context.userId ||
+          prepared.commandHash !== logicalCommandHash(command)
+        ) {
+          throw new Error("조직 그래프 원자 적용에는 검증된 사전 승인이 필요합니다");
+        }
+      }
       const observedCurrent = latestVersion(observedVersions);
       if (!observedCurrent || observedCurrent.version !== command.expectedVersion) {
         throw new Error(`현재 OrganizationVersion은 ${String(observedCurrent?.version ?? 0)}입니다`);
       }
-      if (!command.governanceApprovalId) await this.authorizeChange(context, command, this.database);
-      return await execute(executor);
+      const result = await execute(executor);
+      if (authorization) this.preparedAuthorizations.delete(authorization);
+      return result;
     }
     const observedVersions = await listVersions(this.database, context.organizationId);
     const observedReplay = replay(observedVersions);

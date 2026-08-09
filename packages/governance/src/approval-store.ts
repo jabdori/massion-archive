@@ -335,9 +335,13 @@ export class ApprovalStore {
     });
   }
 
-  public async get(context: TenantContext, approvalId: string): Promise<ApprovalRecord> {
-    await this.organizations.verifyTenantContext(context);
-    return await this.find(this.database, context.organizationId, approvalId);
+  public async get(
+    context: TenantContext,
+    approvalId: string,
+    executor: QueryExecutor = this.database,
+  ): Promise<ApprovalRecord> {
+    await this.organizations.verifyTenantContext(context, undefined, executor);
+    return await this.find(executor, context.organizationId, approvalId);
   }
 
   public async listEvents(context: TenantContext, approvalId: string): Promise<ApprovalEvent[]> {

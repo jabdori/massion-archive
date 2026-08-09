@@ -140,12 +140,21 @@ interface ValidatedProposalPayload {
   readonly assignments: readonly ProposalAssignment[];
 }
 
+interface DynamicStaffingAuthorization {
+  readonly kind: "organization-change-authorization";
+}
+
 interface DynamicStaffingGraphPort {
   getCurrentSnapshot: OrganizationGraphService["getCurrentSnapshot"];
+  authorizeExecution?(
+    context: TenantContext,
+    command: Parameters<OrganizationGraphService["execute"]>[1],
+  ): Promise<DynamicStaffingAuthorization>;
   execute(
     context: TenantContext,
     command: Parameters<OrganizationGraphService["execute"]>[1],
     executor?: QueryExecutor,
+    authorization?: DynamicStaffingAuthorization,
   ): ReturnType<OrganizationGraphService["execute"]>;
 }
 
@@ -379,6 +388,18 @@ export class DynamicStaffingCoordinator {
     const boundaryResult = await this.boundary(context, input.workId, input.signal);
     if (boundaryResult.outcome === "blocked") return boundaryResult;
     const boundary = boundaryResult.boundary;
+    if (input.approvalId !== undefined) {
+      const approvalId = input.approvalId;
+      const approved = await this.database.transaction(
+        async (transaction) => await this.findByApproval(context.organizationId, approvalId, transaction),
+      );
+      throwIfCancelled(input.signal);
+      if (!approved || approved.work_id !== input.workId) {
+        throw new Error("Dynamic Staffing proposal의 approval ID 또는 Work가 일치하지 않습니다");
+      }
+      if (!this.sameLineage(approved, boundary)) return { outcome: "blocked", reason: "staffing-lineage-stale" };
+      return await this.continueProposal(context, approvalId, approved, input.signal);
+    }
     const hash = requestHash(input);
     const existing = await this.find(context.organizationId, input.commandId);
     throwIfCancelled(input.signal);
@@ -706,6 +727,24 @@ export class DynamicStaffingCoordinator {
             proposal.organization_id,
           );
     throwIfCancelled(signal);
+    let authorization: DynamicStaffingAuthorization | undefined;
+    if (approvalId === undefined && this.dependencies.graph.authorizeExecution) {
+      try {
+        authorization = await this.dependencies.graph.authorizeExecution(actorContext, validated.command);
+        throwIfCancelled(signal);
+      } catch (error) {
+        if (error instanceof GovernanceApprovalRequiredError) {
+          const awaiting = await this.markAwaiting(context, proposal.proposal_id, error.approvalId);
+          throwIfCancelled(signal);
+          return {
+            outcome: "awaiting-approval",
+            approvalId: error.approvalId,
+            proposalId: awaiting.proposal_id,
+          };
+        }
+        throw error;
+      }
+    }
     try {
       return await this.database.transaction(async (transaction): Promise<DynamicStaffingPrepareResult> => {
         throwIfCancelled(signal);
@@ -737,6 +776,7 @@ export class DynamicStaffingCoordinator {
             ...(approvalId === undefined ? {} : { governanceApprovalId: approvalId }),
           },
           transaction,
+          authorization,
         );
         throwIfCancelled(signal);
         const [previousMessages] = await transaction.query<
@@ -1321,6 +1361,19 @@ export class DynamicStaffingCoordinator {
       executor,
       "SELECT * OMIT id FROM dynamic_staffing_proposal WHERE organization_id = $organization_id AND command_id = $command_id LIMIT 1;",
       { organization_id: organizationId, command_id: commandId },
+    );
+    return proposal ? validateProposalIntent(proposal) : undefined;
+  }
+
+  private async findByApproval(
+    organizationId: string,
+    approvalId: string,
+    executor: QueryExecutor = this.database,
+  ): Promise<ProposalRecord | undefined> {
+    const proposal = await first<ProposalRecord>(
+      executor,
+      "SELECT * OMIT id FROM dynamic_staffing_proposal WHERE organization_id = $organization_id AND approval_id = $approval_id LIMIT 1;",
+      { organization_id: organizationId, approval_id: approvalId },
     );
     return proposal ? validateProposalIntent(proposal) : undefined;
   }

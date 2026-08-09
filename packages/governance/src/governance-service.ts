@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { OrganizationService, TenantContext } from "@massion/identity";
-import { applyMigrations, type MassionDatabase } from "@massion/storage";
+import { applyMigrations, type MassionDatabase, type QueryExecutor } from "@massion/storage";
 
 import { CedarAuthorizer } from "./cedar-authorizer.js";
 import type {
@@ -228,9 +228,13 @@ export class GovernanceService {
     return this.view(await this.find(context.organizationId, decisionId));
   }
 
-  public async getDecision(context: TenantContext, decisionId: string): Promise<PolicyDecision> {
-    await this.organizations.verifyTenantContext(context);
-    return this.view(await this.find(context.organizationId, decisionId));
+  public async getDecision(
+    context: TenantContext,
+    decisionId: string,
+    executor: QueryExecutor = this.database,
+  ): Promise<PolicyDecision> {
+    await this.organizations.verifyTenantContext(context, undefined, executor);
+    return this.view(await this.find(context.organizationId, decisionId, executor));
   }
 
   private async repeated(
@@ -247,8 +251,12 @@ export class GovernanceService {
     return records[0];
   }
 
-  private async find(organizationId: string, decisionId: string): Promise<DecisionRecord> {
-    const [records] = await this.database.query<[DecisionRecord[]]>(
+  private async find(
+    organizationId: string,
+    decisionId: string,
+    executor: QueryExecutor = this.database,
+  ): Promise<DecisionRecord> {
+    const [records] = await executor.query<[DecisionRecord[]]>(
       "SELECT * OMIT id FROM governance_policy_decision WHERE organization_id = $organization_id AND decision_id = $decision_id LIMIT 1;",
       { organization_id: organizationId, decision_id: decisionId },
     );

@@ -180,4 +180,92 @@ describe("Organization Graph와 Core Office", () => {
     ).rejects.toThrow("owner");
     expect(authorizationCount).toBe(1);
   });
+
+  it("사전 승인 receipt는 원자 transaction의 정확한 command에만 쓰이고 crash 뒤 재승인으로 수렴한다", async () => {
+    await graph.bootstrap(context);
+    let authorizationCount = 0;
+    const governed = await OrganizationGraphService.create(database, organizations, {
+      authorize: async () => {
+        authorizationCount += 1;
+        return { outcome: "allow" };
+      },
+    });
+    const command = {
+      commandId: "organization-preauthorization-command-0001",
+      expectedVersion: 1,
+      kind: "install-profile" as const,
+      profileId: "preauthorization-profile",
+      profileVersion: "1.0.0",
+      nodes: [
+        {
+          handle: "preauthorized-specialist",
+          name: "Preauthorized Specialist",
+          responsibility: "사전 승인 원자 적용 검증",
+          outputs: ["Finding"],
+          capabilities: ["preauthorization-testing"],
+          parentHandle: "delivery-coordination",
+          scope: "persistent" as const,
+          role: "operator" as const,
+        },
+      ],
+    };
+
+    await expect(
+      database.transaction(async (transaction) => await governed.execute(context, command, transaction)),
+    ).rejects.toThrow("검증된 사전 승인");
+    expect(authorizationCount).toBe(0);
+
+    const crashedAuthorization = await governed.authorizeExecution(context, command);
+    await expect(
+      database.transaction(async (transaction) => {
+        await governed.execute(context, command, transaction, crashedAuthorization);
+        throw new Error("organization-preauthorization-checkpoint-crash");
+      }),
+    ).rejects.toThrow("organization-preauthorization-checkpoint-crash");
+    expect((await governed.getCurrentSnapshot(context)).version.version).toBe(1);
+    expect(await governed.listNodes(context)).toHaveLength(8);
+    await expect(
+      database.transaction(
+        async (transaction) => await governed.execute(context, command, transaction, crashedAuthorization),
+      ),
+    ).rejects.toThrow("검증된 사전 승인");
+
+    const recoveredAuthorization = await governed.authorizeExecution(context, command);
+    await expect(
+      database.transaction(
+        async (transaction) => await governed.execute(context, command, transaction, recoveredAuthorization),
+      ),
+    ).resolves.toMatchObject({ version: { version: 2 } });
+    expect(authorizationCount).toBe(2);
+    await expect(
+      database.transaction(
+        async (transaction) => await governed.execute(context, command, transaction, recoveredAuthorization),
+      ),
+    ).resolves.toMatchObject({ version: { version: 2 } });
+
+    const nextCommand = {
+      ...command,
+      commandId: "organization-preauthorization-command-0002",
+      expectedVersion: 2,
+      profileId: "preauthorization-profile-next",
+      nodes: command.nodes.map((node) => ({ ...node, handle: "preauthorized-specialist-next" })),
+    };
+    const nextAuthorization = await governed.authorizeExecution(context, nextCommand);
+    await expect(
+      database.transaction(
+        async (transaction) =>
+          await governed.execute(
+            context,
+            { ...nextCommand, profileVersion: "tampered" },
+            transaction,
+            nextAuthorization,
+          ),
+      ),
+    ).rejects.toThrow("검증된 사전 승인");
+    await expect(
+      database.transaction(
+        async (transaction) => await governed.execute(context, nextCommand, transaction, nextAuthorization),
+      ),
+    ).resolves.toMatchObject({ version: { version: 3 } });
+  });
 });
