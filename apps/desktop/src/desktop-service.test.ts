@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createApplicationDesktopService,
   createFixtureDesktopService,
+  projectProviderConnections,
   projectRoomActivities,
   projectRoom,
   projectRouteAttempts,
@@ -202,6 +203,16 @@ function transport(overrides: Record<string, unknown> = {}): NativeTransport & {
         : {}),
       ...(value.operation === "registry.install"
         ? { outcome: "awaiting-approval", data: { approvalId: "approval-install-1" } }
+        : {}),
+      ...(value.operation === "router.models.sync"
+        ? {
+            data: {
+              status: "available",
+              activeCount: 2,
+              invalidCount: 0,
+              duplicateCount: 0,
+            },
+          }
         : {}),
     };
   });
@@ -2228,6 +2239,12 @@ describe("Application desktop service", () => {
       weight: 1,
     });
     await service.configureRoute({ name: "default", routeKind: "chat" });
+    await expect(service.syncProviderModels("endpoint-1")).resolves.toEqual({
+      status: "available",
+      activeCount: 2,
+      invalidCount: 0,
+      duplicateCount: 0,
+    });
 
     expect(JSON.stringify(settings)).not.toContain("never-return-this");
     expect(native.query.mock.calls.map(([operation]) => operation)).toEqual(
@@ -2249,6 +2266,260 @@ describe("Application desktop service", () => {
     );
     expect(native.command).toHaveBeenCalledWith(
       expect.objectContaining({ operation: "router.route.configure", payload: { name: "default", routeKind: "chat" } }),
+    );
+    expect(native.command).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: "router.models.sync", payload: { endpointId: "endpoint-1" } }),
+    );
+  });
+
+  it("발견·검증·stale 모델과 catalog 상태를 한 Provider 경험으로 합친다", async () => {
+    const settings = await createFixtureDesktopService().loadSettings();
+    const connections = projectProviderConnections(settings.catalog, settings.providers, settings.credentials);
+    const zai = connections.find((connection) => connection.providerId === "zai");
+    if (!zai) throw new Error("Z.ai fixture Provider가 필요합니다");
+
+    expect(zai.endpoints.find((endpoint) => endpoint.endpointId === "ep-zai")?.catalogStatus).toMatchObject({
+      status: "available",
+      activeCount: 2,
+    });
+    expect(zai.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          modelId: "glm-5.2",
+          discovered: true,
+          verified: true,
+          catalogState: "active",
+        }),
+        expect.objectContaining({
+          modelId: "glm-4.7-flash",
+          discovered: true,
+          verified: false,
+          catalogState: "stale",
+        }),
+      ]),
+    );
+  });
+
+  it("여러 Endpoint의 catalog 상태를 합치지 않고 알 수 없는 모델 행은 버린다", () => {
+    const [connection] = projectProviderConnections(
+      {
+        providers: [
+          { providerId: "provider-1", displayName: "Provider", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-a",
+            providerId: "provider-1",
+            name: "Primary",
+            baseUrl: "https://primary.example/v1",
+            local: false,
+            enabled: true,
+          },
+          {
+            endpointId: "endpoint-b",
+            providerId: "provider-1",
+            name: "Retired",
+            baseUrl: "https://retired.example/v1",
+            local: false,
+            enabled: false,
+          },
+        ],
+        models: [
+          {
+            modelProfileId: "profile-registered",
+            providerId: "provider-1",
+            endpointId: "endpoint-a",
+            modelId: "registered-only",
+            routeKind: "chat",
+            verified: false,
+            enabled: true,
+          },
+          {
+            modelProfileId: "profile-verified-stale",
+            providerId: "provider-1",
+            endpointId: "endpoint-a",
+            modelId: "verified-stale",
+            routeKind: "chat",
+            verified: true,
+            enabled: true,
+          },
+        ],
+        discoveredModels: [
+          {
+            catalogEntryId: "catalog-stale",
+            providerId: "provider-1",
+            endpointId: "endpoint-a",
+            modelId: "verified-stale",
+            state: "stale",
+          },
+          {
+            catalogEntryId: "catalog-unknown",
+            providerId: "provider-1",
+            endpointId: "endpoint-a",
+            modelId: "must-be-dropped",
+            state: "unknown",
+          },
+          {
+            catalogEntryId: "catalog-orphan",
+            providerId: "provider-1",
+            endpointId: "missing-endpoint",
+            modelId: "orphan",
+            state: "active",
+          },
+        ],
+        catalogStatuses: [
+          {
+            providerId: "provider-1",
+            endpointId: "endpoint-a",
+            status: "available",
+            activeCount: 2,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+          {
+            providerId: "provider-1",
+            endpointId: "endpoint-b",
+            status: "degraded",
+            activeCount: 1,
+            invalidCount: 1,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:01:00.000Z",
+          },
+        ],
+      },
+      [],
+      [],
+    );
+
+    expect(connection?.connected).toBe(true);
+    expect(connection?.endpoints).toEqual([
+      expect.objectContaining({
+        endpointId: "endpoint-a",
+        enabled: true,
+        catalogStatus: {
+          status: "available",
+          activeCount: 2,
+          invalidCount: 0,
+          duplicateCount: 0,
+          lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+        },
+      }),
+      expect.objectContaining({
+        endpointId: "endpoint-b",
+        enabled: false,
+        catalogStatus: {
+          status: "degraded",
+          activeCount: 1,
+          invalidCount: 1,
+          duplicateCount: 0,
+          lastAttemptedAt: "2026-08-10T04:01:00.000Z",
+        },
+      }),
+    ]);
+    expect(connection?.models).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ endpointId: "endpoint-a", modelId: "registered-only", discovered: false }),
+        expect.objectContaining({
+          endpointId: "endpoint-a",
+          modelId: "verified-stale",
+          verified: true,
+          catalogState: "stale",
+        }),
+      ]),
+    );
+    expect(connection?.models.map((model) => model.modelId)).not.toContain("must-be-dropped");
+    expect(connection?.models.map((model) => model.modelId)).not.toContain("orphan");
+  });
+
+  it("400개 모델을 Endpoint에 투영하고 비활성 Endpoint만 있으면 연결됨으로 보지 않는다", () => {
+    const discoveredModels = Array.from({ length: 400 }, (_, index) => ({
+      catalogEntryId: `catalog-${index}`,
+      providerId: "provider-400",
+      endpointId: "endpoint-400",
+      modelId: `vendor/model-${String(index).padStart(3, "0")}`,
+      state: "active",
+    }));
+    const [connection] = projectProviderConnections(
+      {
+        providers: [
+          { providerId: "provider-400", displayName: "Provider 400", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-400",
+            providerId: "provider-400",
+            name: "Retired",
+            baseUrl: "https://example.com/v1",
+            local: false,
+            enabled: false,
+          },
+        ],
+        models: [],
+        discoveredModels,
+        catalogStatuses: [
+          {
+            providerId: "provider-400",
+            endpointId: "endpoint-400",
+            status: "available",
+            activeCount: 400,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
+      },
+      [],
+      [],
+    );
+
+    expect(connection).toMatchObject({ connected: false, models: { length: 400 } });
+    expect(connection?.models.every((model) => model.endpointId === "endpoint-400")).toBe(true);
+  });
+
+  it("Fixture catalog 재확인은 실패 필드를 남기지 않고 관측 시각을 갱신한다", async () => {
+    const fixture = createFixtureDesktopService();
+    const before = await fixture.loadSettings();
+    const ollamaBefore = (before.catalog as { discoveredModels: Array<Record<string, unknown>> }).discoveredModels.find(
+      (model) => model.endpointId === "ep-ollama" && model.state === "active",
+    );
+
+    await expect(fixture.syncProviderModels("ep-ollama")).resolves.toMatchObject({ status: "available" });
+    await expect(fixture.syncProviderModels("ep-grok")).resolves.toMatchObject({ status: "empty" });
+
+    const after = await fixture.loadSettings();
+    const catalog = after.catalog as {
+      catalogStatuses: Array<Record<string, unknown>>;
+      discoveredModels: Array<Record<string, unknown>>;
+    };
+    const ollamaStatus = catalog.catalogStatuses.find((status) => status.endpointId === "ep-ollama");
+    const grokStatus = catalog.catalogStatuses.find((status) => status.endpointId === "ep-grok");
+    const ollamaAfter = catalog.discoveredModels.find(
+      (model) => model.endpointId === "ep-ollama" && model.state === "active",
+    );
+    expect(ollamaStatus).not.toHaveProperty("diagnosticReason");
+    expect(ollamaStatus).not.toHaveProperty("retryAt");
+    expect(grokStatus).toMatchObject({ status: "empty", diagnosticReason: "empty-catalog" });
+    expect(grokStatus).not.toHaveProperty("retryAt");
+    expect(ollamaAfter?.lastSeenAt).not.toBe(ollamaBefore?.lastSeenAt);
+  });
+
+  it("모델 동기화 응답의 음수 count를 거부한다", async () => {
+    const native = transport();
+    native.command.mockImplementationOnce(async (input: unknown) => {
+      const value = input as { commandId: string; correlationId: string; operation: string };
+      return {
+        schemaVersion: "massion.application.v1",
+        commandId: value.commandId,
+        correlationId: value.correlationId,
+        operation: value.operation,
+        outcome: "succeeded",
+        data: { status: "available", activeCount: -1, invalidCount: 0, duplicateCount: 0 },
+      } as never;
+    });
+
+    await expect(createApplicationDesktopService(native).syncProviderModels("endpoint-1")).rejects.toThrow(
+      "Provider 모델 동기화 응답이 유효하지 않습니다",
     );
   });
 

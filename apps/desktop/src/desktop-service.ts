@@ -1188,6 +1188,9 @@ export interface ProviderConnectionView {
     readonly name: string;
     readonly baseUrl: string;
     readonly local: boolean;
+    readonly enabled: boolean;
+    /** 모델 카탈로그 동기화 상태는 Provider 전체가 아니라 이 Endpoint에 속합니다. */
+    readonly catalogStatus?: ProviderCatalogStatusView;
   }[];
   /** 없으면 «아직 한 번도 부르지 않았다»입니다. 성하다고 단정하지 않습니다. */
   readonly health?: ProviderHealthView;
@@ -1203,6 +1206,7 @@ export interface ProviderConnectionView {
    */
   readonly credentials: readonly {
     readonly credentialId: string;
+    readonly endpointId: string;
     readonly label: string;
     readonly status: string;
     readonly secretVersion?: number;
@@ -1213,14 +1217,45 @@ export interface ProviderConnectionView {
 }
 
 export interface ProviderModelView {
-  readonly modelProfileId: string;
+  readonly endpointId: string;
+  readonly modelProfileId?: string;
+  readonly catalogEntryId?: string;
   readonly modelId: string;
   /** 이 모델이 어느 종류의 요청에 배치되는지. */
   readonly routeKind: string;
   readonly enabled: boolean;
   /** `model_verification_evidence`가 있는지. 카탈로그에 이름이 있는 것과 응답하는 것은 다릅니다. */
   readonly verified: boolean;
+  /** API snapshot에는 있으나 아직 검증 전인 모델을 포함합니다. */
+  readonly discovered: boolean;
+  readonly catalogState?: "active" | "stale";
+  readonly contextWindow?: number;
+  readonly supportsTools?: boolean;
+  readonly supportsStructuredOutput?: boolean;
+  readonly supportsVision?: boolean;
+  readonly inputCostMicrosPerMillion?: number;
+  readonly outputCostMicrosPerMillion?: number;
   readonly local: boolean;
+}
+
+export interface ProviderCatalogStatusView {
+  readonly status: "syncing" | "available" | "empty" | "partial" | "degraded";
+  readonly activeCount: number;
+  readonly invalidCount: number;
+  readonly duplicateCount: number;
+  readonly diagnosticReason?: string;
+  readonly retryAt?: string;
+  readonly lastAttemptedAt: string;
+  readonly lastSuccessfulAt?: string;
+}
+
+export interface ProviderModelSyncResult {
+  readonly status: "available" | "empty" | "partial" | "degraded" | "superseded";
+  readonly activeCount: number;
+  readonly invalidCount: number;
+  readonly duplicateCount: number;
+  readonly diagnosticReason?: string;
+  readonly retryAt?: string;
 }
 
 /** `subscription.accounts`. quota가 계정 행에 함께 실려 옵니다. */
@@ -1444,6 +1479,7 @@ export interface DesktopService {
   removeProvider(providerId: string): Promise<{ readonly removed: boolean }>;
   registerEndpoint(input: Record<string, unknown>): Promise<{ readonly endpointId: string }>;
   addCredential(input: Record<string, unknown>): Promise<void>;
+  syncProviderModels(endpointId: string): Promise<ProviderModelSyncResult>;
   disableCredential(credentialId: string, expectedVersion: number): Promise<void>;
   registerModel(input: Record<string, unknown>): Promise<void>;
   configureRoute(input: Record<string, unknown>): Promise<void>;
@@ -1796,7 +1832,7 @@ export function createApplicationDesktopService(
 
     async loadSettings() {
       const [catalog, credentials, routes, providers, accounts, quota, policy] = await Promise.all([
-        query("router.catalog", {}),
+        client.query("router.catalog", {}),
         query("router.credentials", {}),
         query("router.routes", {}),
         query("subscription.providers", {}),
@@ -1858,6 +1894,30 @@ export function createApplicationDesktopService(
     },
     async addCredential(input) {
       await command("router.credential.add", input);
+    },
+    async syncProviderModels(endpointId) {
+      const response = await client.command("router.models.sync", { endpointId });
+      const data = object(response.data);
+      const status = data?.status;
+      if (
+        !["available", "empty", "partial", "degraded", "superseded"].includes(String(status)) ||
+        !Number.isSafeInteger(data?.activeCount) ||
+        Number(data?.activeCount) < 0 ||
+        !Number.isSafeInteger(data?.invalidCount) ||
+        Number(data?.invalidCount) < 0 ||
+        !Number.isSafeInteger(data?.duplicateCount) ||
+        Number(data?.duplicateCount) < 0
+      ) {
+        throw new Error("Provider 모델 동기화 응답이 유효하지 않습니다");
+      }
+      return {
+        status: status as ProviderModelSyncResult["status"],
+        activeCount: Number(data?.activeCount),
+        invalidCount: Number(data?.invalidCount),
+        duplicateCount: Number(data?.duplicateCount),
+        ...(typeof data?.diagnosticReason === "string" ? { diagnosticReason: data.diagnosticReason } : {}),
+        ...(typeof data?.retryAt === "string" ? { retryAt: data.retryAt } : {}),
+      };
     },
     async disableCredential(credentialId, expectedVersion) {
       await command("router.credential.disable", { credentialId, expectedVersion });
@@ -2706,6 +2766,101 @@ const fixtureSettings: SettingsView = {
         routeKind: "embedding",
         verified: false,
         enabled: true,
+      },
+    ],
+    discoveredModels: [
+      {
+        catalogEntryId: "catalog-zai-glm",
+        providerId: "zai",
+        endpointId: "ep-zai",
+        modelId: "glm-5.2",
+        state: "active",
+        displayName: "GLM-5.2",
+        contextWindow: 131_072,
+        supportsTools: true,
+        supportsStructuredOutput: true,
+        supportsVision: false,
+        inputCostMicrosPerMillion: 1_000_000,
+        outputCostMicrosPerMillion: 3_200_000,
+        firstSeenAt: "2026-07-27T09:40:00.000Z",
+        lastSeenAt: "2026-08-10T03:40:00.000Z",
+      },
+      {
+        catalogEntryId: "catalog-zai-glm-air",
+        providerId: "zai",
+        endpointId: "ep-zai",
+        modelId: "glm-5.2-air",
+        state: "active",
+        displayName: "GLM-5.2 Air",
+        contextWindow: 131_072,
+        supportsTools: true,
+        supportsStructuredOutput: true,
+        firstSeenAt: "2026-07-27T09:40:00.000Z",
+        lastSeenAt: "2026-08-10T03:40:00.000Z",
+      },
+      {
+        catalogEntryId: "catalog-zai-retired",
+        providerId: "zai",
+        endpointId: "ep-zai",
+        modelId: "glm-4.7-flash",
+        state: "stale",
+        displayName: "GLM-4.7 Flash",
+        firstSeenAt: "2026-07-02T09:40:00.000Z",
+        lastSeenAt: "2026-07-26T18:10:00.000Z",
+      },
+      {
+        catalogEntryId: "catalog-ollama-qwen",
+        providerId: "ollama",
+        endpointId: "ep-ollama",
+        modelId: "qwen3:8b",
+        state: "active",
+        firstSeenAt: "2026-07-20T02:00:00.000Z",
+        lastSeenAt: "2026-08-10T03:31:00.000Z",
+      },
+      {
+        catalogEntryId: "catalog-ollama-embed",
+        providerId: "ollama",
+        endpointId: "ep-ollama",
+        modelId: "nomic-embed-text",
+        state: "active",
+        firstSeenAt: "2026-07-20T02:00:00.000Z",
+        lastSeenAt: "2026-08-10T03:31:00.000Z",
+      },
+    ],
+    catalogStatuses: [
+      {
+        providerId: "zai",
+        endpointId: "ep-zai",
+        status: "available",
+        activeCount: 2,
+        invalidCount: 0,
+        duplicateCount: 0,
+        catalogDigest: "a".repeat(64),
+        lastAttemptedAt: "2026-08-10T03:40:00.000Z",
+        lastSuccessfulAt: "2026-08-10T03:40:00.000Z",
+      },
+      {
+        providerId: "ollama",
+        endpointId: "ep-ollama",
+        status: "degraded",
+        activeCount: 2,
+        invalidCount: 0,
+        duplicateCount: 0,
+        diagnosticReason: "network-failed",
+        retryAt: "2026-08-10T03:45:00.000Z",
+        lastAttemptedAt: "2026-08-10T03:38:00.000Z",
+        lastSuccessfulAt: "2026-08-10T03:31:00.000Z",
+      },
+      {
+        providerId: "xai-grok-build",
+        endpointId: "ep-grok",
+        status: "degraded",
+        activeCount: 0,
+        invalidCount: 0,
+        duplicateCount: 0,
+        diagnosticReason: "network-failed",
+        retryAt: "2026-08-10T03:45:00.000Z",
+        lastAttemptedAt: "2026-08-10T03:38:00.000Z",
       },
     ],
     candidates: [
@@ -3606,6 +3761,52 @@ export function createFixtureDesktopService(): DesktopService {
             1,
           );
         }
+      }),
+    syncProviderModels: (endpointId) =>
+      fixturePromise(() => {
+        const catalog = settingsState.catalog as {
+          endpoints: Array<Record<string, unknown>>;
+          discoveredModels: Array<Record<string, unknown>>;
+          catalogStatuses: Array<Record<string, unknown>>;
+        };
+        const endpoint = catalog.endpoints.find((row) => row.endpointId === endpointId);
+        if (!endpoint) throw new Error("Fixture Endpoint를 찾을 수 없습니다");
+        const activeCount = catalog.discoveredModels.filter(
+          (row) => row.endpointId === endpointId && row.state === "active",
+        ).length;
+        const status = activeCount > 0 ? "available" : "empty";
+        const now = new Date().toISOString();
+        const existingIndex = catalog.catalogStatuses.findIndex((row) => row.endpointId === endpointId);
+        const existing = existingIndex < 0 ? undefined : catalog.catalogStatuses[existingIndex];
+        for (const model of catalog.discoveredModels) {
+          if (model.endpointId === endpointId && model.state === "active") model.lastSeenAt = now;
+        }
+        const next = {
+          providerId: endpoint.providerId,
+          endpointId,
+          status,
+          activeCount,
+          invalidCount: 0,
+          duplicateCount: 0,
+          lastAttemptedAt: now,
+          ...(activeCount > 0
+            ? { lastSuccessfulAt: now }
+            : {
+                diagnosticReason: "empty-catalog",
+                ...(typeof existing?.lastSuccessfulAt === "string"
+                  ? { lastSuccessfulAt: existing.lastSuccessfulAt }
+                  : {}),
+              }),
+        };
+        if (existingIndex < 0) catalog.catalogStatuses.push(next);
+        else catalog.catalogStatuses[existingIndex] = next;
+        return {
+          status,
+          activeCount,
+          invalidCount: 0,
+          duplicateCount: 0,
+          ...(activeCount > 0 ? {} : { diagnosticReason: "empty-catalog" }),
+        };
       }),
     disableCredential: (credentialId, expectedVersion) =>
       fixturePromise(() => {
@@ -5382,6 +5583,37 @@ function keyAuthKind(row: Record<string, unknown>): "api-key" | "subscription-ke
   return undefined;
 }
 
+function projectProviderCatalogStatus(row: Record<string, unknown> | undefined): ProviderCatalogStatusView | undefined {
+  if (!row) return undefined;
+  const status = row.status;
+  if (!["syncing", "available", "empty", "partial", "degraded"].includes(String(status))) return undefined;
+  const activeCount = row.activeCount;
+  const invalidCount = row.invalidCount;
+  const duplicateCount = row.duplicateCount;
+  const lastAttemptedAt = row.lastAttemptedAt;
+  if (
+    !Number.isSafeInteger(activeCount) ||
+    Number(activeCount) < 0 ||
+    !Number.isSafeInteger(invalidCount) ||
+    Number(invalidCount) < 0 ||
+    !Number.isSafeInteger(duplicateCount) ||
+    Number(duplicateCount) < 0 ||
+    typeof lastAttemptedAt !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    status: status as ProviderCatalogStatusView["status"],
+    activeCount: Number(activeCount),
+    invalidCount: Number(invalidCount),
+    duplicateCount: Number(duplicateCount),
+    lastAttemptedAt,
+    ...(typeof row.diagnosticReason === "string" ? { diagnosticReason: row.diagnosticReason } : {}),
+    ...(typeof row.retryAt === "string" ? { retryAt: row.retryAt } : {}),
+    ...(typeof row.lastSuccessfulAt === "string" ? { lastSuccessfulAt: row.lastSuccessfulAt } : {}),
+  };
+}
+
 export function projectProviderConnections(
   catalog: unknown,
   providers?: unknown,
@@ -5394,12 +5626,17 @@ export function projectProviderConnections(
   // router.catalog는 자격을 담지 않습니다. router.credentials가 정본이고, 없을 때만 catalog를 봅니다.
   const credentials = registeredCredentials === undefined ? rows(source.credentials) : rows(registeredCredentials);
   const models = rows(source.models);
+  const discoveredModels = rows(source.discoveredModels);
+  const catalogStatuses = rows(source.catalogStatuses);
   const connections = rows(source.providers)
     .filter((row) => typeof row.providerId === "string")
     .map((row) => {
       const providerId = str(row, "providerId");
-      const providerEndpoints = endpoints.filter((endpoint) => str(endpoint, "providerId") === providerId);
+      const providerEndpoints = endpoints.filter(
+        (endpoint) => str(endpoint, "providerId") === providerId && str(endpoint, "endpointId") !== "",
+      );
       const providerModels = models.filter((item) => str(item, "providerId") === providerId);
+      const providerDiscoveredModels = discoveredModels.filter((item) => str(item, "providerId") === providerId);
       const health = projectProviderHealth(circuits.find((item) => str(item, "providerId") === providerId));
       const verified = evidence.filter((item) => str(item, "providerId") === providerId);
       const providerCredentials = credentials.filter((item) => str(item, "providerId") === providerId);
@@ -5408,31 +5645,92 @@ export function projectProviderConnections(
         .filter(Boolean)
         .sort()
         .at(-1);
+      const projectedModels = new Map<string, ProviderModelView>();
+      for (const item of providerDiscoveredModels) {
+        const endpointId = str(item, "endpointId");
+        const modelId = str(item, "modelId");
+        if (modelId === "" || (item.state !== "active" && item.state !== "stale")) continue;
+        const modelEndpoint = providerEndpoints.find((endpoint) => str(endpoint, "endpointId") === endpointId);
+        if (!modelEndpoint) continue;
+        const optionalNumber = (key: string): number | undefined =>
+          typeof item[key] === "number" && Number.isSafeInteger(item[key]) && Number(item[key]) >= 0
+            ? Number(item[key])
+            : undefined;
+        projectedModels.set(`${endpointId}\0${modelId}`, {
+          ...(typeof item.catalogEntryId === "string" ? { catalogEntryId: item.catalogEntryId } : {}),
+          endpointId,
+          modelId,
+          routeKind: "",
+          enabled: false,
+          verified: false,
+          discovered: true,
+          catalogState: item.state,
+          ...(optionalNumber("contextWindow") === undefined
+            ? {}
+            : { contextWindow: optionalNumber("contextWindow") as number }),
+          ...(typeof item.supportsTools === "boolean" ? { supportsTools: item.supportsTools } : {}),
+          ...(typeof item.supportsStructuredOutput === "boolean"
+            ? { supportsStructuredOutput: item.supportsStructuredOutput }
+            : {}),
+          ...(typeof item.supportsVision === "boolean" ? { supportsVision: item.supportsVision } : {}),
+          ...(optionalNumber("inputCostMicrosPerMillion") === undefined
+            ? {}
+            : { inputCostMicrosPerMillion: optionalNumber("inputCostMicrosPerMillion") as number }),
+          ...(optionalNumber("outputCostMicrosPerMillion") === undefined
+            ? {}
+            : { outputCostMicrosPerMillion: optionalNumber("outputCostMicrosPerMillion") as number }),
+          local: bool(modelEndpoint, "local"),
+        });
+      }
+      for (const item of providerModels) {
+        const endpointId = str(item, "endpointId");
+        const modelId = str(item, "modelId");
+        const modelProfileId = str(item, "modelProfileId");
+        const modelEndpoint = providerEndpoints.find((endpoint) => str(endpoint, "endpointId") === endpointId);
+        if (modelId === "" || modelProfileId === "" || !modelEndpoint) continue;
+        const key = `${endpointId}\0${modelId}`;
+        const discovered = projectedModels.get(key);
+        projectedModels.set(key, {
+          ...discovered,
+          endpointId,
+          modelProfileId,
+          modelId,
+          routeKind: str(item, "routeKind"),
+          enabled: bool(item, "enabled"),
+          verified: bool(item, "verified"),
+          discovered: discovered !== undefined,
+          local: bool(modelEndpoint, "local"),
+        });
+      }
       return {
         providerId,
         displayName: str(row, "displayName"),
         adapterKind: str(row, "adapterKind"),
         enabled: bool(row, "enabled"),
-        connected: providerEndpoints.length > 0,
+        connected: providerEndpoints.some((endpoint) => endpoint.enabled !== false),
         subscriptionConnectable: false,
         connectionConflict: false,
-        endpoints: providerEndpoints.map((endpoint) => ({
-          endpointId: str(endpoint, "endpointId"),
-          name: str(endpoint, "name"),
-          baseUrl: str(endpoint, "baseUrl"),
-          local: bool(endpoint, "local"),
-        })),
-        models: providerModels.map((item) => {
-          const modelEndpoint = endpoints.find((row) => str(row, "endpointId") === str(item, "endpointId"));
+        endpoints: providerEndpoints.map((endpoint) => {
+          const endpointId = str(endpoint, "endpointId");
+          const catalogStatus = projectProviderCatalogStatus(
+            catalogStatuses
+              .filter((item) => str(item, "providerId") === providerId && str(item, "endpointId") === endpointId)
+              .sort((left, right) => str(right, "lastAttemptedAt").localeCompare(str(left, "lastAttemptedAt")))[0],
+          );
           return {
-            modelProfileId: str(item, "modelProfileId"),
-            modelId: str(item, "modelId"),
-            routeKind: str(item, "routeKind"),
-            enabled: bool(item, "enabled"),
-            verified: bool(item, "verified"),
-            local: modelEndpoint ? bool(modelEndpoint, "local") : false,
+            endpointId,
+            name: str(endpoint, "name"),
+            baseUrl: str(endpoint, "baseUrl"),
+            local: bool(endpoint, "local"),
+            enabled: endpoint.enabled !== false,
+            ...(catalogStatus ? { catalogStatus } : {}),
           };
         }),
+        models: [...projectedModels.values()].sort(
+          (left, right) =>
+            Number(left.catalogState === "stale") - Number(right.catalogState === "stale") ||
+            left.modelId.localeCompare(right.modelId),
+        ),
         ...(health ? { health } : {}),
         ...(verified.length ? { verifiedModelCount: verified.length } : {}),
         ...(verifiedAt ? { verifiedAt } : {}),
@@ -5440,6 +5738,7 @@ export function projectProviderConnections(
           .filter((item) => typeof item.credentialId === "string")
           .map((item) => ({
             credentialId: str(item, "credentialId"),
+            endpointId: str(item, "endpointId"),
             label: str(item, "label"),
             status: str(item, "status"),
             ...(typeof item.secretVersion === "number" ? { secretVersion: item.secretVersion } : {}),

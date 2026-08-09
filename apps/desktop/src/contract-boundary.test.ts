@@ -42,8 +42,7 @@ const UNTYPED_QUERIES = [
   "registry.info",
   "registry.inventory",
   "registry.search",
-  // 프로바이더: router·subscription 조회 일곱. 인계: settings-contract-handoff.md
-  "router.catalog",
+  // 프로바이더: router·subscription 조회 여섯. 인계: settings-contract-handoff.md
   "router.credentials",
   "router.routes",
   "subscription.accounts",

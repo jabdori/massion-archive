@@ -303,3 +303,50 @@ DEFINE FIELD optimization_run_id ON route_attempt TYPE option<string>;
 DEFINE INDEX route_attempt_optimization_run ON route_attempt FIELDS organization_id, optimization_run_id;
 `,
 );
+
+// prettier-ignore -- migration SQL의 공백도 checksum에 포함됩니다.
+export const PROVIDER_MODEL_CATALOG_MIGRATION = defineMigration(
+  "0116-provider-model-catalog",
+  `
+DEFINE TABLE provider_model_catalog_entry SCHEMAFULL;
+DEFINE FIELD catalog_entry_id ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD organization_id ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD provider_id ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD endpoint_id ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD model_id ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD metadata_json ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD metadata_digest ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD state ON provider_model_catalog_entry TYPE string ASSERT $value IN ['active', 'stale'];
+DEFINE FIELD snapshot_id ON provider_model_catalog_entry TYPE string;
+DEFINE FIELD first_seen_at ON provider_model_catalog_entry TYPE datetime;
+DEFINE FIELD last_seen_at ON provider_model_catalog_entry TYPE datetime;
+DEFINE FIELD created_at ON provider_model_catalog_entry TYPE datetime;
+DEFINE FIELD updated_at ON provider_model_catalog_entry TYPE datetime;
+DEFINE INDEX provider_model_catalog_entry_id ON provider_model_catalog_entry FIELDS catalog_entry_id UNIQUE;
+DEFINE INDEX provider_model_catalog_model ON provider_model_catalog_entry FIELDS organization_id, endpoint_id, model_id UNIQUE;
+DEFINE INDEX provider_model_catalog_state ON provider_model_catalog_entry FIELDS organization_id, endpoint_id, state;
+
+DEFINE TABLE provider_model_catalog_sync SCHEMAFULL;
+DEFINE FIELD organization_id ON provider_model_catalog_sync TYPE string;
+DEFINE FIELD provider_id ON provider_model_catalog_sync TYPE string;
+DEFINE FIELD endpoint_id ON provider_model_catalog_sync TYPE string;
+DEFINE FIELD sync_sequence ON provider_model_catalog_sync TYPE int DEFAULT 0 ASSERT $value >= 0;
+DEFINE FIELD status ON provider_model_catalog_sync TYPE string ASSERT $value IN ['syncing', 'available', 'empty', 'partial', 'degraded'];
+DEFINE FIELD authentication_scope ON provider_model_catalog_sync TYPE string ASSERT $value IN ['anonymous', 'credential'];
+DEFINE FIELD credential_id ON provider_model_catalog_sync TYPE option<string>;
+DEFINE FIELD credential_version ON provider_model_catalog_sync TYPE option<int> ASSERT $value = NONE OR $value >= 1;
+DEFINE FIELD credential_secret_version ON provider_model_catalog_sync TYPE option<int> ASSERT $value = NONE OR $value >= 1;
+DEFINE FIELD active_count ON provider_model_catalog_sync TYPE int DEFAULT 0 ASSERT $value >= 0;
+DEFINE FIELD invalid_count ON provider_model_catalog_sync TYPE int DEFAULT 0 ASSERT $value >= 0;
+DEFINE FIELD duplicate_count ON provider_model_catalog_sync TYPE int DEFAULT 0 ASSERT $value >= 0;
+DEFINE FIELD catalog_digest ON provider_model_catalog_sync TYPE option<string>;
+DEFINE FIELD snapshot_id ON provider_model_catalog_sync TYPE option<string>;
+DEFINE FIELD diagnostic_reason ON provider_model_catalog_sync TYPE option<string>;
+DEFINE FIELD retry_at ON provider_model_catalog_sync TYPE option<datetime>;
+DEFINE FIELD last_attempted_at ON provider_model_catalog_sync TYPE datetime;
+DEFINE FIELD last_successful_at ON provider_model_catalog_sync TYPE option<datetime>;
+DEFINE FIELD created_at ON provider_model_catalog_sync TYPE datetime DEFAULT time::now();
+DEFINE FIELD updated_at ON provider_model_catalog_sync TYPE datetime;
+DEFINE INDEX provider_model_catalog_sync_endpoint ON provider_model_catalog_sync FIELDS organization_id, endpoint_id UNIQUE;
+`,
+);

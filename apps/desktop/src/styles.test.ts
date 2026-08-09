@@ -194,11 +194,30 @@ describe("스타일 의미 토큰", () => {
     // 상태를 거치는 문구는 렌더 지점이 translate(error)/translate(notice)로 감쌉니다.
     const routed = covered(/\b(?:setError|setNotice|surfaceErrorMessage|new Error)\(/gu);
     // 객체 속성으로 정의되고 사용 지점에서 감싸지는 상수입니다 — translate(group.title) 같은 경로.
-    const deferred = new Set(
+    const deferred = new Set<number>(
       [...surface.matchAll(/(?:title|label):\s*"[^"\n]*"/gu)].map(
         (match) => (match.index ?? 0) + match[0].indexOf('"'),
       ),
     );
+    const markLiterals = (source: string, offset: number) => {
+      for (const literal of source.matchAll(/"[^"\n]*"/gu)) deferred.add(offset + (literal.index ?? 0));
+    };
+    // 이 값들은 raw 번역 key로 상태에 보존한 뒤 렌더 시점에 번역됩니다. 저장 시 번역하면 언어를
+    // 바꿨을 때 이미 표시 중인 알림이 이전 언어로 남습니다. sink가 실제 번역 경로인지도 함께 고정합니다.
+    for (const [name, sink] of [
+      ["nextNotice", /setNotice\(nextNotice\)/u],
+      ["warning", /translate\(warning\)/u],
+      ["empty", /translate\(empty\)/u],
+      ["labels", /labels\.map\(translate\)/u],
+    ] as const) {
+      expect(surface).toMatch(sink);
+      const assignments = new RegExp(String.raw`(?:\b(?:const|let)\s+${name}\s*=|\b${name}\s*=)[\s\S]*?;`, "gu");
+      for (const assignment of surface.matchAll(assignments)) markLiterals(assignment[0], assignment.index ?? 0);
+    }
+    expect(surface).toMatch(/setNotice\(providerModelSyncNotice\(/u);
+    const syncNotice = /function providerModelSyncNotice\([^)]*\): string \{([\s\S]*?)\n\}/u.exec(surface);
+    expect(syncNotice).not.toBeNull();
+    if (syncNotice) markLiterals(syncNotice[0], syncNotice.index);
     const raw = [...surface.matchAll(/"([^"\n]*[가-힣][^"\n]*)"/gu)]
       .filter(
         (match) => !wrapped.has(match.index ?? 0) && !routed.has(match.index ?? 0) && !deferred.has(match.index ?? 0),
@@ -210,7 +229,9 @@ describe("스타일 의미 토큰", () => {
       [...messages.matchAll(/^\s*(?:"([^"]+)"|([^\s":]+)):/gmu)].map((match) => match[1] ?? match[2] ?? ""),
     );
     const inside = [...surface.matchAll(/"([^"\n]*[가-힣][^"\n]*)"/gu)]
-      .filter((match) => wrapped.has(match.index ?? 0))
+      .filter(
+        (match) => wrapped.has(match.index ?? 0) || routed.has(match.index ?? 0) || deferred.has(match.index ?? 0),
+      )
       .map((match) => match[1] ?? "");
     expect(inside.filter((message) => !catalog.has(message))).toEqual([]);
   });

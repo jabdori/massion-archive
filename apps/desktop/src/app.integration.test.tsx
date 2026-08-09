@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -20,6 +20,7 @@ import {
   type SpeakerView,
   type WorkView,
 } from "./model";
+import { I18nProvider } from "./i18n/context";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -1529,6 +1530,62 @@ describe("AgentOS native data flow", () => {
     expect(screen.queryByText("절대-표시되면-안됨")).not.toBeInTheDocument();
   });
 
+  it("Provider 정본을 읽기 전에는 manifest를 연결 상태로 단정하지 않는다", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<DesktopService["loadSettings"]>>>();
+    const loadSettings = vi.fn(() => pending.promise);
+    render(<App service={service({ loadSettings })} />);
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    expect(screen.getAllByText("불러오는 중…").length).toBeGreaterThan(0);
+    expect(screen.queryByText("OpenRouter")).not.toBeInTheDocument();
+    expect(screen.queryByText("사용 가능")).not.toBeInTheDocument();
+    expect(screen.queryByText("로그인이 필요합니다")).not.toBeInTheDocument();
+    expect(screen.queryByText("Base URL")).not.toBeInTheDocument();
+    expect(screen.queryByText(/0 검증됨/u)).not.toBeInTheDocument();
+
+    await act(async () => {
+      pending.resolve({
+        catalog: {
+          providers: [
+            { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+          ],
+          endpoints: [
+            {
+              endpointId: "endpoint-openrouter",
+              providerId: "openrouter",
+              name: "API",
+              baseUrl: "https://openrouter.ai/api/v1",
+              local: false,
+              enabled: true,
+            },
+          ],
+          models: [],
+          discoveredModels: [],
+          catalogStatuses: [
+            {
+              providerId: "openrouter",
+              endpointId: "endpoint-openrouter",
+              status: "available",
+              activeCount: 0,
+              invalidCount: 0,
+              duplicateCount: 0,
+              lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+            },
+          ],
+        },
+        credentials: [],
+        routes: [],
+        providers: [],
+        accounts: [],
+        quota: [],
+        policy: [],
+      });
+    });
+
+    expect(await screen.findByRole("button", { name: /OpenRouter.*활성/u })).toBeInTheDocument();
+  });
+
   it("Provider 인증 연결을 순서대로 저장하고 secret을 다시 표시하지 않는다", async () => {
     const user = userEvent.setup();
     const calls: string[] = [];
@@ -1557,7 +1614,15 @@ describe("AgentOS native data flow", () => {
     const addCredential = vi.fn(async () => {
       calls.push("credential");
     });
-    render(<App service={service({ loadSettings, registerProvider, registerEndpoint, addCredential })} />);
+    const syncProviderModels = vi.fn(async () => {
+      calls.push("sync");
+      return { status: "available" as const, activeCount: 2, invalidCount: 0, duplicateCount: 0 };
+    });
+    render(
+      <App
+        service={service({ loadSettings, registerProvider, registerEndpoint, addCredential, syncProviderModels })}
+      />,
+    );
 
     await user.click(screen.getByRole("button", { name: "프로바이더" }));
     await user.click(await screen.findByRole("button", { name: "프로바이더 추가" }));
@@ -1570,12 +1635,507 @@ describe("AgentOS native data flow", () => {
     await user.click(within(form).getByRole("button", { name: "추가" }));
 
     expect(await screen.findByText("프로바이더를 추가했습니다.")).toBeInTheDocument();
-    expect(calls).toEqual(["provider", "endpoint", "credential"]);
+    expect(calls).toEqual(["provider", "endpoint", "credential", "sync"]);
+    expect(syncProviderModels).toHaveBeenCalledWith("endpoint-1");
     expect(addCredential).toHaveBeenCalledWith(
       expect.objectContaining({ endpointId: "endpoint-1", secret: "never-render-this", priority: 0, weight: 100 }),
     );
     expect(secret).toHaveValue("");
     expect(screen.queryByText("never-render-this")).not.toBeInTheDocument();
+  });
+
+  it("Provider 저장 뒤 모델 확인이 실패해도 저장 실패로 오인하지 않는다", async () => {
+    const user = userEvent.setup();
+    const registerProvider = vi.fn(async () => undefined);
+    const registerEndpoint = vi.fn(async () => ({ endpointId: "endpoint-openrouter" }));
+    const addCredential = vi.fn(async () => undefined);
+    const syncProviderModels = vi.fn(async () => {
+      throw new Error("catalog unavailable");
+    });
+    const loadSettings = vi.fn(async () => ({
+      catalog: { providers: [], endpoints: [], models: [], discoveredModels: [], catalogStatuses: [] },
+      credentials: [],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    }));
+    render(
+      <App
+        service={service({
+          addCredential,
+          loadSettings,
+          registerEndpoint,
+          registerProvider,
+          syncProviderModels,
+        })}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    await user.click(await screen.findByRole("button", { name: "프로바이더 추가" }));
+    const form = await screen.findByRole("form", { name: "프로바이더 추가" });
+    await user.type(within(form).getByRole("textbox", { name: "이름" }), "OpenRouter");
+    await user.type(within(form).getByRole("textbox", { name: "Base URL" }), "https://openrouter.ai/api/v1");
+    await user.click(within(form).getByRole("button", { name: "추가" }));
+
+    expect(await screen.findByText("프로바이더는 저장했지만 모델 목록을 확인하지 못했습니다.")).toBeInTheDocument();
+    expect(registerProvider).toHaveBeenCalledOnce();
+    expect(registerEndpoint).toHaveBeenCalledOnce();
+  });
+
+  it("발견 모델·검증 상태를 분리해 표시하고 같은 자리에서 새로고침한다", async () => {
+    const user = userEvent.setup();
+    const syncProviderModels = vi.fn(async () => ({
+      status: "available" as const,
+      activeCount: 1,
+      invalidCount: 0,
+      duplicateCount: 0,
+    }));
+    const loadSettings = vi.fn(async () => ({
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-openrouter",
+            providerId: "openrouter",
+            name: "API",
+            baseUrl: "https://openrouter.ai/api/v1",
+            local: false,
+            enabled: true,
+          },
+        ],
+        models: [],
+        candidates: [],
+        discoveredModels: [
+          {
+            catalogEntryId: "catalog-openrouter-free",
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            modelId: "vendor/free-model",
+            state: "active",
+          },
+        ],
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            status: "available",
+            activeCount: 1,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+            lastSuccessfulAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
+      },
+      credentials: [],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    }));
+    render(<App service={service({ loadSettings, syncProviderModels })} />);
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    expect(await screen.findByText("vendor/free-model")).toBeInTheDocument();
+    expect(screen.getByText("발견됨")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /모델 새로고침/u }));
+
+    expect(syncProviderModels).toHaveBeenCalledWith("endpoint-openrouter");
+    expect(await screen.findByRole("status")).toHaveTextContent("모델 목록을 확인했습니다.");
+  });
+
+  it("Endpoint별 모델·상태·새로고침을 분리하고 비활성 주소는 읽기 전용으로 둔다", async () => {
+    const user = userEvent.setup();
+    const syncProviderModels = vi.fn(async () => ({
+      status: "empty" as const,
+      activeCount: 0,
+      invalidCount: 0,
+      duplicateCount: 0,
+    }));
+    const loadSettings = vi.fn(async () => ({
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-primary",
+            providerId: "openrouter",
+            name: "Primary",
+            baseUrl: "https://primary.example/v1",
+            local: false,
+            enabled: true,
+          },
+          {
+            endpointId: "endpoint-secondary",
+            providerId: "openrouter",
+            name: "Secondary",
+            baseUrl: "https://secondary.example/v1",
+            local: false,
+            enabled: true,
+          },
+          {
+            endpointId: "endpoint-retired",
+            providerId: "openrouter",
+            name: "Retired",
+            baseUrl: "https://retired.example/v1",
+            local: false,
+            enabled: false,
+          },
+        ],
+        models: [
+          {
+            modelProfileId: "registered-profile",
+            providerId: "openrouter",
+            endpointId: "endpoint-primary",
+            modelId: "vendor/registered",
+            routeKind: "chat",
+            verified: false,
+            enabled: true,
+          },
+          {
+            modelProfileId: "verified-profile",
+            providerId: "openrouter",
+            endpointId: "endpoint-secondary",
+            modelId: "vendor/verified-stale",
+            routeKind: "chat",
+            verified: true,
+            enabled: true,
+          },
+        ],
+        discoveredModels: [
+          {
+            catalogEntryId: "stale-entry",
+            providerId: "openrouter",
+            endpointId: "endpoint-secondary",
+            modelId: "vendor/verified-stale",
+            state: "stale",
+          },
+          {
+            catalogEntryId: "retired-entry",
+            providerId: "openrouter",
+            endpointId: "endpoint-retired",
+            modelId: "vendor/retired",
+            state: "stale",
+          },
+        ],
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-primary",
+            status: "available",
+            activeCount: 1,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-secondary",
+            status: "empty",
+            activeCount: 0,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:01:00.000Z",
+          },
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-retired",
+            status: "degraded",
+            activeCount: 0,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:02:00.000Z",
+          },
+        ],
+      },
+      credentials: [],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    }));
+    render(<App service={service({ loadSettings, syncProviderModels })} />);
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    expect(await screen.findByText("vendor/registered")).toBeInTheDocument();
+    expect(screen.getByText("등록됨")).toBeInTheDocument();
+    expect(screen.getByText("검증됨 · 이전 목록")).toBeInTheDocument();
+    expect(
+      screen.getByText("모델 API가 빈 목록을 반환했습니다. 저장된 이전 목록은 교체하지 않았습니다."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("비활성 주소 · 읽기 전용 이전 목록")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /모델 새로고침 · Retired/u })).toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: /모델 새로고침 · Secondary/u }));
+    expect(syncProviderModels).toHaveBeenCalledWith("endpoint-secondary");
+    expect(await screen.findByText("모델 API가 빈 목록을 반환했습니다.")).toBeInTheDocument();
+  });
+
+  it("상태가 없는 기존 Endpoint의 모델 목록을 화면 진입 뒤 한 번만 자동 확인한다", async () => {
+    const user = userEvent.setup();
+    const syncProviderModels = vi.fn(async () => ({
+      status: "available" as const,
+      activeCount: 1,
+      invalidCount: 0,
+      duplicateCount: 0,
+    }));
+    const settings = {
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-openrouter",
+            providerId: "openrouter",
+            name: "API",
+            baseUrl: "https://openrouter.ai/api/v1",
+            local: false,
+            enabled: true,
+          },
+        ],
+        models: [],
+        discoveredModels: [],
+        catalogStatuses: [],
+      },
+      credentials: [],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    };
+    const loadSettings = vi.fn(async () => settings);
+    render(<App service={service({ loadSettings, syncProviderModels })} />);
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    await waitFor(() => expect(syncProviderModels).toHaveBeenCalledTimes(1));
+    await act(async () => Promise.resolve());
+    expect(syncProviderModels).toHaveBeenCalledWith("endpoint-openrouter");
+    expect(syncProviderModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("미래·경과 retryAt은 각각 한 번 재시도하고 화면이 닫히면 예약을 취소한다", async () => {
+    vi.useFakeTimers();
+    try {
+      const syncProviderModels = vi.fn(async () => ({
+        status: "available" as const,
+        activeCount: 1,
+        invalidCount: 0,
+        duplicateCount: 0,
+      }));
+      const retryAt = new Date(Date.now() + 1_000).toISOString();
+      const loadSettings = vi.fn(async () => ({
+        catalog: {
+          providers: [
+            { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+          ],
+          endpoints: [
+            {
+              endpointId: "endpoint-openrouter",
+              providerId: "openrouter",
+              name: "API",
+              baseUrl: "https://openrouter.ai/api/v1",
+              local: false,
+              enabled: true,
+            },
+          ],
+          models: [],
+          discoveredModels: [],
+          catalogStatuses: [
+            {
+              providerId: "openrouter",
+              endpointId: "endpoint-openrouter",
+              status: "degraded",
+              activeCount: 0,
+              invalidCount: 0,
+              duplicateCount: 0,
+              retryAt,
+              lastAttemptedAt: new Date(Date.now() - 1_000).toISOString(),
+            },
+          ],
+        },
+        credentials: [],
+        routes: [],
+        providers: [],
+        accounts: [],
+        quota: [],
+        policy: [],
+      }));
+      const first = render(<App service={service({ loadSettings, syncProviderModels })} />);
+      fireEvent.click(screen.getByRole("button", { name: "프로바이더" }));
+      await act(async () => Promise.resolve());
+      expect(syncProviderModels).not.toHaveBeenCalled();
+      await act(async () => vi.advanceTimersByTime(1_000));
+      expect(syncProviderModels).toHaveBeenCalledTimes(1);
+      first.unmount();
+
+      syncProviderModels.mockClear();
+      const pastRetryAt = new Date(Date.now() - 1_000).toISOString();
+      const pastLoadSettings = vi.fn(async () => {
+        const value = await loadSettings();
+        return {
+          ...value,
+          catalog: {
+            ...value.catalog,
+            catalogStatuses: value.catalog.catalogStatuses.map((status) => ({ ...status, retryAt: pastRetryAt })),
+          },
+        };
+      });
+      const past = render(<App service={service({ loadSettings: pastLoadSettings, syncProviderModels })} />);
+      fireEvent.click(screen.getByRole("button", { name: "프로바이더" }));
+      await act(async () => Promise.resolve());
+      await act(async () => vi.advanceTimersByTime(0));
+      await act(async () => Promise.resolve());
+      expect(syncProviderModels).toHaveBeenCalledTimes(1);
+      past.unmount();
+
+      syncProviderModels.mockClear();
+      const cancelRetryAt = new Date(Date.now() + 2_000).toISOString();
+      const cancelLoadSettings = vi.fn(async () => {
+        const value = await loadSettings();
+        return {
+          ...value,
+          catalog: {
+            ...value.catalog,
+            catalogStatuses: value.catalog.catalogStatuses.map((status) => ({ ...status, retryAt: cancelRetryAt })),
+          },
+        };
+      });
+      const second = render(<App service={service({ loadSettings: cancelLoadSettings, syncProviderModels })} />);
+      fireEvent.click(screen.getByRole("button", { name: "프로바이더" }));
+      await act(async () => Promise.resolve());
+      second.unmount();
+      await act(async () => vi.advanceTimersByTime(5_000));
+      expect(syncProviderModels).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("400개 모델 목록을 스크롤·키보드로 다루며 지연 상태 문구도 한국어와 영어로 번역한다", async () => {
+    const discoveredModels = Array.from({ length: 400 }, (_, index) => ({
+      catalogEntryId: `catalog-${index}`,
+      providerId: "openrouter",
+      endpointId: "endpoint-openrouter",
+      modelId: `vendor/model-${String(index).padStart(3, "0")}`,
+      state: "active",
+    }));
+    const loadSettings = vi.fn(async () => ({
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-openrouter",
+            providerId: "openrouter",
+            name: "API",
+            baseUrl: "https://openrouter.ai/api/v1",
+            local: false,
+            enabled: true,
+          },
+        ],
+        models: [],
+        discoveredModels,
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            status: "available",
+            activeCount: 400,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
+      },
+      credentials: [],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    }));
+    try {
+      localStorage.setItem("massion.language.v1", "ko");
+      const koreanSync = vi.fn(async () => ({
+        status: "available" as const,
+        activeCount: 400,
+        invalidCount: 0,
+        duplicateCount: 0,
+      }));
+      const korean = render(
+        <I18nProvider>
+          <App service={service({ loadSettings, syncProviderModels: koreanSync })} />
+        </I18nProvider>,
+      );
+      const koreanUser = userEvent.setup();
+      await koreanUser.click(screen.getByRole("button", { name: "프로바이더" }));
+      const lastModel = await screen.findByText("vendor/model-399");
+      const modelScroll = screen.getByTestId("provider-model-scroll");
+      const modelClip = screen.getByTestId("provider-model-clip");
+      expect(modelScroll).toHaveClass("min-w-0", "overflow-y-auto");
+      expect(modelScroll).not.toHaveClass("overflow-x-auto", "overflow-x-scroll");
+      expect(modelClip).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      expect(modelScroll.closest("aside")).toHaveClass("min-w-0", "overflow-hidden");
+      expect(lastModel).toHaveClass("min-w-0", "truncate");
+      const lastModelRow = lastModel.closest("li");
+      expect(lastModelRow).not.toBeNull();
+      expect(lastModelRow).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      const modelList = lastModelRow?.parentElement;
+      const liveRegion = modelList?.parentElement;
+      const endpointSection = liveRegion?.parentElement;
+      const modelGrid = endpointSection?.parentElement;
+      expect(modelList).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      expect(liveRegion).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      expect(endpointSection).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      expect(modelGrid).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      expect(within(lastModelRow as HTMLElement).getByText("발견됨")).toHaveClass("shrink-0");
+      const koreanRefresh = screen.getByRole("button", { name: /모델 새로고침 · API/u });
+      koreanRefresh.focus();
+      await koreanUser.keyboard("{Enter}");
+      expect(koreanSync).toHaveBeenCalledWith("endpoint-openrouter");
+      expect(await screen.findByText("모델 목록을 확인했습니다.")).toBeInTheDocument();
+      expect(screen.getAllByText(/^vendor\/model-/u)).toHaveLength(400);
+      expect(screen.getByTestId("provider-model-clip")).toHaveClass("max-w-full", "overflow-hidden");
+      korean.unmount();
+
+      localStorage.setItem("massion.language.v1", "en");
+      const englishSync = vi.fn(async () => ({
+        status: "partial" as const,
+        activeCount: 400,
+        invalidCount: 1,
+        duplicateCount: 0,
+      }));
+      const english = render(
+        <I18nProvider>
+          <App service={service({ loadSettings, syncProviderModels: englishSync })} />
+        </I18nProvider>,
+      );
+      const englishUser = userEvent.setup();
+      await englishUser.click(screen.getByRole("button", { name: "Provider" }));
+      expect(await screen.findByText("vendor/model-399")).toBeInTheDocument();
+      expect(screen.getAllByText("Discovered")).toHaveLength(400);
+      const englishRefresh = screen.getByRole("button", { name: /Refresh models · API/u });
+      englishRefresh.focus();
+      await englishUser.keyboard("{Enter}");
+      expect(
+        await screen.findByText("Some model data was invalid, so the last good catalog was kept."),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("모델 응답 일부가 유효하지 않아 이전 목록을 유지했습니다.")).not.toBeInTheDocument();
+      english.unmount();
+    } finally {
+      localStorage.setItem("massion.language.v1", "ko");
+    }
   });
 
   it("직접 등록한 Provider는 상세에서 제거하고 구독 연결은 제거 대상이 아니다", async () => {
@@ -1660,6 +2220,122 @@ describe("AgentOS native data flow", () => {
     expect(await within(dialog).findByRole("alert")).toHaveTextContent("키가 거부됐습니다.");
   });
 
+  it("키 저장 뒤 모델 확인 실패는 부분 성공으로 알리고 입력값을 지운다", async () => {
+    const user = userEvent.setup();
+    const addCredential = vi.fn(async () => undefined);
+    const syncProviderModels = vi.fn(async () => {
+      throw new Error("catalog unavailable");
+    });
+    const loadSettings = vi.fn(async () => ({
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-openrouter",
+            providerId: "openrouter",
+            name: "API",
+            baseUrl: "https://openrouter.ai/api/v1",
+            local: false,
+            enabled: true,
+          },
+        ],
+        models: [],
+        discoveredModels: [],
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            status: "available",
+            activeCount: 0,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
+      },
+      credentials: [],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    }));
+    render(<App service={service({ addCredential, loadSettings, syncProviderModels })} />);
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    await user.click(await screen.findByRole("button", { name: "키 추가" }));
+    const key = screen.getByLabelText("키");
+    await user.type(key, "sk-test");
+    await user.click(screen.getByRole("button", { name: "연결" }));
+
+    expect(await screen.findByText("키는 저장했지만 모델 목록을 확인하지 못했습니다.")).toBeInTheDocument();
+    expect(addCredential).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog", { name: "키로 연결" })).not.toBeInTheDocument();
+  });
+
+  it("키 해지 뒤 모델 재확인이 실패해도 해지 성공을 유지한다", async () => {
+    const user = userEvent.setup();
+    const disableCredential = vi.fn(async () => undefined);
+    const syncProviderModels = vi.fn(async () => {
+      throw new Error("credential revoked");
+    });
+    const loadSettings = vi.fn(async () => ({
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-openrouter",
+            providerId: "openrouter",
+            name: "API",
+            baseUrl: "https://openrouter.ai/api/v1",
+            local: false,
+            enabled: true,
+          },
+        ],
+        models: [],
+        discoveredModels: [],
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            status: "available",
+            activeCount: 0,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
+      },
+      credentials: [
+        {
+          credentialId: "credential-openrouter",
+          providerId: "openrouter",
+          endpointId: "endpoint-openrouter",
+          label: "기본 키",
+          status: "active",
+          version: 1,
+        },
+      ],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    }));
+    render(<App service={service({ disableCredential, loadSettings, syncProviderModels })} />);
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    await user.click(await screen.findByRole("button", { name: "제거" }));
+
+    expect(disableCredential).toHaveBeenCalledWith("credential-openrouter", 1);
+    expect(syncProviderModels).toHaveBeenCalledWith("endpoint-openrouter");
+    expect(await screen.findByText("키는 제거했지만 모델 목록을 다시 확인하지 못했습니다.")).toBeInTheDocument();
+  });
+
   it("키가 등록된 Provider는 빈 상태 대신 교체 경로를 보여준다", async () => {
     const user = userEvent.setup();
     const loadSettings = vi.fn(async () => ({
@@ -1704,6 +2380,79 @@ describe("AgentOS native data flow", () => {
     expect(screen.queryByText("등록된 키가 없습니다.")).not.toBeInTheDocument();
   });
 
+  it("영어 UI는 제품 기본 키만 번역하고 사용자 지정 키 이름은 그대로 둔다", async () => {
+    const loadSettings = vi.fn(async () => ({
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-openrouter",
+            providerId: "openrouter",
+            name: "API",
+            baseUrl: "https://openrouter.ai/api/v1",
+            local: false,
+            enabled: true,
+          },
+        ],
+        models: [],
+        discoveredModels: [],
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            status: "available",
+            activeCount: 0,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
+      },
+      credentials: [
+        {
+          providerId: "openrouter",
+          endpointId: "endpoint-openrouter",
+          credentialId: "credential-default",
+          label: "기본 키",
+          status: "active",
+          version: 1,
+        },
+        {
+          providerId: "openrouter",
+          endpointId: "endpoint-openrouter",
+          credentialId: "credential-custom",
+          label: "팀 전용",
+          status: "active",
+          version: 1,
+        },
+      ],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    }));
+    try {
+      localStorage.setItem("massion.language.v1", "en");
+      const view = render(
+        <I18nProvider>
+          <App service={service({ loadSettings })} />
+        </I18nProvider>,
+      );
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Provider" }));
+
+      expect(await screen.findByText("Default key")).toBeInTheDocument();
+      expect(screen.getByText("팀 전용")).toBeInTheDocument();
+      expect(screen.queryByText("기본 키")).not.toBeInTheDocument();
+      view.unmount();
+    } finally {
+      localStorage.setItem("massion.language.v1", "ko");
+    }
+  });
+
   it("프로바이더를 불러오지 못하면 같은 자리에서 다시 시도할 수 있다", async () => {
     const user = userEvent.setup();
     let attempt = 0;
@@ -1735,6 +2484,12 @@ describe("AgentOS native data flow", () => {
   it("등록한 키는 같은 화면에서 제거할 수 있다", async () => {
     const user = userEvent.setup();
     const disableCredential = vi.fn(async () => undefined);
+    const syncProviderModels = vi.fn(async () => ({
+      status: "available" as const,
+      activeCount: 0,
+      invalidCount: 0,
+      duplicateCount: 0,
+    }));
     const loadSettings = vi.fn(async () => ({
       catalog: {
         providers: [
@@ -1746,10 +2501,22 @@ describe("AgentOS native data flow", () => {
             providerId: "openrouter",
             name: "api",
             baseUrl: "https://openrouter.ai/api/v1",
+            enabled: true,
           },
         ],
         models: [],
         candidates: [],
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            status: "available",
+            activeCount: 0,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
       },
       credentials: [
         {
@@ -1767,12 +2534,13 @@ describe("AgentOS native data flow", () => {
       quota: [],
       policy: [],
     }));
-    render(<App service={service({ disableCredential, loadSettings })} />);
+    render(<App service={service({ disableCredential, loadSettings, syncProviderModels })} />);
 
     await user.click(screen.getByRole("button", { name: "프로바이더" }));
     await user.click(await screen.findByRole("button", { name: "제거" }));
 
     expect(disableCredential).toHaveBeenCalledWith("credential-openrouter", 2);
+    expect(syncProviderModels).toHaveBeenCalledWith("endpoint-openrouter");
     expect(await screen.findByRole("status")).toHaveTextContent("키를 제거했습니다.");
   });
 
@@ -1904,6 +2672,7 @@ describe("AgentOS native data flow", () => {
 
     const form = await screen.findByRole("form", { name: "프로바이더 추가" });
     expect(within(form).queryByRole("option", { name: "구독 커넥터" })).not.toBeInTheDocument();
+    expect(within(form).queryByRole("option", { name: "Anthropic" })).not.toBeInTheDocument();
   }, 15_000);
 
   it.each([

@@ -1104,7 +1104,7 @@ describe("ApplicationQueryRegistry", () => {
     });
   });
 
-  it("제공자·endpoint·model·candidate 구성 목록을 secret 없이 공개한다", async () => {
+  it("제공자 구성과 발견한 모델 카탈로그를 공개 필드만 투영한다", async () => {
     const registry = new ApplicationQueryRegistry();
     registerApplicationQueries(registry, {
       readModel,
@@ -1122,6 +1122,63 @@ describe("ApplicationQueryRegistry", () => {
             enabled: true,
           },
         ],
+        listModelCatalog: async () => ({
+          models: [
+            {
+              catalog_entry_id: "catalog-entry-1",
+              organization_id: context.organizationId,
+              provider_id: "openai",
+              endpoint_id: "endpoint-1",
+              model_id: "gpt-5",
+              metadata: {
+                id: "gpt-5",
+                ownedBy: "private-owner-detail",
+                canonicalId: "openai/gpt-5",
+                displayName: "GPT-5",
+                contextWindow: 128_000,
+                supportsTools: true,
+                supportsStructuredOutput: true,
+                supportsVision: true,
+                supportsStreaming: true,
+                inputCostMicrosPerMillion: 1_250_000,
+                outputCostMicrosPerMillion: 10_000_000,
+                expirationDate: "2027-01-01",
+                privateToken: "must-not-leak",
+              },
+              metadata_json: '{"privateToken":"must-not-leak"}',
+              metadata_digest: "private-metadata-digest",
+              state: "active",
+              snapshot_id: "private-snapshot-id",
+              first_seen_at: "2026-08-10T01:00:00.000Z",
+              last_seen_at: "2026-08-10T02:00:00.000Z",
+              created_at: "2026-08-10T01:00:00.000Z",
+              updated_at: "2026-08-10T02:00:00.000Z",
+            },
+          ],
+          statuses: [
+            {
+              organization_id: context.organizationId,
+              provider_id: "openai",
+              endpoint_id: "endpoint-1",
+              sync_sequence: 3,
+              status: "available",
+              authentication_scope: "credential",
+              credential_id: "private-credential-id",
+              credential_version: 7,
+              credential_secret_version: 4,
+              active_count: 1,
+              invalid_count: 2,
+              duplicate_count: 1,
+              catalog_digest: "catalog-digest",
+              diagnostic_reason: "partial-source-data",
+              retry_at: "2026-08-10T03:00:00.000Z",
+              last_attempted_at: "2026-08-10T02:00:00.000Z",
+              last_successful_at: "2026-08-10T02:00:01.000Z",
+              created_at: "2026-08-10T01:00:00.000Z",
+              updated_at: "2026-08-10T02:00:01.000Z",
+            },
+          ],
+        }),
       },
       router: {
         listModels: async () => [
@@ -1147,12 +1204,74 @@ describe("ApplicationQueryRegistry", () => {
         ],
       },
     } as never);
-    await expect(registry.query(context, ["router:read"], "router.catalog", {})).resolves.toMatchObject({
+    await expect(registry.query(context, ["router:read"], "router.catalog", {})).resolves.toEqual({
+      schemaVersion: "massion.application.v1",
+      operation: "router.catalog",
       data: {
-        providers: [{ providerId: "openai" }],
-        endpoints: [{ endpointId: "endpoint-1" }],
-        models: [{ modelProfileId: "profile-1" }],
-        candidates: [{ candidateId: "candidate-1" }],
+        providers: [{ providerId: "openai", displayName: "OpenAI", adapterKind: "openai-compatible", enabled: true }],
+        endpoints: [
+          {
+            endpointId: "endpoint-1",
+            providerId: "openai",
+            name: "API",
+            baseUrl: "https://api.openai.com/v1",
+            local: false,
+            gatewayKind: undefined,
+            enabled: true,
+          },
+        ],
+        models: [
+          {
+            modelProfileId: "profile-1",
+            providerId: "openai",
+            endpointId: "endpoint-1",
+            modelId: "gpt",
+            routeKind: "chat",
+            equivalenceGroup: "general",
+            verified: true,
+            enabled: true,
+          },
+        ],
+        candidates: [
+          { candidateId: "candidate-1", routeId: "route-1", modelProfileId: "profile-1", priority: 1, enabled: true },
+        ],
+        discoveredModels: [
+          {
+            catalogEntryId: "catalog-entry-1",
+            providerId: "openai",
+            endpointId: "endpoint-1",
+            modelId: "gpt-5",
+            state: "active",
+            canonicalId: "openai/gpt-5",
+            displayName: "GPT-5",
+            contextWindow: 128_000,
+            supportsTools: true,
+            supportsStructuredOutput: true,
+            supportsVision: true,
+            supportsStreaming: true,
+            inputCostMicrosPerMillion: 1_250_000,
+            outputCostMicrosPerMillion: 10_000_000,
+            expirationDate: "2027-01-01",
+            firstSeenAt: "2026-08-10T01:00:00.000Z",
+            lastSeenAt: "2026-08-10T02:00:00.000Z",
+          },
+        ],
+        catalogStatuses: [
+          {
+            providerId: "openai",
+            endpointId: "endpoint-1",
+            status: "available",
+            authenticationScope: "credential",
+            activeCount: 1,
+            invalidCount: 2,
+            duplicateCount: 1,
+            catalogDigest: "catalog-digest",
+            diagnosticReason: "partial-source-data",
+            retryAt: "2026-08-10T03:00:00.000Z",
+            lastAttemptedAt: "2026-08-10T02:00:00.000Z",
+            lastSuccessfulAt: "2026-08-10T02:00:01.000Z",
+          },
+        ],
       },
     });
   });

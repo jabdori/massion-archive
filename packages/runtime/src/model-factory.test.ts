@@ -68,6 +68,17 @@ describe("Massion routed model factory", () => {
   let router: ModelRouter;
   let routeName: string;
 
+  it("upgrade DB에 남은 private·loopback 외부 endpoint를 모델 생성 직전에 거부한다", () => {
+    expect(() =>
+      buildOpenAiModelFixture({
+        adapterKind: "openai-compatible",
+        baseUrl: "https://169.254.169.254/latest",
+        modelId: "unsafe-model",
+        providerId: "legacy-unsafe",
+      }),
+    ).toThrow("public HTTPS");
+  });
+
   beforeEach(async () => {
     database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
     const identity = await IdentityService.create(database);
@@ -187,6 +198,50 @@ describe("Massion routed model factory", () => {
     });
     expect(completed.status).toBe("succeeded");
     expect(completed.actual_cost_micros).toBe(60);
+  });
+
+  it("MassionModelFactory가 레거시 unsafe endpoint를 예약·비용·builder 호출 전에 차단한다", async () => {
+    const build = vi.fn(() => ({ modelId: "unsafe-model" }) as LanguageModel);
+    const factory = new MassionModelFactory(router, providers, { build });
+    const route = (await router.listRoutes(context)).find((item) => item.name === routeName);
+    const model = (await router.listModels(context))[0];
+    if (!route || !model) throw new Error("Router fixture가 없습니다");
+    await database.query(
+      "UPDATE provider_endpoint SET base_url = 'https://169.254.169.254/latest' WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id;",
+      { organization_id: context.organizationId, endpoint_id: model.endpoint_id },
+    );
+
+    await expect(
+      factory.acquire(context, {
+        commandId: crypto.randomUUID(),
+        routeName,
+        estimatedTokens: 100,
+        estimatedCostMicros: 1_000,
+      }),
+    ).rejects.toThrow("안전하지 않은 endpoint");
+    const [routes] = await database.query<
+      [Array<{ readonly spent_micros: number; readonly selection_sequence: number }>]
+    >(
+      "SELECT spent_micros, selection_sequence FROM model_route WHERE organization_id = $organization_id AND route_id = $route_id;",
+      { organization_id: context.organizationId, route_id: route.route_id },
+    );
+    const [credentials] = await database.query<
+      [Array<{ readonly request_count: number; readonly cost_micros: number }>]
+    >(
+      "SELECT request_count, cost_micros FROM provider_credential WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id;",
+      { organization_id: context.organizationId, endpoint_id: model.endpoint_id },
+    );
+    const [attempts] = await database.query<[unknown[]]>(
+      "SELECT attempt_id FROM route_attempt WHERE organization_id = $organization_id AND route_id = $route_id;",
+      { organization_id: context.organizationId, route_id: route.route_id },
+    );
+
+    expect(build).not.toHaveBeenCalled();
+    expect(routes[0]).toMatchObject({ spent_micros: 0, selection_sequence: 0 });
+    expect(credentials.every((credential) => credential.request_count === 0 && credential.cost_micros === 0)).toBe(
+      true,
+    );
+    expect(attempts).toEqual([]);
   });
 
   it("활성 역할별 model batch의 선호 순서를 Router reserve에 전달한다", async () => {
@@ -626,46 +681,10 @@ describe("Massion routed model factory", () => {
     expect(model.provider).toBe(testCase.expectedProvider);
   });
 
-  it("공식 OpenAI의 gpt-5.6-sol은 Responses API endpoint로 호출한다", async () => {
-    let requestUrl = "";
-    let requestBody: Record<string, unknown> = {};
-    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const request = input instanceof Request ? input : new Request(input, init);
-      requestUrl = request.url;
-      requestBody = JSON.parse(await request.clone().text()) as Record<string, unknown>;
-      return new Response(
-        JSON.stringify({
-          id: "response-1",
-          created_at: 1,
-          model: "gpt-5.6-sol",
-          output: [
-            {
-              type: "message",
-              role: "assistant",
-              id: "message-1",
-              content: [{ type: "output_text", text: "ok", annotations: [] }],
-            },
-          ],
-          usage: { input_tokens: 1, output_tokens: 1 },
-        }),
-        { headers: { "content-type": "application/json" } },
-      );
-    });
-    vi.stubGlobal("fetch", fetcher);
-    const model = buildOpenAiModelFixture({
-      baseUrl: "https://api.openai.com/v1",
-      modelId: "gpt-5.6-sol",
-    });
-
-    const result = await generateText({ model, prompt: "hello", maxRetries: 0 });
-
-    expect(result.text).toBe("ok");
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    expect(requestUrl).toBe("https://api.openai.com/v1/responses");
-    expect(requestBody.store).toBe(false);
-  });
-
-  it("실제 OpenAI-compatible builder가 Ollama /v1 endpoint와 Bearer secret으로 호출한다", async () => {
+  it.each([
+    { adapterKind: "ollama" as const, providerId: "ollama", basePath: "" },
+    { adapterKind: "openai-compatible" as const, providerId: "gateway", basePath: "/v1" },
+  ])("$adapterKind builder가 secure /v1 endpoint와 Bearer secret으로 호출한다", async (fixture) => {
     let requestUrl = "";
     let authorization = "";
     const server = createServer((request, response) => {
@@ -688,10 +707,10 @@ describe("Massion routed model factory", () => {
     if (!address || typeof address === "string") throw new Error("테스트 HTTP 주소를 찾을 수 없습니다");
     const builder = new OpenAICompatibleModelBuilder();
     const provider: ModelProvider = {
-      provider_id: "ollama",
+      provider_id: fixture.providerId,
       organization_id: "organization-a",
-      display_name: "Ollama",
-      adapter_kind: "ollama",
+      display_name: "Configured Provider",
+      adapter_kind: fixture.adapterKind,
       enabled: true,
       created_at: new Date(),
       updated_at: new Date(),
@@ -699,9 +718,9 @@ describe("Massion routed model factory", () => {
     const endpoint: ProviderEndpoint = {
       endpoint_id: "endpoint-1",
       organization_id: "organization-a",
-      provider_id: "ollama",
+      provider_id: fixture.providerId,
       name: "Local",
-      base_url: `http://127.0.0.1:${String(address.port)}`,
+      base_url: `http://127.0.0.1:${String(address.port)}${fixture.basePath}`,
       local: true,
       enabled: true,
       created_at: new Date(),
@@ -771,7 +790,7 @@ describe("Massion routed model factory", () => {
       provider_id: provider.provider_id,
       name: "MiniMax Anthropic",
       base_url: `http://127.0.0.1:${String(address.port)}/anthropic`,
-      local: false,
+      local: true,
       subscription_protocol: "anthropic",
       enabled: true,
       created_at: new Date(),

@@ -204,6 +204,78 @@ export interface RouteAttemptViewV1 {
   readonly workTitle?: string;
 }
 
+export interface ProviderDiscoveredModelViewV1 {
+  readonly catalogEntryId: string;
+  readonly providerId: string;
+  readonly endpointId: string;
+  readonly modelId: string;
+  readonly state: "active" | "stale";
+  readonly canonicalId?: string;
+  readonly displayName?: string;
+  readonly contextWindow?: number;
+  readonly supportsTools?: boolean;
+  readonly supportsStructuredOutput?: boolean;
+  readonly supportsVision?: boolean;
+  readonly supportsStreaming?: boolean;
+  readonly inputCostMicrosPerMillion?: number;
+  readonly outputCostMicrosPerMillion?: number;
+  readonly expirationDate?: string;
+  readonly firstSeenAt: string;
+  readonly lastSeenAt: string;
+}
+
+export interface ProviderModelCatalogStatusViewV1 {
+  readonly providerId: string;
+  readonly endpointId: string;
+  readonly status: "syncing" | "available" | "empty" | "partial" | "degraded";
+  readonly authenticationScope: "anonymous" | "credential";
+  readonly activeCount: number;
+  readonly invalidCount: number;
+  readonly duplicateCount: number;
+  readonly catalogDigest?: string;
+  readonly diagnosticReason?: string;
+  readonly retryAt?: string;
+  readonly lastAttemptedAt: string;
+  readonly lastSuccessfulAt?: string;
+}
+
+export interface RouterCatalogViewV1 {
+  readonly providers: readonly {
+    readonly providerId: string;
+    readonly displayName: string;
+    readonly adapterKind: string;
+    readonly enabled: boolean;
+  }[];
+  readonly endpoints: readonly {
+    readonly endpointId: string;
+    readonly providerId: string;
+    readonly name: string;
+    readonly baseUrl: string;
+    readonly local: boolean;
+    readonly gatewayKind?: string;
+    readonly enabled: boolean;
+  }[];
+  readonly models: readonly {
+    readonly modelProfileId: string;
+    readonly providerId: string;
+    readonly endpointId: string;
+    readonly modelId: string;
+    readonly routeKind: string;
+    readonly equivalenceGroup: string;
+    readonly verified: boolean;
+    readonly enabled: boolean;
+  }[];
+  readonly candidates: readonly {
+    readonly candidateId: string;
+    readonly routeId: string;
+    readonly modelProfileId: string;
+    readonly priority: number;
+    readonly enabled: boolean;
+  }[];
+  readonly discoveredModels: readonly ProviderDiscoveredModelViewV1[];
+  readonly catalogStatuses: readonly ProviderModelCatalogStatusViewV1[];
+}
+
 export interface ApprovalViewV1 {
   readonly approvalId: string;
   readonly action: string;
@@ -738,6 +810,7 @@ export interface ApplicationQueryMapV1 {
     readonly payload: Record<string, never>;
     readonly data: EmergencyStateViewV1 | undefined;
   };
+  readonly "router.catalog": { readonly payload: Record<string, never>; readonly data: RouterCatalogViewV1 };
   readonly "router.attempts": {
     readonly payload: { readonly limit?: number };
     readonly data: readonly RouteAttemptViewV1[];
@@ -816,6 +889,7 @@ export interface ApplicationCommandMapV1 {
   readonly "growth.suggestion.approve": {
     readonly payload: { readonly suggestionId: string; readonly expectedRevision: number; readonly reason: string };
   };
+  readonly "router.models.sync": { readonly payload: { readonly endpointId: string } };
   /**
    * 이미 있는 경로의 예산 한도. 지출과 후보는 그대로 두고 한도만 바꿉니다.
    *

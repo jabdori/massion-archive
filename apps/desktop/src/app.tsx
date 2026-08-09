@@ -108,6 +108,7 @@ import type {
   OrganizationNodeView,
   OrganizationView,
   PermissionKind,
+  ProviderModelSyncResult,
   ProviderConnectionView,
   SettingsView,
   SubscriptionAccountView,
@@ -4921,6 +4922,8 @@ function GrowthAdoptionBoundary({
 }
 
 /** 라벨 축과 값 축 둘만 씁니다. 정렬선이 늘어나면 눈이 매 줄 자리를 다시 찾습니다. */
+const DEFAULT_PROVIDER_CREDENTIAL_LABEL = "기본 키";
+
 function ProviderField({ children, label }: { children: ReactNode; label: string }) {
   return (
     <div className="grid grid-cols-[104px_minmax(0,1fr)] items-baseline gap-3 py-1.5">
@@ -4938,7 +4941,6 @@ function adapterLabel(adapterKind: string): string {
 
 const PROVIDER_ADAPTERS = [
   { value: "openai-compatible", label: "OpenAI 호환" },
-  { value: "anthropic", label: "Anthropic" },
   { value: "ollama", label: "Ollama" },
 ] as const;
 
@@ -5035,6 +5037,14 @@ function ProviderAddForm({
   );
 }
 
+function providerModelSyncNotice(result: ProviderModelSyncResult): string {
+  if (result.status === "available") return "모델 목록을 확인했습니다.";
+  if (result.status === "empty") return "모델 API가 빈 목록을 반환했습니다.";
+  if (result.status === "partial") return "모델 응답 일부가 유효하지 않아 이전 목록을 유지했습니다.";
+  if (result.status === "superseded") return "더 최근에 확인한 모델 목록을 사용합니다.";
+  return "모델 목록을 확인하지 못해 이전 목록을 유지했습니다.";
+}
+
 function ProviderSurface({ service }: { service: DesktopService }) {
   const { locale } = useI18n();
   const [settings, setSettings] = useState<SettingsView>();
@@ -5050,6 +5060,9 @@ function ProviderSurface({ service }: { service: DesktopService }) {
   const [confirmRemoval, setConfirmRemoval] = useState(false);
   const [keyTarget, setKeyTarget] = useState<string>();
   const [keySecret, setKeySecret] = useState("");
+  const [syncingEndpointIds, setSyncingEndpointIds] = useState<ReadonlySet<string>>(() => new Set());
+  const reconciledEndpointIds = useRef(new Set<string>());
+  const scheduledRetryKeys = useRef(new Set<string>());
 
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -5067,6 +5080,34 @@ function ProviderSurface({ service }: { service: DesktopService }) {
       disposed = true;
     };
   }, [service, reloadToken]);
+
+  const refreshEndpoint = useCallback(
+    async (endpointId: string, announce: boolean) => {
+      setSyncingEndpointIds((current) => new Set(current).add(endpointId));
+      if (announce) {
+        setError("");
+        setNotice("");
+      }
+      try {
+        const result = await service.syncProviderModels(endpointId);
+        try {
+          setSettings(await service.loadSettings());
+          if (announce) setNotice(providerModelSyncNotice(result));
+        } catch {
+          if (announce) setNotice("모델 목록은 확인했지만 화면을 새로 고치지 못했습니다.");
+        }
+      } catch (cause) {
+        if (announce) setError(surfaceErrorMessage(cause, "모델 목록을 확인하지 못했습니다."));
+      } finally {
+        setSyncingEndpointIds((current) => {
+          const next = new Set(current);
+          next.delete(endpointId);
+          return next;
+        });
+      }
+    },
+    [service],
+  );
 
   const submitProvider = async (event: React.SyntheticEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -5113,11 +5154,22 @@ function ProviderSurface({ service }: { service: DesktopService }) {
           weight: 100,
         });
       }
-      setSettings(await service.loadSettings());
+      let nextNotice = "프로바이더를 추가했습니다.";
+      try {
+        const syncResult = await service.syncProviderModels(endpointId);
+        if (syncResult.status !== "available") nextNotice = providerModelSyncNotice(syncResult);
+      } catch {
+        nextNotice = "프로바이더는 저장했지만 모델 목록을 확인하지 못했습니다.";
+      }
+      try {
+        setSettings(await service.loadSettings());
+      } catch {
+        nextNotice = "프로바이더는 저장했지만 화면을 새로 고치지 못했습니다.";
+      }
       setSelectedId(providerId);
       setAddOpen(false);
       setDraft({ displayName: "", adapterKind: "openai-compatible", baseUrl: "" });
-      setNotice("프로바이더를 추가했습니다.");
+      setNotice(nextNotice);
     } catch (cause) {
       setError(surfaceErrorMessage(cause, "프로바이더를 추가하지 못했습니다."));
     } finally {
@@ -5150,7 +5202,54 @@ function ProviderSurface({ service }: { service: DesktopService }) {
   };
 
   // 지원 목록은 앱 상수라 서버를 기다리지 않습니다. 연결 상태만 도착한 뒤 채워집니다.
-  const connections = projectProviderConnections(settings?.catalog, settings?.providers, settings?.credentials);
+  const connections = useMemo(
+    () =>
+      settings === undefined
+        ? []
+        : projectProviderConnections(settings.catalog, settings.providers, settings.credentials),
+    [settings],
+  );
+
+  useEffect(() => {
+    const timers: Array<{ key: string; timer: ReturnType<typeof setTimeout>; fired: () => boolean }> = [];
+    for (const connection of connections) {
+      if (!connection.enabled || connection.adapterKind === "subscription-connector") continue;
+      for (const endpoint of connection.endpoints) {
+        if (!endpoint.enabled) continue;
+        if (!endpoint.catalogStatus) {
+          if (!reconciledEndpointIds.current.has(endpoint.endpointId)) {
+            reconciledEndpointIds.current.add(endpoint.endpointId);
+            void refreshEndpoint(endpoint.endpointId, false);
+          }
+          continue;
+        }
+        const retryAt = endpoint.catalogStatus.status === "degraded" ? endpoint.catalogStatus.retryAt : undefined;
+        const retryTime = retryAt ? Date.parse(retryAt) : Number.NaN;
+        if (!retryAt || !Number.isFinite(retryTime)) continue;
+        const key = `${endpoint.endpointId}\0${retryAt}`;
+        if (scheduledRetryKeys.current.has(key)) continue;
+        scheduledRetryKeys.current.add(key);
+        let fired = false;
+        timers.push({
+          key,
+          timer: setTimeout(
+            () => {
+              fired = true;
+              void refreshEndpoint(endpoint.endpointId, false);
+            },
+            Math.max(0, retryTime - Date.now()),
+          ),
+          fired: () => fired,
+        });
+      }
+    }
+    return () => {
+      for (const { key, timer, fired } of timers) {
+        clearTimeout(timer);
+        if (!fired()) scheduledRetryKeys.current.delete(key);
+      }
+    };
+  }, [connections, refreshEndpoint]);
   const accounts = settings ? projectSubscriptionAccounts(settings.accounts) : [];
   const normalizedQuery = normalizeSearch(query, locale);
   const matched = connections.filter(
@@ -5189,8 +5288,21 @@ function ProviderSurface({ service }: { service: DesktopService }) {
     setNotice("");
     try {
       await service.disableCredential(credential.credentialId, credential.revision);
-      setSettings(await service.loadSettings());
-      setNotice("키를 제거했습니다.");
+      let nextNotice = "키를 제거했습니다.";
+      if (credential.endpointId) {
+        try {
+          const syncResult = await service.syncProviderModels(credential.endpointId);
+          if (syncResult.status !== "available") nextNotice = providerModelSyncNotice(syncResult);
+        } catch {
+          nextNotice = "키는 제거했지만 모델 목록을 다시 확인하지 못했습니다.";
+        }
+      }
+      try {
+        setSettings(await service.loadSettings());
+      } catch {
+        nextNotice = "키는 제거했지만 화면을 새로 고치지 못했습니다.";
+      }
+      setNotice(nextNotice);
     } catch (cause) {
       setError(surfaceErrorMessage(cause, "키를 제거하지 못했습니다."));
     } finally {
@@ -5222,6 +5334,7 @@ function ProviderSurface({ service }: { service: DesktopService }) {
     setNotice("");
     try {
       // 구독 manifest는 계정을 만들고, 직접 등록한 Provider는 endpoint에 자격을 답니다.
+      let syncResult: ProviderModelSyncResult | undefined;
       if (target?.keyAuthKind && target.endpoints.length === 0) {
         await service.connectSubscriptionKey({
           providerId,
@@ -5230,7 +5343,7 @@ function ProviderSurface({ service }: { service: DesktopService }) {
           secret,
         });
       } else {
-        const endpointId = target?.endpoints[0]?.endpointId;
+        const endpointId = target?.endpoints.find((endpoint) => endpoint.enabled)?.endpointId;
         if (!endpointId) throw new Error("연결할 주소를 찾지 못했습니다.");
         await service.addCredential({
           providerId,
@@ -5241,11 +5354,32 @@ function ProviderSurface({ service }: { service: DesktopService }) {
           priority: 0,
           weight: 100,
         });
+        try {
+          syncResult = await service.syncProviderModels(endpointId);
+        } catch {
+          setKeyTarget(undefined);
+          setKeySecret("");
+          try {
+            setSettings(await service.loadSettings());
+          } catch {
+            // 아래의 더 구체적인 저장 후 실패 안내를 유지합니다.
+          }
+          setNotice("키는 저장했지만 모델 목록을 확인하지 못했습니다.");
+          return;
+        }
       }
-      setSettings(await service.loadSettings());
+      let nextNotice =
+        syncResult?.status && syncResult.status !== "available"
+          ? providerModelSyncNotice(syncResult)
+          : "키를 등록했습니다.";
+      try {
+        setSettings(await service.loadSettings());
+      } catch {
+        nextNotice = "키는 저장했지만 화면을 새로 고치지 못했습니다.";
+      }
       setKeyTarget(undefined);
       setKeySecret("");
-      setNotice("키를 등록했습니다.");
+      setNotice(nextNotice);
     } catch (cause) {
       setError(surfaceErrorMessage(cause, "키를 등록하지 못했습니다."));
     } finally {
@@ -5296,7 +5430,11 @@ function ProviderSurface({ service }: { service: DesktopService }) {
           />
         </div>
         <nav className="min-h-0 overflow-y-auto pb-2">
-          {groups.length === 0 ? (
+          {settings === undefined ? (
+            <div className="px-3 py-2">
+              <SurfaceLoading />
+            </div>
+          ) : groups.length === 0 ? (
             <p className="px-2.5 py-2 text-[12px] text-muted">
               {translate(connections.length === 0 ? "연결된 프로바이더가 없습니다." : "검색과 맞는 것이 없습니다.")}
             </p>
@@ -5417,7 +5555,7 @@ function ProviderSurface({ service }: { service: DesktopService }) {
               {translate(notice)}
             </p>
           ) : null}
-          {settings === undefined && connections.length === 0 ? (
+          {settings === undefined ? (
             <SurfaceLoading />
           ) : selected === undefined ? (
             <p className="text-[12px] text-muted">
@@ -5459,15 +5597,32 @@ function ProviderSurface({ service }: { service: DesktopService }) {
         </div>
       </div>
 
-      <aside className="grid min-h-0 grid-rows-[46px_minmax(0,1fr)] border-l border-border bg-chrome">
-        <header className="flex items-baseline gap-2 border-b border-border px-3">
-          <h2 className="text-label text-fg-4">{translate("모델")}</h2>
-          <span className="text-figure tabular-nums text-fg-4">
-            {selected?.models.filter((model) => model.enabled).length ?? 0}/{selected?.models.length ?? 0}
-          </span>
+      <aside className="grid min-h-0 min-w-0 grid-rows-[46px_minmax(0,1fr)] overflow-hidden border-l border-border bg-chrome">
+        <header className="flex items-center gap-2 border-b border-border px-3">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <h2 className="text-label text-fg-4">{translate("모델")}</h2>
+            {settings !== undefined && selected ? (
+              <span className="truncate text-figure tabular-nums text-fg-4">
+                {selected.endpoints.some((endpoint) => endpoint.catalogStatus)
+                  ? `${String(selected.endpoints.reduce((sum, endpoint) => sum + (endpoint.catalogStatus?.activeCount ?? 0), 0))} ${translate("발견")}`
+                  : null}
+                {selected.endpoints.some((endpoint) => endpoint.catalogStatus) ? " · " : null}
+                {String(selected.models.filter((model) => model.enabled && model.verified).length)}{" "}
+                {translate("검증됨")}
+              </span>
+            ) : null}
+          </div>
         </header>
-        <div className="min-h-0 overflow-y-auto pb-3">
-          {selected === undefined ? null : <ProviderModelList connection={selected} />}
+        <div className="min-h-0 min-w-0 overflow-y-auto pb-3" data-testid="provider-model-scroll">
+          <div className="min-w-0 max-w-full overflow-hidden" data-testid="provider-model-clip">
+            {selected === undefined ? null : (
+              <ProviderModelList
+                connection={selected}
+                onSync={(endpointId) => void refreshEndpoint(endpointId, true)}
+                syncingEndpointIds={syncingEndpointIds}
+              />
+            )}
+          </div>
         </div>
       </aside>
 
@@ -5616,27 +5771,114 @@ function ProviderSurface({ service }: { service: DesktopService }) {
  * 끈 것이 조용히 되살아나므로, 명령이 생기기 전까지는 사실만 읽습니다.
  * 인계: docs/phases/30-surface-parity-agent-ux/settings-contract-handoff.md
  */
-function ProviderModelList({ connection }: { connection: ProviderConnectionView }) {
-  if (connection.models.length === 0)
-    return <p className="px-1 py-2 text-[12px] text-muted">{translate("등록된 모델이 없습니다.")}</p>;
+function ProviderModelList({
+  connection,
+  onSync,
+  syncingEndpointIds,
+}: {
+  connection: ProviderConnectionView;
+  onSync: (endpointId: string) => void;
+  syncingEndpointIds: ReadonlySet<string>;
+}) {
+  if (connection.endpoints.length === 0)
+    return <p className="px-3 py-3 text-[12px] leading-5 text-muted">{translate("연결된 주소가 없습니다.")}</p>;
   return (
-    <ul>
-      {connection.models.map((model) => (
-        <li className="flex w-full items-center gap-2.5 px-3 py-1.5" key={model.modelProfileId}>
-          <span
-            aria-hidden="true"
-            className={`size-1.5 shrink-0 rounded-full ${model.enabled ? "bg-fg-3" : "border border-fg-4"}`}
-          />
-          <span
-            className={`min-w-0 flex-1 truncate font-mono text-speaker ${model.enabled ? "text-secondary" : "text-muted"}`}
+    <div className="grid min-w-0 max-w-full gap-3 overflow-hidden pt-2">
+      {connection.endpoints.map((endpoint) => {
+        const models = connection.models.filter((model) => model.endpointId === endpoint.endpointId);
+        const status = endpoint.catalogStatus;
+        const busy = syncingEndpointIds.has(endpoint.endpointId) || status?.status === "syncing";
+        const warning =
+          status?.status === "partial" || status?.status === "degraded"
+            ? "마지막 확인은 완료되지 않았습니다. 아래에는 이전 정상 목록을 유지합니다."
+            : status?.status === "empty"
+              ? "모델 API가 빈 목록을 반환했습니다. 저장된 이전 목록은 교체하지 않았습니다."
+              : undefined;
+        const empty = busy
+          ? "모델 목록을 확인하고 있습니다."
+          : status?.status === "available" && status.activeCount > 0
+            ? "모델 목록 상태와 표시 데이터가 일치하지 않습니다."
+            : status === undefined
+              ? "아직 모델 목록을 확인하지 않았습니다."
+              : "등록된 모델이 없습니다.";
+        const headingId = `provider-model-endpoint-${endpoint.endpointId.replace(/[^a-zA-Z0-9_-]/gu, "-")}`;
+        return (
+          <section
+            aria-busy={busy}
+            aria-labelledby={headingId}
+            className="min-w-0 max-w-full overflow-hidden"
+            key={endpoint.endpointId}
           >
-            {model.modelId}
-          </span>
-          <span className="sr-only">{model.enabled ? translate("사용 중") : translate("미사용")}</span>
-          {model.verified ? null : <span className="shrink-0 text-figure text-fg-4">{translate("미확인")}</span>}
-        </li>
-      ))}
-    </ul>
+            <header className="flex min-w-0 max-w-full items-center gap-2 px-3 py-1">
+              <div className="min-w-0 flex-1">
+                <h3 className="truncate text-figure text-secondary" id={headingId}>
+                  {endpoint.name || endpoint.baseUrl}
+                </h3>
+                {!endpoint.enabled ? (
+                  <p className="text-[10px] text-muted">{translate("비활성 주소 · 읽기 전용 이전 목록")}</p>
+                ) : null}
+              </div>
+              {connection.adapterKind === "subscription-connector" ? null : (
+                <button
+                  aria-label={`${translate(busy ? "모델 확인 중" : "모델 새로고침")} · ${endpoint.name || endpoint.baseUrl}`}
+                  className="shrink-0 rounded-[5px] px-1.5 py-1 text-figure text-fg-4 transition-colors hover:text-primary focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg-3 disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled={!endpoint.enabled || busy}
+                  onClick={() => onSync(endpoint.endpointId)}
+                  type="button"
+                >
+                  {translate(busy ? "확인 중…" : "새로고침")}
+                </button>
+              )}
+            </header>
+            <div aria-live="polite" className="min-w-0 max-w-full overflow-hidden">
+              {busy ? (
+                <p className="sr-only" role="status">
+                  {translate("모델 목록을 확인하고 있습니다.")}
+                </p>
+              ) : null}
+              {warning ? (
+                <p className="px-3 pb-1 text-figure leading-4 text-fg-4" role="status">
+                  {translate(warning)}
+                </p>
+              ) : null}
+              {models.length === 0 ? (
+                <p className="px-3 py-2 text-[12px] leading-5 text-muted">{translate(empty)}</p>
+              ) : (
+                <ul className="min-w-0 max-w-full overflow-hidden">
+                  {models.map((model) => {
+                    const labels = [
+                      ...(model.verified ? ["검증됨"] : []),
+                      ...(model.catalogState === "stale" ? ["이전 목록"] : model.discovered ? ["발견됨"] : ["등록됨"]),
+                    ];
+                    return (
+                      <li
+                        className={`flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden px-3 py-1.5 ${model.catalogState === "stale" || !endpoint.enabled ? "opacity-60" : ""}`}
+                        key={model.modelProfileId ?? model.catalogEntryId ?? `${endpoint.endpointId}:${model.modelId}`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`size-1.5 shrink-0 rounded-full ${
+                            model.enabled && model.verified
+                              ? "bg-fg-3"
+                              : model.catalogState === "active"
+                                ? "border border-fg-3"
+                                : "border border-fg-4"
+                          }`}
+                        />
+                        <span className="min-w-0 flex-1 truncate font-mono text-speaker text-secondary">
+                          {model.modelId}
+                        </span>
+                        <span className="shrink-0 text-figure text-fg-4">{labels.map(translate).join(" · ")}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </section>
+        );
+      })}
+    </div>
   );
 }
 
@@ -5664,7 +5906,7 @@ function ProviderOverviewTab({
   // 로그인 워크플로는 아직 Codex만 구현돼 있고, 키 연결은 manifest가 정합니다.
   const canLogin = usesAccounts && connection.providerId === "openai-codex";
   // manifest 밖에서 직접 등록한 Provider도 API 어댑터면 키를 받습니다.
-  const directEndpointId = connection.endpoints[0]?.endpointId || undefined;
+  const directEndpointId = connection.endpoints.find((endpoint) => endpoint.enabled)?.endpointId;
   // 키도 계정처럼 여럿입니다. 하나로 접으면 «추가»와 «교체»가 뒤섞이고 나머지 키가 사라집니다.
   const keys = connection.credentials;
   const credentialCount = usesAccounts ? mine.length : keys.length;
@@ -5698,9 +5940,10 @@ function ProviderOverviewTab({
         <h3 className="mb-2 text-label text-fg-4">{translate("연결")}</h3>
         <dl>
           {connection.endpoints.map((endpoint) => (
-            <ProviderField key={endpoint.baseUrl} label="Base URL">
+            <ProviderField key={endpoint.endpointId} label="Base URL">
               <span className="font-mono text-[12px]">{endpoint.baseUrl}</span>
               <span className="ml-2 text-[11px] text-muted">{translate(endpoint.local ? "이 컴퓨터" : "외부")}</span>
+              {!endpoint.enabled ? <span className="ml-2 text-[11px] text-muted">{translate("비활성")}</span> : null}
             </ProviderField>
           ))}
           <ProviderField label={translate("인증")}>
@@ -5830,7 +6073,9 @@ function CredentialRow({
         aria-hidden="true"
         className={`size-1.5 shrink-0 rounded-full ${credential.status === "active" ? "bg-fg-3" : "border border-fg-4"}`}
       />
-      <span className="min-w-0 flex-1 truncate text-body text-secondary">{credential.label}</span>
+      <span className="min-w-0 flex-1 truncate text-body text-secondary">
+        {credential.label === DEFAULT_PROVIDER_CREDENTIAL_LABEL ? translate("기본 키") : credential.label}
+      </span>
       <span className="sr-only">{translate(credential.status === "active" ? "사용 중" : "미사용")}</span>
       {credential.secretVersion === undefined ? null : (
         <span className="shrink-0 text-figure tabular-nums text-fg-4">v{credential.secretVersion}</span>

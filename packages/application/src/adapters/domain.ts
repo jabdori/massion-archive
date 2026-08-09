@@ -89,7 +89,12 @@ export interface ApplicationDomainDependencies {
   >;
   readonly providers?: Pick<
     ProviderService,
-    "registerProvider" | "removeProvider" | "registerEndpoint" | "addCredential" | "revokeCredential"
+    | "registerProvider"
+    | "removeProvider"
+    | "registerEndpoint"
+    | "addCredential"
+    | "revokeCredential"
+    | "synchronizeModelCatalog"
   >;
   readonly router?: Pick<ModelRouter, "registerModel" | "createRoute" | "addCandidate" | "setRouteBudget">;
   readonly optimization?: {
@@ -1732,6 +1737,39 @@ function registerRouter(registry: ApplicationCommandRegistry, dependencies: Appl
             credentialId: revoked.credential.credential_id,
             status: revoked.credential.status,
             version: revoked.credential.version,
+          },
+        });
+      },
+    });
+    register(registry, {
+      operation: "router.models.sync",
+      requiredScopes: ["router:write"],
+      allowedRoles: ["owner", "admin"],
+      recovery: "replay-domain",
+      retryFailedCommand: true,
+      validate(value) {
+        const parsed = payload(value, ["endpointId"], ["endpointId"]);
+        const endpointId = string(parsed.endpointId, "endpointId").trim();
+        if (!endpointId || endpointId.length > 256) throw new Error("endpointId 문자열이 유효하지 않습니다");
+        return { endpointId };
+      },
+      async handle(context, command, value) {
+        const synchronized = await dependencies.providers?.synchronizeModelCatalog(context, {
+          commandId: command.commandId,
+          endpointId: value.endpointId,
+        });
+        if (!synchronized) throw new Error("Provider service가 구성되지 않았습니다");
+        return result(command, {
+          resource: { type: "ProviderModelCatalog", id: value.endpointId },
+          data: {
+            endpointId: value.endpointId,
+            status: synchronized.status,
+            activeCount: synchronized.activeCount,
+            invalidCount: synchronized.invalidCount,
+            duplicateCount: synchronized.duplicateCount,
+            ...(synchronized.snapshotId === undefined ? {} : { snapshotId: synchronized.snapshotId }),
+            ...(synchronized.diagnosticReason === undefined ? {} : { diagnosticReason: synchronized.diagnosticReason }),
+            ...(synchronized.retryAt === undefined ? {} : { retryAt: synchronized.retryAt }),
           },
         });
       },

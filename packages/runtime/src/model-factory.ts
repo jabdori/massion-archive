@@ -5,6 +5,8 @@ import { defaultSettingsMiddleware, wrapLanguageModel, type LanguageModel } from
 
 import type { TenantContext } from "@massion/identity";
 import {
+  createSecureProviderFetch,
+  validateDiscoveryBaseUrl,
   type FailureSignal,
   type ModelProvider,
   type ModelRouter,
@@ -289,11 +291,14 @@ function explicitlyNoSideEffects(value: unknown): value is false {
 
 export class OpenAICompatibleModelBuilder implements ProviderModelBuilder {
   public build(selection: ProviderModelSelection): LanguageModel {
+    validateDiscoveryBaseUrl(selection.endpoint.base_url, selection.endpoint.local);
     const root = selection.endpoint.base_url.replace(/\/$/u, "");
+    const fetch = createSecureProviderFetch(selection.endpoint.local);
     if (selection.endpoint.subscription_protocol === "anthropic") {
       const provider = createAnthropic({
         authToken: selection.secret,
         baseURL: root.endsWith("/v1") ? root : `${root}/v1`,
+        fetch,
       });
       return provider(selection.modelId);
     }
@@ -315,12 +320,14 @@ export class OpenAICompatibleModelBuilder implements ProviderModelBuilder {
         baseURL,
         includeUsage: true,
         supportsStructuredOutputs: selection.supportsStructuredOutputs,
+        fetch,
       })(selection.modelId);
     }
     const provider = createOpenAI({
       name: selection.provider.provider_id,
       apiKey: selection.secret,
       baseURL,
+      fetch,
     });
     if (!useResponses) return provider.chat(selection.modelId);
     return wrapLanguageModel({

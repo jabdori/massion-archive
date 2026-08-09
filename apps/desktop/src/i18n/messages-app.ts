@@ -469,6 +469,8 @@ export const appEnglishMessages = {
   "연결하는 중…": "Connecting…",
   "키를 등록했습니다.": "Key registered.",
   "키를 등록하지 못했습니다.": "Couldn't register the key.",
+  "키는 저장했지만 모델 목록을 확인하지 못했습니다.": "The key was saved, but the model catalog couldn't be refreshed.",
+  "키는 저장했지만 화면을 새로 고치지 못했습니다.": "The key was saved, but the screen couldn't be refreshed.",
   "이 앱에서는 아직 연결할 수 없습니다.": "This app can't connect to it yet.",
   "실행 기록이 없으면 등록한 주소와 키를 지웁니다. 기록이 있으면 제거 대신 비활성화합니다.":
     "Without execution history the saved address and key are deleted. With history it is disabled instead of removed.",
@@ -481,6 +483,9 @@ export const appEnglishMessages = {
   "키 제거": "Remove key",
   "키를 제거했습니다.": "Key removed.",
   "키를 제거하지 못했습니다.": "Couldn't remove the key.",
+  "키는 제거했지만 모델 목록을 다시 확인하지 못했습니다.":
+    "The key was removed, but the model catalog couldn't be refreshed.",
+  "키는 제거했지만 화면을 새로 고치지 못했습니다.": "The key was removed, but the screen couldn't be refreshed.",
   "연결 해제": "Disconnect",
   "계정 연결을 해제했습니다.": "Account disconnected.",
   "계정 연결을 해제하지 못했습니다.": "Couldn't disconnect the account.",
@@ -505,6 +510,10 @@ export const appEnglishMessages = {
   "기본 키": "Default key",
   "프로바이더를 추가했습니다.": "Provider added.",
   "프로바이더를 추가하지 못했습니다.": "Couldn't add the Provider.",
+  "프로바이더는 저장했지만 모델 목록을 확인하지 못했습니다.":
+    "The Provider was saved, but the model catalog couldn't be refreshed.",
+  "프로바이더는 저장했지만 화면을 새로 고치지 못했습니다.":
+    "The Provider was saved, but the screen couldn't be refreshed.",
   "이 앱에서 로그인할 수 있는 구독 프로바이더가 아닙니다.":
     "This subscription Provider doesn't support sign-in from this app.",
   "Codex 계정 연결을 완료했습니다.": "Codex account connected.",
@@ -527,6 +536,33 @@ export const appEnglishMessages = {
   "직접 연결": "Connect directly",
   "등록된 모델이 없습니다.": "No models registered.",
   미확인: "Unverified",
+  발견: "discovered",
+  "모델 새로고침": "Refresh models",
+  "모델 확인 중": "Checking models",
+  새로고침: "Refresh",
+  "확인 중…": "Checking…",
+  "모델 목록을 확인했습니다.": "Model catalog refreshed.",
+  "모델 API가 빈 목록을 반환했습니다.": "The model API returned an empty catalog.",
+  "모델 응답 일부가 유효하지 않아 이전 목록을 유지했습니다.":
+    "Some model data was invalid, so the last good catalog was kept.",
+  "더 최근에 확인한 모델 목록을 사용합니다.": "A newer model catalog is already in use.",
+  "모델 목록을 확인하지 못해 이전 목록을 유지했습니다.":
+    "The model catalog couldn't be refreshed, so the last good catalog was kept.",
+  "모델 목록을 확인하지 못했습니다.": "Couldn't refresh the model catalog.",
+  "모델 목록은 확인했지만 화면을 새로 고치지 못했습니다.":
+    "The model catalog was refreshed, but the screen couldn't be refreshed.",
+  "모델 목록을 확인하고 있습니다.": "Checking the model catalog.",
+  "아직 모델 목록을 확인하지 않았습니다.": "The model catalog hasn't been checked yet.",
+  "연결된 주소가 없습니다.": "No endpoint is connected.",
+  "모델 목록 상태와 표시 데이터가 일치하지 않습니다.": "The model catalog status doesn't match the displayed data.",
+  "모델 API가 빈 목록을 반환했습니다. 저장된 이전 목록은 교체하지 않았습니다.":
+    "The model API returned an empty catalog. The saved catalog was not replaced.",
+  "마지막 확인은 완료되지 않았습니다. 아래에는 이전 정상 목록을 유지합니다.":
+    "The last refresh did not complete. The last good catalog is shown below.",
+  "비활성 주소 · 읽기 전용 이전 목록": "Inactive endpoint · previous catalog is read-only",
+  "이전 목록": "Previous catalog",
+  발견됨: "Discovered",
+  등록됨: "Registered",
   "Codex 로그인": "Codex sign-in",
   "계정 추가": "Add account",
   "다시 연결": "Reconnect",

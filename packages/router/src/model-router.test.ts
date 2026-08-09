@@ -278,6 +278,49 @@ describe("Model Route simulation과 reservation", () => {
     expect(reserved.attempt.status).toBe("reserved");
   });
 
+  it("레거시 unsafe endpoint를 credential 조회·비용·attempt 생성 전에 선택에서 제외한다", async () => {
+    const created = await route();
+    await database.query(
+      "UPDATE provider_endpoint SET base_url = 'https://169.254.169.254/latest' WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id;",
+      { organization_id: context.organizationId, endpoint_id: endpoint.endpoint_id },
+    );
+    const request = { routeName: created.name, estimatedTokens: 100, estimatedCostMicros: 1_000 };
+
+    await expect(router.simulate(context, request)).resolves.toMatchObject({
+      status: "blocked_model_unavailable",
+      explanation: { excluded: [expect.stringContaining("안전하지 않은 endpoint")] },
+    });
+    await expect(router.reserve(context, { ...request, commandId: crypto.randomUUID() })).rejects.toThrow(
+      "안전하지 않은 endpoint",
+    );
+    const [routes] = await database.query<
+      [Array<{ readonly spent_micros: number; readonly selection_sequence: number }>]
+    >(
+      "SELECT spent_micros, selection_sequence FROM model_route WHERE organization_id = $organization_id AND route_id = $route_id;",
+      { organization_id: context.organizationId, route_id: created.route_id },
+    );
+    const [credentials] = await database.query<
+      [Array<{ readonly request_count: number; readonly cost_micros: number }>]
+    >(
+      "SELECT request_count, cost_micros FROM provider_credential WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id;",
+      { organization_id: context.organizationId, endpoint_id: endpoint.endpoint_id },
+    );
+    const [attempts] = await database.query<[unknown[]]>(
+      "SELECT attempt_id FROM route_attempt WHERE organization_id = $organization_id AND route_id = $route_id;",
+      { organization_id: context.organizationId, route_id: created.route_id },
+    );
+
+    expect(routes[0]).toMatchObject({ spent_micros: 0, selection_sequence: 0 });
+    expect(credentials).toHaveLength(2);
+    expect(credentials).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ request_count: 0, cost_micros: 0 }),
+        expect.objectContaining({ request_count: 0, cost_micros: 0 }),
+      ]),
+    );
+    expect(attempts).toEqual([]);
+  });
+
   it("required execution kind는 direct model을 agent runtime 후보로 선택하지 않는다", async () => {
     const created = await route();
     const request = { routeName: created.name, estimatedTokens: 100, estimatedCostMicros: 1_000 };
@@ -783,21 +826,13 @@ describe("Model Route simulation과 reservation", () => {
   });
 
   it("Codex 검증 profile은 runtime 가용성·공식 능력·attested runtime 근거를 append-only로 각각 보존한다", async () => {
-    await providers.registerProvider(context, {
-      commandId: crypto.randomUUID(),
-      providerId: "openai-codex",
-      displayName: "OpenAI Codex",
-      adapterKind: "subscription-agent",
-    });
     const codexEndpoint = (
-      await providers.registerEndpoint(context, {
+      await providers.ensureSubscriptionProvider(context, {
         commandId: crypto.randomUUID(),
         providerId: "openai-codex",
-        name: "Codex app-server",
-        baseUrl: "http://127.0.0.1/codex-app-server",
-        local: true,
       })
     ).endpoint;
+    expect(codexEndpoint.base_url).toBe("massion-connector:///openai-codex/codex-app-server");
     await database.query(
       `CREATE subscription_connector CONTENT {
          connector_id: 'codex-evidence-connector', organization_id: $organization_id,
@@ -901,21 +936,13 @@ describe("Model Route simulation과 reservation", () => {
   });
 
   it("Codex review 정책은 Edge credential을 후보에서 제외하고 서버 credential만 선택한다", async () => {
-    await providers.registerProvider(context, {
-      commandId: crypto.randomUUID(),
-      providerId: "openai-codex",
-      displayName: "OpenAI Codex",
-      adapterKind: "subscription-agent",
-    });
     const codexEndpoint = (
-      await providers.registerEndpoint(context, {
+      await providers.ensureSubscriptionProvider(context, {
         commandId: crypto.randomUUID(),
         providerId: "openai-codex",
-        name: "Codex app-server",
-        baseUrl: "http://127.0.0.1/codex-app-server",
-        local: true,
       })
     ).endpoint;
+    expect(codexEndpoint.base_url).toBe("massion-connector:///openai-codex/codex-app-server");
     await database.query(
       `CREATE subscription_connector CONTENT {
          connector_id: 'codex-review-server', organization_id: $organization_id,

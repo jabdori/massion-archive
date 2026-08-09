@@ -14,6 +14,7 @@ import {
 } from "@massion/subscriptions";
 
 import { classifyFailure, type FailureSignal } from "./failure.js";
+import { validateDiscoveryBaseUrl } from "./discovery.js";
 import {
   ProviderService,
   type CredentialMaterial,
@@ -25,6 +26,7 @@ import {
   MODEL_VERIFICATION_EVIDENCE_MIGRATION,
   MODEL_PRICING_MIGRATION,
   MODEL_ROUTE_MIGRATION,
+  PROVIDER_MODEL_CATALOG_MIGRATION,
   ROUTE_ATTEMPT_SIDE_EFFECT_MIGRATION,
   ROUTE_ATTEMPT_LINEAGE_MIGRATION,
   ROUTE_ATTEMPT_SUBSCRIPTION_POLICY_MIGRATION,
@@ -748,6 +750,7 @@ export class ModelRouter {
       MODEL_VERIFICATION_EVIDENCE_MIGRATION,
       ROUTE_ATTEMPT_EXECUTION_LINEAGE_MIGRATION,
       ROUTE_ATTEMPT_OPTIMIZATION_RUN_LINEAGE_MIGRATION,
+      PROVIDER_MODEL_CATALOG_MIGRATION,
     ]);
     return new ModelRouter(database, organizations, providers, subscriptions);
   }
@@ -1887,6 +1890,30 @@ export class ModelRouter {
 
   private profileFailures(route: ModelRoute, profile: ModelProfile, endpoint: ProviderEndpoint): string[] {
     const failures: string[] = [];
+    let connectorEndpoint = false;
+    try {
+      const url = new URL(endpoint.base_url);
+      const segments = url.pathname.split("/").filter(Boolean);
+      connectorEndpoint =
+        url.protocol === "massion-connector:" &&
+        url.host === "" &&
+        url.username === "" &&
+        url.password === "" &&
+        url.search === "" &&
+        url.hash === "" &&
+        segments.length === 2 &&
+        segments[0] === endpoint.provider_id &&
+        segments[1] === endpoint.subscription_protocol;
+    } catch {
+      // 아래 HTTP(S) 검증이 같은 입력을 fail-closed합니다.
+    }
+    if (!connectorEndpoint) {
+      try {
+        validateDiscoveryBaseUrl(endpoint.base_url, endpoint.local);
+      } catch {
+        failures.push("안전하지 않은 endpoint");
+      }
+    }
     if (!profile.enabled || !profile.verified) failures.push("검증되지 않은 model");
     if (profile.route_kind !== route.route_kind) failures.push("route kind 불일치");
     if (profile.equivalence_group !== route.equivalence_group) failures.push("equivalence group 불일치");

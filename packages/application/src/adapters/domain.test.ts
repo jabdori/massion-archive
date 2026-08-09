@@ -840,6 +840,90 @@ describe("Application domain adapters", () => {
     }
   });
 
+  it("모델 카탈로그 동기화는 owner·admin과 strict endpoint payload만 허용한다", async () => {
+    const begin = vi.fn().mockResolvedValue({ outcome: "claimed", commandRecordId: "record-1", leaseGeneration: 1 });
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const synchronizeModelCatalog = vi.fn().mockResolvedValue({
+      status: "available",
+      activeCount: 2,
+      invalidCount: 1,
+      duplicateCount: 1,
+      snapshotId: "snapshot-1",
+    });
+    const registry = new ApplicationCommandRegistry({
+      begin,
+      complete,
+      fail: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    registerApplicationDomainCommands(registry, {
+      providers: { synchronizeModelCatalog },
+    } as never);
+    const command = (commandId: string, payload: unknown) => ({
+      schemaVersion: "massion.application.v1" as const,
+      commandId,
+      correlationId: `${commandId}-correlation`,
+      operation: "router.models.sync",
+      payload,
+    });
+    const owner = { organizationId: "org-1", userId: "owner-1", role: "owner" } as never;
+    const admin = { organizationId: "org-1", userId: "admin-1", role: "admin" } as never;
+    const member = { organizationId: "org-1", userId: "member-1", role: "member" } as never;
+
+    await expect(
+      registry.dispatch(owner, [], command("sync-no-scope", { endpointId: "endpoint-1" })),
+    ).rejects.toMatchObject({ operatorCode: "APP_SCOPE_REQUIRED" });
+    await expect(
+      registry.dispatch(member, ["router:write"], command("sync-member", { endpointId: "endpoint-1" })),
+    ).rejects.toMatchObject({ operatorCode: "APP_ROLE_REQUIRED" });
+    await expect(registry.dispatch(owner, ["router:write"], command("sync-missing", {}))).rejects.toMatchObject({
+      operatorCode: "APP_COMMAND_VALIDATION",
+    });
+    await expect(
+      registry.dispatch(owner, ["router:write"], command("sync-extra", { endpointId: "endpoint-1", secret: "leak" })),
+    ).rejects.toMatchObject({ operatorCode: "APP_COMMAND_VALIDATION" });
+    await expect(
+      registry.dispatch(owner, ["router:write"], command("sync-empty", { endpointId: "" })),
+    ).rejects.toMatchObject({ operatorCode: "APP_COMMAND_VALIDATION" });
+
+    await expect(
+      registry.dispatch(owner, ["router:write"], command("sync-owner", { endpointId: "endpoint-1" })),
+    ).resolves.toMatchObject({
+      outcome: "succeeded",
+      resource: { type: "ProviderModelCatalog", id: "endpoint-1" },
+      data: {
+        endpointId: "endpoint-1",
+        status: "available",
+        activeCount: 2,
+        invalidCount: 1,
+        duplicateCount: 1,
+        snapshotId: "snapshot-1",
+      },
+    });
+    await expect(
+      registry.dispatch(owner, ["router:write"], command("sync-normalized", { endpointId: " endpoint-3 " })),
+    ).resolves.toMatchObject({
+      resource: { type: "ProviderModelCatalog", id: "endpoint-3" },
+      data: { endpointId: "endpoint-3" },
+    });
+    await expect(
+      registry.dispatch(admin, ["router:write"], command("sync-admin", { endpointId: "endpoint-2" })),
+    ).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(synchronizeModelCatalog).toHaveBeenNthCalledWith(1, owner, {
+      commandId: "sync-owner",
+      endpointId: "endpoint-1",
+    });
+    expect(synchronizeModelCatalog).toHaveBeenNthCalledWith(2, owner, {
+      commandId: "sync-normalized",
+      endpointId: "endpoint-3",
+    });
+    expect(synchronizeModelCatalog).toHaveBeenNthCalledWith(3, admin, {
+      commandId: "sync-admin",
+      endpointId: "endpoint-2",
+    });
+    expect(begin).toHaveBeenCalledTimes(3);
+    expect(complete).toHaveBeenCalledTimes(3);
+  });
+
   it("Provider 제거 거부는 사용자가 조치할 수 있는 사유로 전달한다", async () => {
     const registry = new ApplicationCommandRegistry(
       new (class {

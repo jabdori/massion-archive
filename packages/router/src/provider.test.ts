@@ -538,6 +538,73 @@ describe("Provider와 암호화 Credential lifecycle", () => {
       }),
     ).rejects.toThrow("external-gateway");
   });
+
+  it("정본에 없는 adapter와 outbound 보안 경계를 우회하는 endpoint를 저장하지 않는다", async () => {
+    await expect(
+      service.registerProvider(context, {
+        commandId: crypto.randomUUID(),
+        providerId: "fake-anthropic",
+        displayName: "Fake Anthropic",
+        adapterKind: "anthropic" as "openai-compatible",
+      }),
+    ).rejects.toThrow("Adapter");
+
+    await service.registerProvider(context, {
+      commandId: crypto.randomUUID(),
+      providerId: "direct-secure",
+      displayName: "Direct Secure",
+      adapterKind: "openai-compatible",
+    });
+    for (const baseUrl of [
+      "https://user:secret@gateway.example/v1",
+      "https://gateway.example/v1?token=secret",
+      "https://gateway.example/v1#models",
+    ]) {
+      await expect(
+        service.registerEndpoint(context, {
+          commandId: crypto.randomUUID(),
+          providerId: "direct-secure",
+          name: baseUrl,
+          baseUrl,
+          local: false,
+        }),
+      ).rejects.toThrow("endpoint URL");
+    }
+    await expect(
+      service.registerEndpoint(context, {
+        commandId: crypto.randomUUID(),
+        providerId: "direct-secure",
+        name: "Private network disguised as local",
+        baseUrl: "http://192.168.1.10:11434",
+        local: true,
+      }),
+    ).rejects.toThrow("loopback");
+    await expect(
+      service.registerEndpoint(context, {
+        commandId: crypto.randomUUID(),
+        providerId: "direct-secure",
+        name: "Public endpoint disguised as local",
+        baseUrl: "https://api.openai.com/v1",
+        local: true,
+      }),
+    ).rejects.toThrow("loopback");
+    for (const baseUrl of [
+      "https://localhost./v1",
+      "https://[::ffff:7f00:1]/v1",
+      "https://10.0.0.1/v1",
+      "https://169.254.169.254/latest",
+    ]) {
+      await expect(
+        service.registerEndpoint(context, {
+          commandId: crypto.randomUUID(),
+          providerId: "direct-secure",
+          name: baseUrl,
+          baseUrl,
+          local: false,
+        }),
+      ).rejects.toThrow("endpoint URL");
+    }
+  });
   it("참조가 없는 Provider는 endpoint·credential과 함께 제거한다", async () => {
     const { provider, endpoint } = await providerEndpoint();
     await service.addCredential(context, {

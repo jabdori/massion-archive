@@ -136,7 +136,10 @@ export interface ApplicationQueryDependencies {
     >;
   };
   readonly audit?: Pick<ApplicationEventStore, "read">;
-  readonly providers?: Pick<ProviderService, "listProviders" | "listEndpoints" | "listCredentials">;
+  readonly providers?: Pick<
+    ProviderService,
+    "listProviders" | "listEndpoints" | "listCredentials" | "listModelCatalog"
+  >;
   readonly router?: Pick<ModelRouter, "listModels" | "listRoutes" | "listCandidates" | "listAttempts" | "readAttempt">;
   readonly status?: (context: TenantContext) => Promise<unknown>;
   readonly subscriptionAccounts?: SubscriptionAccountQueries;
@@ -2761,11 +2764,12 @@ export function registerApplicationQueries(
       allowedRoles: EVERY_ROLE,
       validate: (value) => object(value, []),
       handle: async (context) => {
-        const [providers, endpoints, models, candidates] = await Promise.all([
+        const [providers, endpoints, models, candidates, catalog] = await Promise.all([
           dependencies.providers?.listProviders(context),
           dependencies.providers?.listEndpoints(context),
           dependencies.router?.listModels(context),
           dependencies.router?.listCandidates(context),
+          dependencies.providers?.listModelCatalog(context),
         ]);
         return {
           providers: (providers ?? []).map((provider) => ({
@@ -2799,6 +2803,53 @@ export function registerApplicationQueries(
             modelProfileId: candidate.model_profile_id,
             priority: candidate.priority,
             enabled: candidate.enabled,
+          })),
+          discoveredModels: (catalog?.models ?? []).map((model) => ({
+            catalogEntryId: model.catalog_entry_id,
+            providerId: model.provider_id,
+            endpointId: model.endpoint_id,
+            modelId: model.model_id,
+            state: model.state,
+            ...(model.metadata.canonicalId === undefined ? {} : { canonicalId: model.metadata.canonicalId }),
+            ...(model.metadata.displayName === undefined ? {} : { displayName: model.metadata.displayName }),
+            ...(model.metadata.contextWindow === undefined ? {} : { contextWindow: model.metadata.contextWindow }),
+            ...(model.metadata.supportsTools === undefined ? {} : { supportsTools: model.metadata.supportsTools }),
+            ...(model.metadata.supportsStructuredOutput === undefined
+              ? {}
+              : { supportsStructuredOutput: model.metadata.supportsStructuredOutput }),
+            ...(model.metadata.supportsVision === undefined ? {} : { supportsVision: model.metadata.supportsVision }),
+            ...(model.metadata.supportsStreaming === undefined
+              ? {}
+              : { supportsStreaming: model.metadata.supportsStreaming }),
+            ...(model.metadata.inputCostMicrosPerMillion === undefined
+              ? {}
+              : { inputCostMicrosPerMillion: model.metadata.inputCostMicrosPerMillion }),
+            ...(model.metadata.outputCostMicrosPerMillion === undefined
+              ? {}
+              : { outputCostMicrosPerMillion: model.metadata.outputCostMicrosPerMillion }),
+            ...(model.metadata.expirationDate === undefined ? {} : { expirationDate: model.metadata.expirationDate }),
+            firstSeenAt: timestamp(model.first_seen_at, "Provider Model Catalog firstSeenAt"),
+            lastSeenAt: timestamp(model.last_seen_at, "Provider Model Catalog lastSeenAt"),
+          })),
+          catalogStatuses: (catalog?.statuses ?? []).map((status) => ({
+            providerId: status.provider_id,
+            endpointId: status.endpoint_id,
+            status: status.status,
+            authenticationScope: status.authentication_scope,
+            activeCount: status.active_count,
+            invalidCount: status.invalid_count,
+            duplicateCount: status.duplicate_count,
+            ...(status.catalog_digest === undefined ? {} : { catalogDigest: status.catalog_digest }),
+            ...(status.diagnostic_reason === undefined ? {} : { diagnosticReason: status.diagnostic_reason }),
+            ...(status.retry_at === undefined
+              ? {}
+              : { retryAt: timestamp(status.retry_at, "Provider Model Catalog retryAt") }),
+            lastAttemptedAt: timestamp(status.last_attempted_at, "Provider Model Catalog lastAttemptedAt"),
+            ...(status.last_successful_at === undefined
+              ? {}
+              : {
+                  lastSuccessfulAt: timestamp(status.last_successful_at, "Provider Model Catalog lastSuccessfulAt"),
+                }),
           })),
         };
       },

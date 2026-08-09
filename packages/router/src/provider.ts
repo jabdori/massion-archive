@@ -15,13 +15,16 @@ import {
 import {
   MODEL_ROUTE_MIGRATION,
   MODEL_VERIFICATION_EVIDENCE_MIGRATION,
+  PROVIDER_MODEL_CATALOG_MIGRATION,
   ROUTER_REGISTRY_MIGRATION,
   ROUTER_SUBSCRIPTION_ENDPOINT_MIGRATION,
   ROUTER_SUBSCRIPTION_MATERIAL_MIGRATION,
 } from "./schema.js";
+import { discoverModels, validateDiscoveryBaseUrl, type DiscoveredModel, type DiscoveryResult } from "./discovery.js";
 import { CredentialVault } from "./vault.js";
 
-export type AdapterKind = "ai-sdk" | "openai-compatible" | "ollama" | "external-gateway" | "subscription-connector";
+export type AdapterKind =
+  "ai-sdk" | "openai-compatible" | "ollama" | "external-gateway" | "subscription-connector" | "subscription-agent";
 export type CredentialType =
   "api_key" | "oauth" | "service_account" | "workload_identity" | "subscription_key" | "subscription_session";
 export type CredentialStatus = "active" | "cooldown" | "disabled" | "revoked";
@@ -48,6 +51,49 @@ export interface ProviderEndpoint {
   readonly enabled: boolean;
   readonly created_at: unknown;
   readonly updated_at: unknown;
+}
+
+export interface ProviderModelCatalogEntry {
+  readonly catalog_entry_id: string;
+  readonly organization_id: string;
+  readonly provider_id: string;
+  readonly endpoint_id: string;
+  readonly model_id: string;
+  readonly metadata: DiscoveredModel;
+  readonly metadata_digest: string;
+  readonly state: "active" | "stale";
+  readonly snapshot_id: string;
+  readonly first_seen_at: unknown;
+  readonly last_seen_at: unknown;
+  readonly created_at: unknown;
+  readonly updated_at: unknown;
+}
+
+export interface ProviderModelCatalogStatus {
+  readonly organization_id: string;
+  readonly provider_id: string;
+  readonly endpoint_id: string;
+  readonly sync_sequence: number;
+  readonly status: "syncing" | "available" | "empty" | "partial" | "degraded";
+  readonly authentication_scope: "anonymous" | "credential";
+  readonly credential_id?: string;
+  readonly credential_version?: number;
+  readonly credential_secret_version?: number;
+  readonly active_count: number;
+  readonly invalid_count: number;
+  readonly duplicate_count: number;
+  readonly catalog_digest?: string;
+  readonly snapshot_id?: string;
+  readonly diagnostic_reason?: string;
+  readonly retry_at?: unknown;
+  readonly last_attempted_at: unknown;
+  readonly last_successful_at?: unknown;
+  readonly created_at: unknown;
+  readonly updated_at: unknown;
+}
+
+interface StoredProviderModelCatalogEntry extends Omit<ProviderModelCatalogEntry, "metadata"> {
+  readonly metadata_json: string;
 }
 
 export interface ProviderCredential {
@@ -115,6 +161,24 @@ export interface RouterAuditEvent {
 
 interface CommandInput {
   readonly commandId: string;
+}
+
+export interface SynchronizeModelCatalogInput extends CommandInput {
+  readonly endpointId: string;
+}
+
+export interface SynchronizeModelCatalogResult {
+  readonly status: "available" | "empty" | "partial" | "degraded" | "superseded";
+  readonly activeCount: number;
+  readonly invalidCount: number;
+  readonly duplicateCount: number;
+  readonly snapshotId?: string;
+  readonly diagnosticReason?: string;
+  readonly retryAt?: string;
+  readonly authenticationScope: "anonymous" | "credential";
+  readonly credentialId?: string;
+  readonly credentialVersion?: number;
+  readonly credentialSecretVersion?: number;
 }
 
 export interface RegisterProviderInput extends CommandInput {
@@ -217,6 +281,14 @@ export interface UpdateCredentialQuotaInput extends CommandInput {
 }
 
 const CREDENTIAL_TYPES = new Set<CredentialType>(["api_key", "oauth", "service_account", "workload_identity"]);
+const ADAPTER_KINDS = new Set<AdapterKind>([
+  "ai-sdk",
+  "openai-compatible",
+  "ollama",
+  "external-gateway",
+  "subscription-connector",
+  "subscription-agent",
+]);
 const GATEWAY_KINDS = new Set<NonNullable<ProviderEndpoint["gateway_kind"]>>([
   "litellm",
   "portkey",
@@ -233,6 +305,19 @@ function canonicalJson(value: unknown): string {
       .join(",")}}`;
   }
   return JSON.stringify(value);
+}
+
+function catalogDiscoveryFailure(reason: string): DiscoveryResult {
+  return {
+    status: "degraded",
+    models: [],
+    invalidCount: 0,
+    duplicateCount: 0,
+    diagnostic: {
+      reason,
+      recovery: "Provider endpoint와 Credential 상태를 확인한 뒤 모델 목록을 다시 동기화해주세요.",
+    },
+  };
 }
 
 function normalizedEndpointUrl(value: string): string {
@@ -359,6 +444,16 @@ function freshQuotaExhausted(windows: unknown): boolean {
 }
 
 export class ProviderService {
+  // ponytail: 개인용 v1은 서버 프로세스 하나입니다. 다중 서버 배포 시 DB command claim으로 올립니다.
+  private readonly catalogSynchronizations = new Map<
+    string,
+    {
+      readonly userId: string;
+      readonly requestJson: string;
+      readonly promise: Promise<SynchronizeModelCatalogResult & { readonly audit: RouterAuditEvent }>;
+    }
+  >();
+
   private constructor(
     private readonly database: MassionDatabase,
     private readonly organizations: OrganizationService,
@@ -377,9 +472,15 @@ export class ProviderService {
       // Provider 제거가 딸린 모델 등록·검증 근거까지 정리하므로 같은 스키마를 보장합니다.
       MODEL_ROUTE_MIGRATION,
       MODEL_VERIFICATION_EVIDENCE_MIGRATION,
+      PROVIDER_MODEL_CATALOG_MIGRATION,
       ROUTER_SUBSCRIPTION_MATERIAL_MIGRATION,
       ROUTER_SUBSCRIPTION_ENDPOINT_MIGRATION,
     ]);
+    await database.query(
+      `UPDATE provider_model_catalog_sync SET
+         status = 'degraded', diagnostic_reason = 'interrupted', retry_at = NONE, updated_at = time::now()
+       WHERE status = 'syncing';`,
+    );
     return new ProviderService(database, organizations, vault, options);
   }
 
@@ -475,6 +576,7 @@ export class ProviderService {
   ): Promise<{ provider: ModelProvider; audit: RouterAuditEvent }> {
     if (!/^[a-z0-9][a-z0-9-]*$/.test(input.providerId)) throw new Error("Provider ID 형식이 유효하지 않습니다");
     if (!input.displayName.trim()) throw new Error("Provider 표시 이름은 비어 있을 수 없습니다");
+    if (!ADAPTER_KINDS.has(input.adapterKind)) throw new Error("지원하지 않는 Provider Adapter입니다");
     return await this.command(
       context,
       input.commandId,
@@ -514,10 +616,13 @@ export class ProviderService {
     input: RegisterEndpointInput,
     executor: QueryExecutor = this.database,
   ): Promise<{ endpoint: ProviderEndpoint; audit: RouterAuditEvent }> {
-    const url = new URL(input.baseUrl);
-    if (!input.local && url.protocol !== "https:") throw new Error("외부 Provider endpoint는 HTTPS여야 합니다");
-    if (input.local && !["http:", "https:"].includes(url.protocol))
-      throw new Error("로컬 endpoint URL이 유효하지 않습니다");
+    let url: URL;
+    try {
+      url = validateDiscoveryBaseUrl(input.baseUrl, input.local);
+    } catch (error) {
+      const detail = error instanceof Error && error.message.includes("loopback") ? " loopback" : "";
+      throw new Error(`Provider endpoint URL이 유효하지 않습니다.${detail}`);
+    }
     if (input.gatewayKind && !GATEWAY_KINDS.has(input.gatewayKind)) throw new Error("지원하지 않는 Gateway입니다");
     return await this.command(
       context,
@@ -636,7 +741,7 @@ export class ProviderService {
           return { providerId: input.providerId, removed: false };
         }
         await tx.query(
-          "DELETE provider_endpoint WHERE organization_id = $organization_id AND provider_id = $provider_id; DELETE model_provider WHERE organization_id = $organization_id AND provider_id = $provider_id;",
+          "DELETE provider_model_catalog_entry WHERE organization_id = $organization_id AND provider_id = $provider_id; DELETE provider_model_catalog_sync WHERE organization_id = $organization_id AND provider_id = $provider_id; DELETE provider_endpoint WHERE organization_id = $organization_id AND provider_id = $provider_id; DELETE model_provider WHERE organization_id = $organization_id AND provider_id = $provider_id;",
           { organization_id: context.organizationId, provider_id: input.providerId },
         );
         return { providerId: input.providerId, removed: true };
@@ -670,6 +775,407 @@ export class ProviderService {
       { organization_id: context.organizationId, provider_id: providerId },
     );
     return endpoints;
+  }
+
+  public async synchronizeModelCatalog(
+    context: TenantContext,
+    input: SynchronizeModelCatalogInput,
+    fetcher?: typeof fetch,
+  ): Promise<SynchronizeModelCatalogResult & { readonly audit: RouterAuditEvent }> {
+    const endpointId = input.endpointId.trim();
+    if (!endpointId || endpointId.length > 256) throw new Error("Provider Endpoint ID가 유효하지 않습니다");
+    const requestJson = canonicalJson({ commandId: input.commandId, endpointId });
+    const synchronizationKey = `${context.organizationId}\0${input.commandId}`;
+    const active = this.catalogSynchronizations.get(synchronizationKey);
+    if (active) {
+      if (active.userId !== context.userId) throw new Error("같은 commandId를 다른 사용자가 재사용할 수 없습니다");
+      if (active.requestJson !== requestJson) throw new Error("같은 commandId에 다른 명령을 사용할 수 없습니다");
+      return await active.promise;
+    }
+    const promise = this.synchronizeModelCatalogOnce(context, { ...input, endpointId }, requestJson, fetcher);
+    this.catalogSynchronizations.set(synchronizationKey, { userId: context.userId, requestJson, promise });
+    try {
+      return await promise;
+    } finally {
+      if (this.catalogSynchronizations.get(synchronizationKey)?.promise === promise) {
+        this.catalogSynchronizations.delete(synchronizationKey);
+      }
+    }
+  }
+
+  private async synchronizeModelCatalogOnce(
+    context: TenantContext,
+    input: SynchronizeModelCatalogInput,
+    requestJson: string,
+    fetcher?: typeof fetch,
+  ): Promise<SynchronizeModelCatalogResult & { readonly audit: RouterAuditEvent }> {
+    const endpointId = input.endpointId;
+    const replayed = await this.readCommandReplay<SynchronizeModelCatalogResult>(context, input.commandId, requestJson);
+    if (replayed) return replayed;
+
+    const reservation = await this.database.transaction(async (tx) => {
+      await this.organizations.verifyTenantContext(context, ["owner", "admin"], tx);
+      const [endpoints] = await tx.query<[ProviderEndpoint[]]>(
+        `SELECT * OMIT id FROM provider_endpoint
+         WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id AND enabled = true LIMIT 1;`,
+        { organization_id: context.organizationId, endpoint_id: endpointId },
+      );
+      const endpoint = endpoints[0];
+      if (!endpoint) throw new Error(`활성 Provider Endpoint를 찾을 수 없습니다: ${endpointId}`);
+      const provider = await this.requireProvider(tx, context.organizationId, endpoint.provider_id);
+      if (!["ai-sdk", "openai-compatible", "ollama", "external-gateway"].includes(provider.adapter_kind)) {
+        throw new Error("이 Provider Adapter는 모델 API discovery를 지원하지 않습니다");
+      }
+      const [credentials] = await tx.query<[ProviderCredential[]]>(
+        `SELECT * OMIT id FROM provider_credential
+         WHERE organization_id = $organization_id AND provider_id = $provider_id
+           AND endpoint_id = $endpoint_id AND status = 'active'
+         ORDER BY priority ASC, updated_at DESC, credential_id ASC;`,
+        { organization_id: context.organizationId, provider_id: provider.provider_id, endpoint_id: endpointId },
+      );
+      const credential = credentials.find((candidate) => candidate.material_kind !== "connector_session");
+      const authenticationScope: "credential" | "anonymous" = credential ? "credential" : "anonymous";
+      const [statuses] = await tx.query<[ProviderModelCatalogStatus[]]>(
+        `UPSERT provider_model_catalog_sync SET
+           organization_id = $organization_id, provider_id = $provider_id, endpoint_id = $endpoint_id,
+           sync_sequence += 1, status = 'syncing', authentication_scope = $authentication_scope,
+           credential_id = $credential_id, credential_version = $credential_version,
+           credential_secret_version = $credential_secret_version,
+           invalid_count = 0, duplicate_count = 0, diagnostic_reason = NONE, retry_at = NONE,
+           last_attempted_at = time::now(), updated_at = time::now()
+         WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id RETURN AFTER;`,
+        {
+          organization_id: context.organizationId,
+          provider_id: provider.provider_id,
+          endpoint_id: endpointId,
+          authentication_scope: authenticationScope,
+          credential_id: credential?.credential_id,
+          credential_version: credential?.version,
+          credential_secret_version: credential?.secret_version,
+        },
+      );
+      const status = statuses[0];
+      if (!status) throw new Error("Provider 모델 동기화 sequence를 예약하지 못했습니다");
+      return { provider, endpoint, credential, syncSequence: status.sync_sequence, authenticationScope };
+    });
+
+    let discovery: DiscoveryResult;
+    try {
+      const prepared = await this.database.transaction(async (tx) => {
+        await this.organizations.verifyTenantContext(context, ["owner", "admin"], tx);
+        const endpoint = await this.requireEndpoint(
+          tx,
+          context.organizationId,
+          reservation.provider.provider_id,
+          endpointId,
+        );
+        const provider = await this.requireProvider(tx, context.organizationId, reservation.provider.provider_id);
+        if (
+          provider.adapter_kind !== reservation.provider.adapter_kind ||
+          endpoint.base_url !== reservation.endpoint.base_url ||
+          endpoint.local !== reservation.endpoint.local
+        ) {
+          throw new Error("Provider 모델 동기화 구성이 변경됐습니다");
+        }
+        validateDiscoveryBaseUrl(endpoint.base_url, endpoint.local);
+        if (!reservation.credential) return { endpoint, secret: undefined };
+        const [credentials] = await tx.query<[ProviderCredential[]]>(
+          `SELECT * OMIT id FROM provider_credential
+           WHERE organization_id = $organization_id AND provider_id = $provider_id
+             AND endpoint_id = $endpoint_id AND credential_id = $credential_id
+             AND status = 'active' AND version = $version AND secret_version = $secret_version LIMIT 1;`,
+          {
+            organization_id: context.organizationId,
+            provider_id: provider.provider_id,
+            endpoint_id: endpointId,
+            credential_id: reservation.credential.credential_id,
+            version: reservation.credential.version,
+            secret_version: reservation.credential.secret_version,
+          },
+        );
+        const credential = credentials[0];
+        if (!credential) throw new Error("Provider 모델 동기화 Credential이 변경됐습니다");
+        return {
+          endpoint,
+          secret: await this.resolveExecutionSecretVersion(context, credential, credential.secret_version, tx),
+        };
+      });
+      discovery = await discoverModels(
+        {
+          adapterKind: reservation.provider.adapter_kind === "ollama" ? "ollama" : "openai-compatible",
+          baseUrl: prepared.endpoint.base_url,
+          local: prepared.endpoint.local,
+          ...(prepared.secret === undefined ? {} : { secret: prepared.secret }),
+        },
+        fetcher,
+      );
+    } catch {
+      discovery = catalogDiscoveryFailure("credential-or-endpoint-unavailable");
+    }
+
+    const authenticationLineage = {
+      authenticationScope: reservation.authenticationScope,
+      ...(reservation.credential
+        ? {
+            credentialId: reservation.credential.credential_id,
+            credentialVersion: reservation.credential.version,
+            credentialSecretVersion: reservation.credential.secret_version,
+          }
+        : {}),
+    } as const;
+
+    try {
+      return await this.command(
+        context,
+        input.commandId,
+        "provider_model_catalog_synchronized",
+        requestJson,
+        async (tx) => {
+          const [statuses] = await tx.query<[ProviderModelCatalogStatus[]]>(
+            `SELECT * OMIT id FROM provider_model_catalog_sync
+           WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id LIMIT 1;`,
+            { organization_id: context.organizationId, endpoint_id: endpointId },
+          );
+          const current = statuses[0];
+          if (!current || current.sync_sequence !== reservation.syncSequence) {
+            return {
+              status: "superseded" as const,
+              activeCount: current?.active_count ?? 0,
+              invalidCount: discovery.invalidCount,
+              duplicateCount: discovery.duplicateCount,
+              ...authenticationLineage,
+            };
+          }
+          let applicable = discovery;
+          const [currentEndpoints] = await tx.query<[ProviderEndpoint[]]>(
+            `SELECT * OMIT id FROM provider_endpoint
+           WHERE organization_id = $organization_id AND provider_id = $provider_id
+             AND endpoint_id = $endpoint_id AND enabled = true LIMIT 1;`,
+            {
+              organization_id: context.organizationId,
+              provider_id: reservation.provider.provider_id,
+              endpoint_id: endpointId,
+            },
+          );
+          if (!currentEndpoints[0]) applicable = catalogDiscoveryFailure("endpoint-changed");
+          if (reservation.credential) {
+            const [credentials] = await tx.query<[ProviderCredential[]]>(
+              `SELECT * OMIT id FROM provider_credential
+             WHERE organization_id = $organization_id AND credential_id = $credential_id LIMIT 1;`,
+              { organization_id: context.organizationId, credential_id: reservation.credential.credential_id },
+            );
+            const credential = credentials[0];
+            if (
+              !credential ||
+              credential.status !== "active" ||
+              credential.endpoint_id !== endpointId ||
+              credential.provider_id !== reservation.provider.provider_id ||
+              credential.version !== reservation.credential.version ||
+              credential.secret_version !== reservation.credential.secret_version
+            ) {
+              applicable = catalogDiscoveryFailure("credential-changed");
+            }
+          }
+
+          if (applicable.status === "available" && applicable.models.length > 0) {
+            const catalogDigest = createHash("sha256").update(canonicalJson(applicable.models)).digest("hex");
+            const unchanged =
+              current.catalog_digest === catalogDigest &&
+              current.active_count === applicable.models.length &&
+              current.snapshot_id !== undefined;
+            const snapshotId = unchanged ? current.snapshot_id : randomUUID();
+            const observedAt = new Date();
+            if (unchanged) {
+              await tx.query(
+                `UPDATE provider_model_catalog_entry
+                 SET last_seen_at = $observed_at, updated_at = $observed_at
+                 WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id AND state = 'active';`,
+                { organization_id: context.organizationId, endpoint_id: endpointId, observed_at: observedAt },
+              );
+            } else {
+              const entries = applicable.models.map((model) => {
+                const metadataJson = canonicalJson(model);
+                return {
+                  catalog_entry_id: randomUUID(),
+                  organization_id: context.organizationId,
+                  provider_id: reservation.provider.provider_id,
+                  endpoint_id: endpointId,
+                  model_id: model.id,
+                  metadata_json: metadataJson,
+                  metadata_digest: createHash("sha256").update(metadataJson).digest("hex"),
+                  state: "active",
+                  snapshot_id: snapshotId,
+                  first_seen_at: observedAt,
+                  last_seen_at: observedAt,
+                  created_at: observedAt,
+                  updated_at: observedAt,
+                };
+              });
+              await tx.query(
+                `UPDATE provider_model_catalog_entry SET state = 'stale', updated_at = time::now()
+                 WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id AND state = 'active';
+                 INSERT INTO provider_model_catalog_entry $entries ON DUPLICATE KEY UPDATE
+                   provider_id = $input.provider_id,
+                   metadata_json = $input.metadata_json,
+                   metadata_digest = $input.metadata_digest,
+                   state = 'active',
+                   snapshot_id = $input.snapshot_id,
+                   last_seen_at = $input.last_seen_at,
+                   updated_at = $input.updated_at
+                 RETURN NONE;`,
+                { organization_id: context.organizationId, endpoint_id: endpointId, entries },
+              );
+              const [profiles] = await tx.query<[{ readonly model_id: string }[]]>(
+                `SELECT model_id FROM model_profile
+                   WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id;`,
+                { organization_id: context.organizationId, endpoint_id: endpointId },
+              );
+              const [stale] = await tx.query<
+                { readonly catalog_entry_id: string; readonly model_id: string; readonly last_seen_at: unknown }[][]
+              >(
+                `SELECT catalog_entry_id, model_id, last_seen_at FROM provider_model_catalog_entry
+                   WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id AND state = 'stale'
+                   ORDER BY last_seen_at DESC, model_id ASC LIMIT 10000 START 1000;`,
+                { organization_id: context.organizationId, endpoint_id: endpointId },
+              );
+              const protectedModels = new Set(profiles.map((profile) => profile.model_id));
+              const prunable = (stale ?? [])
+                .filter((entry) => !protectedModels.has(entry.model_id))
+                .map((entry) => entry.catalog_entry_id);
+              if (prunable.length > 0) {
+                await tx.query(
+                  `DELETE provider_model_catalog_entry
+                   WHERE organization_id = $organization_id AND catalog_entry_id IN $catalog_entry_ids;`,
+                  { organization_id: context.organizationId, catalog_entry_ids: prunable },
+                );
+              }
+            }
+            const [updatedStatuses] = await tx.query<[ProviderModelCatalogStatus[]]>(
+              `UPDATE provider_model_catalog_sync SET
+               status = 'available', active_count = $active_count, invalid_count = $invalid_count,
+               duplicate_count = $duplicate_count, catalog_digest = $catalog_digest, snapshot_id = $snapshot_id,
+               diagnostic_reason = NONE, retry_at = NONE, last_successful_at = time::now(), updated_at = time::now()
+             WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id
+               AND sync_sequence = $sync_sequence RETURN AFTER;`,
+              {
+                organization_id: context.organizationId,
+                endpoint_id: endpointId,
+                sync_sequence: reservation.syncSequence,
+                active_count: applicable.models.length,
+                invalid_count: applicable.invalidCount,
+                duplicate_count: applicable.duplicateCount,
+                catalog_digest: catalogDigest,
+                snapshot_id: snapshotId,
+              },
+            );
+            if (!updatedStatuses[0]) throw new Error("Provider 모델 동기화 sequence가 변경됐습니다");
+            return {
+              status: "available" as const,
+              activeCount: applicable.models.length,
+              invalidCount: applicable.invalidCount,
+              duplicateCount: applicable.duplicateCount,
+              snapshotId,
+              ...authenticationLineage,
+            };
+          }
+
+          const status = applicable.status === "available" ? "empty" : applicable.status;
+          const diagnosticReason =
+            applicable.status === "available" ? "empty-catalog" : (applicable.diagnostic?.reason ?? "unknown");
+          const retryAt = applicable.diagnostic?.retryAt;
+          const [updatedStatuses] = await tx.query<[ProviderModelCatalogStatus[]]>(
+            `UPDATE provider_model_catalog_sync SET
+             status = $status, invalid_count = $invalid_count, duplicate_count = $duplicate_count,
+             diagnostic_reason = $diagnostic_reason, retry_at = $retry_at, updated_at = time::now()
+           WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id
+             AND sync_sequence = $sync_sequence RETURN AFTER;`,
+            {
+              organization_id: context.organizationId,
+              endpoint_id: endpointId,
+              sync_sequence: reservation.syncSequence,
+              status,
+              invalid_count: applicable.invalidCount,
+              duplicate_count: applicable.duplicateCount,
+              diagnostic_reason: diagnosticReason,
+              retry_at: retryAt === undefined ? undefined : new Date(retryAt),
+            },
+          );
+          if (!updatedStatuses[0]) throw new Error("Provider 모델 동기화 sequence가 변경됐습니다");
+          return {
+            status,
+            activeCount: current.active_count,
+            invalidCount: applicable.invalidCount,
+            duplicateCount: applicable.duplicateCount,
+            diagnosticReason,
+            ...(retryAt === undefined ? {} : { retryAt }),
+            ...authenticationLineage,
+          };
+        },
+      );
+    } catch (error) {
+      await this.database
+        .query(
+          `UPDATE provider_model_catalog_sync SET
+             status = 'degraded', diagnostic_reason = 'interrupted', retry_at = NONE, updated_at = time::now()
+           WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id
+             AND sync_sequence = $sync_sequence AND status = 'syncing';`,
+          {
+            organization_id: context.organizationId,
+            endpoint_id: endpointId,
+            sync_sequence: reservation.syncSequence,
+          },
+        )
+        .catch(() => undefined);
+      throw error;
+    }
+  }
+
+  public async listModelCatalog(
+    context: TenantContext,
+    endpointId?: string,
+    executor: QueryExecutor = this.database,
+  ): Promise<{
+    readonly models: readonly ProviderModelCatalogEntry[];
+    readonly statuses: readonly ProviderModelCatalogStatus[];
+    readonly status?: ProviderModelCatalogStatus;
+  }> {
+    await this.organizations.verifyTenantContext(context, undefined, executor);
+    const [models, statuses] = await Promise.all([
+      executor.query<[StoredProviderModelCatalogEntry[]]>(
+        endpointId === undefined
+          ? `SELECT * OMIT id FROM provider_model_catalog_entry
+             WHERE organization_id = $organization_id
+             ORDER BY state ASC, endpoint_id ASC, last_seen_at DESC, model_id ASC LIMIT 50000;`
+          : `SELECT * OMIT id FROM provider_model_catalog_entry
+             WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id
+             ORDER BY state ASC, last_seen_at DESC, model_id ASC LIMIT 11000;`,
+        { organization_id: context.organizationId, endpoint_id: endpointId },
+      ),
+      executor.query<[ProviderModelCatalogStatus[]]>(
+        endpointId === undefined
+          ? `SELECT * OMIT id FROM provider_model_catalog_sync
+             WHERE organization_id = $organization_id ORDER BY endpoint_id ASC;`
+          : `SELECT * OMIT id FROM provider_model_catalog_sync
+             WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id LIMIT 1;`,
+        { organization_id: context.organizationId, endpoint_id: endpointId },
+      ),
+    ]);
+    const projected = models[0].map((row) => {
+      const parsed = JSON.parse(row.metadata_json) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        throw new Error("Provider 모델 카탈로그 metadata 형식이 유효하지 않습니다");
+      const metadata = parsed as DiscoveredModel;
+      const digest = createHash("sha256").update(canonicalJson(metadata)).digest("hex");
+      if (metadata.id !== row.model_id || digest !== row.metadata_digest)
+        throw new Error("Provider 모델 카탈로그 metadata 계보가 유효하지 않습니다");
+      const { metadata_json: _metadataJson, ...entry } = row;
+      return { ...entry, metadata };
+    });
+    return {
+      models: projected,
+      statuses: statuses[0],
+      ...(endpointId === undefined || statuses[0][0] === undefined ? {} : { status: statuses[0][0] }),
+    };
   }
 
   public async addCredential(
@@ -712,6 +1218,7 @@ export class ProviderService {
         const credential = credentials[0];
         if (!credential) throw new Error("Credential 생성 결과가 없습니다");
         await this.insertSecret(tx, context, credential, 1, input.secret);
+        await this.invalidateModelCatalog(tx, context.organizationId, credential.endpoint_id, "credential-added");
         return { credential };
       },
       { executor },
@@ -878,6 +1385,7 @@ export class ProviderService {
         const credential = credentials[0];
         if (!credential) throw new Error("암호화 구독 Credential 생성 결과가 없습니다");
         await this.insertSecret(tx, context, credential, 1, input.secret);
+        await this.invalidateModelCatalog(tx, context.organizationId, credential.endpoint_id, "credential-added");
         return { credential };
       },
       { roles: ["owner", "admin", "member"], executor },
@@ -909,6 +1417,7 @@ export class ProviderService {
           credential_id: credential.credential_id,
         },
       );
+      await this.invalidateModelCatalog(tx, context.organizationId, credential.endpoint_id, "credential-rotated");
       return {
         credential: {
           ...credential,
@@ -936,6 +1445,7 @@ export class ProviderService {
           credential_id: credential.credential_id,
         },
       );
+      await this.invalidateModelCatalog(tx, context.organizationId, credential.endpoint_id, "credential-revoked");
       return { credential: { ...credential, version: credential.version + 1, status: "revoked" } };
     });
   }
@@ -1105,6 +1615,24 @@ export class ProviderService {
     );
   }
 
+  private async readCommandReplay<Payload extends object>(
+    context: TenantContext,
+    commandId: string,
+    requestJson: string,
+  ): Promise<(Payload & { readonly audit: RouterAuditEvent }) | undefined> {
+    await this.organizations.verifyTenantContext(context, ["owner", "admin"]);
+    const [events] = await this.database.query<[RouterAuditEvent[]]>(
+      `SELECT * OMIT id FROM router_audit_event
+       WHERE organization_id = $organization_id AND command_id = $command_id LIMIT 1;`,
+      { organization_id: context.organizationId, command_id: commandId },
+    );
+    const event = events[0];
+    if (!event) return undefined;
+    if (event.actor_user_id !== context.userId) throw new Error("같은 commandId를 다른 사용자가 재사용할 수 없습니다");
+    if (event.request_json !== requestJson) throw new Error("같은 commandId에 다른 명령을 사용할 수 없습니다");
+    return JSON.parse(event.result_json) as Payload & { readonly audit: RouterAuditEvent };
+  }
+
   private async command<Payload extends object>(
     context: TenantContext,
     commandId: string,
@@ -1182,6 +1710,21 @@ export class ProviderService {
         aad,
         created_by: context.userId,
       },
+    );
+  }
+
+  private async invalidateModelCatalog(
+    executor: QueryExecutor,
+    organizationId: string,
+    endpointId: string,
+    reason: "credential-added" | "credential-rotated" | "credential-revoked",
+  ): Promise<void> {
+    await executor.query(
+      `UPDATE provider_model_catalog_sync SET
+         sync_sequence += 1, status = 'degraded', diagnostic_reason = $reason,
+         retry_at = NONE, updated_at = time::now()
+       WHERE organization_id = $organization_id AND endpoint_id = $endpoint_id;`,
+      { organization_id: organizationId, endpoint_id: endpointId, reason },
     );
   }
 
