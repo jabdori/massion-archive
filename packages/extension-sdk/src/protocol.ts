@@ -15,6 +15,18 @@ function inspect(value: unknown, depth: number, maximum: number): void {
   }
 }
 
+/**
+ * 중복 requestId를 기억하는 창의 크기.
+ *
+ * 파서는 worker 프로세스와 수명이 같으므로 본 requestId를 전부 담으면 호출 수에 비례해 메모리가
+ * 계속 늡니다(장수 worker에서 그대로 누수). `sequence`가 이미 단조 증가를 강제하므로 이 집합이
+ * 막는 것은 「새 sequence로 옛 requestId를 재사용」 하나이고, 그건 최근 창만 봐도 충분합니다.
+ *
+ * 창을 벗어난 아주 오래된 requestId 재사용은 통과합니다 — 무한 메모리와 맞바꾼 알려진 상한입니다.
+ * 창 크기가 문제가 되면 sequence 기반 만료로 바꿉니다.
+ */
+const REQUEST_ID_WINDOW = 8_192;
+
 export function createRpcFrameParser(options: { readonly maxFrameBytes?: number; readonly maxDepth?: number } = {}): {
   parse(line: string): ExtensionRpcFrame;
 } {
@@ -52,6 +64,12 @@ export function createRpcFrameParser(options: { readonly maxFrameBytes?: number;
       }
       lastSequence = frame.sequence as number;
       requestIds.add(frame.requestId);
+      // Set은 삽입 순서를 지키므로 가장 오래된 것부터 밀어냅니다.
+      while (requestIds.size > REQUEST_ID_WINDOW) {
+        const oldest = requestIds.values().next();
+        if (oldest.done) break;
+        requestIds.delete(oldest.value);
+      }
       return value as ExtensionRpcFrame;
     },
   };
