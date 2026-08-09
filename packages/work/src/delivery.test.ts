@@ -366,6 +366,28 @@ describe("Task DAG, Assignment와 Session", () => {
     expect(JSON.parse(failureEvents[1]?.request_json ?? "null")).toMatchObject({ target: "failed" });
   });
 
+  it("ready→running→failed 수렴이 Work revision과 Event 수의 일치를 깨지 않는다", async () => {
+    const ready = await readyTask("convergence revision");
+
+    const failed = await service.transitionTask(context, {
+      commandId: "delivery-convergence-revision-command-0001",
+      workId: ready.work.work_id,
+      expectedRevision: ready.work.revision,
+      taskId: ready.task.task_id,
+      expectedTaskRevision: ready.task.revision,
+      target: "failed",
+    });
+
+    // 이 전이만 WorkEvent를 2건 만든다. revision이 1만 오르면 auditWork의 불변량이 깨지고,
+    // recoverWork가 fail-closed라 이후 Records·Assurance 단계가 통째로 멈춘다.
+    const events = await service.listEvents(context, ready.work.work_id);
+    expect(failed.work.revision).toBe(ready.work.revision + 2);
+    expect(failed.work.revision).toBe(events.length);
+    await expect(service.auditWork(context, ready.work.work_id)).resolves.not.toContainEqual(
+      expect.objectContaining({ code: "revision" }),
+    );
+  });
+
   it("상위 Application run 실패가 중단되면 같은 transaction의 Task·Work 실패도 모두 rollback한다", async () => {
     const ready = await readyTask("application failure rollback");
     const commandId = "delivery-application-failure-rollback-command-0001";

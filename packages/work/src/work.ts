@@ -2976,9 +2976,14 @@ export class WorkService {
         throw new Error(`현재 Work revision은 ${String(work.revision)}입니다`);
       const extra = await operation(transaction, work);
       if (eventType !== "work_state_changed") {
+        // revision은 호출자의 산술이 아니라 원장에서 파생합니다. operation이 추가 event를 남기는
+        // 경로(ready→failed 수렴)가 있고, work.revision + 1로 고정하면 auditWork가 강제하는
+        // revision == events.length가 깨집니다. auditWork는 recoverWork 안에서 fail-closed라
+        // 그 순간 Records·Assurance 단계가 통째로 멈춥니다. 아래 +1은 곧 append할 이 event의 몫입니다.
+        const appended = await listEventsWith(transaction, context.organizationId, work.work_id);
         await transaction.query(
           "UPDATE work SET revision = $revision, updated_at = time::now() WHERE organization_id = $organization_id AND work_id = $work_id;",
-          { revision: work.revision + 1, organization_id: context.organizationId, work_id: work.work_id },
+          { revision: appended.length + 1, organization_id: context.organizationId, work_id: work.work_id },
         );
       }
       const updated = await findWork(transaction, context.organizationId, work.work_id);
