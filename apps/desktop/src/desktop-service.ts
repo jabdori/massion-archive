@@ -92,6 +92,8 @@ export interface OrganizationNodeView {
   /** 이전 응답과의 호환을 위해 optional이지만, 실제 조직 snapshot 투영은 항상 값을 보존합니다. */
   readonly scope?: "persistent" | "work";
   readonly workId?: string;
+  /** Core Office 여덟. 도메인이 변경을 거부하므로 화면이 편성 조작을 아예 내놓지 않습니다. */
+  readonly builtin: boolean;
 }
 
 export interface OrganizationView {
@@ -4609,6 +4611,7 @@ function projectOrganization(snapshot: Partial<OrganizationGraphSnapshotV1>): Or
       role: node.role,
       capabilities: node.capabilities,
       scope: node.scope,
+      builtin: node.builtin,
       ...(node.work_id === undefined ? {} : { workId: node.work_id }),
     })),
   };
@@ -4692,6 +4695,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "representative",
     handle: "representative",
+    builtin: true,
     name: "Representative",
     responsibility: "사용자 요청 접수, 조정, 최종 응답",
     status: "active",
@@ -4702,6 +4706,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "context-strategy",
     handle: "context-strategy",
+    builtin: true,
     name: "Context & Strategy",
     parentHandle: "representative",
     responsibility: "맥락 구성, 계획, 위험 분석",
@@ -4713,6 +4718,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "evidence-research",
     handle: "evidence-research",
+    builtin: true,
     name: "Evidence & Research",
     parentHandle: "representative",
     responsibility: "근거 조사, 출처 검증",
@@ -4724,6 +4730,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "governance",
     handle: "governance",
+    builtin: true,
     name: "Governance",
     parentHandle: "representative",
     responsibility: "실행·조직·Extension·자기수정 정책과 승인",
@@ -4735,6 +4742,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "delivery-coordination",
     handle: "delivery-coordination",
+    builtin: true,
     name: "Delivery Coordination",
     parentHandle: "representative",
     responsibility: "Task 배정, 전문 팀 실행 조정, 결과 통합",
@@ -4746,6 +4754,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "assurance",
     handle: "assurance",
+    builtin: true,
     name: "Assurance",
     parentHandle: "representative",
     responsibility: "독립 리뷰, 테스트·보안·운영 검증",
@@ -4757,6 +4766,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "records-documentation",
     handle: "records-documentation",
+    builtin: true,
     name: "Records & Documentation",
     parentHandle: "representative",
     responsibility: "handoff·결정·계보 기록, 문서 영향 반영",
@@ -4768,6 +4778,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "growth",
     handle: "growth",
+    builtin: true,
     name: "Growth",
     parentHandle: "representative",
     responsibility: "Reflection, 개선안 평가·채택·효과 비교·되돌리기",
@@ -4780,6 +4791,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "quant-analysis",
     handle: "quant-analysis",
+    builtin: false,
     name: "계량분석 팀",
     parentHandle: "delivery-coordination",
     responsibility: "코호트 정규화, 유의성 검정, 시계열 분해",
@@ -4793,6 +4805,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "software-engineering",
     handle: "software-engineering",
+    builtin: false,
     name: "Software Engineering",
     parentHandle: "delivery-coordination",
     responsibility: "개발 Task 분해, 전문 역할 조정과 변경 통합",
@@ -4804,6 +4817,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "se-lead",
     handle: "software-engineering.engineering-lead",
+    builtin: false,
     name: "Engineering Lead",
     parentHandle: "software-engineering",
     responsibility: "개발 Task 분해, 경로 충돌 조정과 기술 통합 판정",
@@ -4815,6 +4829,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "se-fe",
     handle: "software-engineering.frontend-specialist",
+    builtin: false,
     name: "Frontend Specialist",
     parentHandle: "software-engineering",
     responsibility: "Web 인터페이스와 클라이언트 동작 구현",
@@ -4826,6 +4841,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "se-be",
     handle: "software-engineering.backend-specialist",
+    builtin: false,
     name: "Backend Specialist",
     parentHandle: "software-engineering",
     responsibility: "서비스, API와 서버 애플리케이션 구현",
@@ -4837,6 +4853,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "se-db",
     handle: "software-engineering.database-specialist",
+    builtin: false,
     name: "Database Specialist",
     parentHandle: "software-engineering",
     responsibility: "데이터 모델, 질의와 마이그레이션 구현",
@@ -4848,6 +4865,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "se-test",
     handle: "software-engineering.test-engineer",
+    builtin: false,
     name: "Test Engineer",
     parentHandle: "software-engineering",
     responsibility: "실패 재현 테스트와 검증 시나리오 구현",
@@ -4859,6 +4877,7 @@ const fixtureOrganizationNodes: OrganizationNodeView[] = [
   {
     id: "se-sec",
     handle: "software-engineering.security-reviewer",
+    builtin: false,
     name: "Security Reviewer",
     parentHandle: "software-engineering",
     responsibility: "코드 변경의 위협·권한·비밀정보 노출 검토",

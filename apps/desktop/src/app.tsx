@@ -140,7 +140,7 @@ import {
   type WorkStatus,
   type WorkView,
 } from "@/model";
-import { agentIdentityToken, growthTargetToken } from "@massion/application/client";
+import { agentIdentityToken, growthTargetToken, type ApplicationCommandMapV1 } from "@massion/application/client";
 
 import { nativeContextPicker, type NativeContextPicker } from "@/native-context-picker";
 import {
@@ -1794,6 +1794,14 @@ function OrganizationSurface({ service }: { service: DesktopService }) {
   const [collapsedHandles, setCollapsedHandles] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState("");
   const structureRef = useRef<HTMLDivElement>(null);
+  const reload = useCallback(() => {
+    void service
+      .loadOrganization()
+      .then(setOrganization)
+      .catch((cause: unknown) => {
+        setError(surfaceErrorMessage(cause, "조직 정보를 불러오지 못했습니다."));
+      });
+  }, [service]);
   useEffect(() => {
     let disposed = false;
     void service
@@ -1968,17 +1976,188 @@ function OrganizationSurface({ service }: { service: DesktopService }) {
                   <p className="mt-1 text-[12px] leading-5 text-primary">{extraCapabilitiesOf(selected).join(" · ")}</p>
                 </div>
               ) : null}
+              {/* 고른 자리가 바뀌면 편성 폼을 새로 세웁니다. 앞 자리에 적던 입력과 앞 자리의
+                  거절 사유를 그대로 달고 있으면, 다른 부모 아래로 편성될 수 있습니다. */}
+              <StaffingPanel
+                key={selected.handle}
+                node={selected}
+                onChanged={reload}
+                organization={organization}
+                service={service}
+              />
             </>
           ) : (
             <p className="text-[11px] leading-4 text-muted">
-              {translate(
-                "구조나 지도에서 하나를 누르면 그 자리·소속·머무는 기간을 봅니다. 편성·분리·병합은 계약에 명령이 열리면 이 지도에서 하게 됩니다.",
-              )}
+              {translate("구조나 지도에서 하나를 누르면 그 자리·소속·머무는 기간을 보고, 그 아래 팀을 편성합니다.")}
             </p>
           )}
         </div>
       </aside>
     </main>
+  );
+}
+
+/**
+ * 편성. 고른 노드 아래에 팀을 만들고, 만들어진 팀을 세우거나 물립니다.
+ *
+ * Core Office 여덟은 도메인이 변경을 거부하므로 그 노드에서는 상태 조작을 아예 내놓지 않습니다.
+ * 눌러 보고 오류로 아는 것과 처음부터 없는 것은 다릅니다.
+ *
+ * 분리·병합·되돌리기는 계약에 있지만 여기 두지 않았습니다. 참조 처리 계획(`referencePlan`)을
+ * 사람이 손으로 짜야 하는데, 그 입력을 화면이 아직 그리지 못합니다. 없는 것을 있는 척하지 않습니다.
+ */
+function StaffingPanel({
+  node,
+  onChanged,
+  organization,
+  service,
+}: {
+  node: OrganizationNodeView;
+  onChanged: () => void;
+  organization: OrganizationView | undefined;
+  service: DesktopService;
+}) {
+  const [open, setOpen] = useState(false);
+  const [handle, setHandle] = useState("");
+  const [name, setName] = useState("");
+  const [responsibility, setResponsibility] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState("");
+  const version = organization?.version;
+
+  const run = (change: ApplicationCommandMapV1["organization.command"]["payload"]) => {
+    if (version === undefined) return;
+    setFailure("");
+    setBusy(true);
+    void service
+      .applyOrganizationChange({ expectedVersion: version, change })
+      .then(() => {
+        setOpen(false);
+        setHandle("");
+        setName("");
+        setResponsibility("");
+        onChanged();
+      })
+      .catch((cause: unknown) => {
+        setFailure(surfaceErrorMessage(cause, "조직 변경을 저장하지 못했습니다."));
+      })
+      .finally(() => {
+        setBusy(false);
+      });
+  };
+
+  return (
+    <section aria-label={translate("편성")} className="mt-4 border-t border-border pt-3">
+      {node.builtin ? (
+        // Core Office는 제품 migration 외에는 바뀌지 않습니다(헌법 4.3).
+        <p className="text-[11px] leading-4 text-muted">
+          {translate("Core Office는 제품이 보장하는 자리라 바꾸거나 물릴 수 없습니다. 그 아래로 팀을 편성합니다.")}
+        </p>
+      ) : null}
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Button
+          disabled={busy || version === undefined}
+          onClick={() => {
+            setOpen(!open);
+          }}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          {translate(open ? "편성 취소" : "여기 아래 팀 만들기")}
+        </Button>
+        {node.builtin ? null : (
+          <Button
+            disabled={busy || version === undefined}
+            onClick={() => {
+              run(
+                node.status === "active"
+                  ? { kind: "deactivate", handle: node.handle }
+                  : { kind: "activate", handle: node.handle },
+              );
+            }}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {translate(node.status === "active" ? "비활성화" : "다시 세우기")}
+          </Button>
+        )}
+      </div>
+      {open ? (
+        <form
+          aria-label={translate("팀 편성")}
+          className="mt-3 grid gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const trimmed = handle.trim();
+            if (!/^[a-z][a-z0-9-]*$/u.test(trimmed)) {
+              setFailure("handle은 소문자·숫자·하이픈만 쓰고 소문자로 시작합니다.");
+              return;
+            }
+            if (!name.trim() || !responsibility.trim()) {
+              setFailure("이름과 책임을 모두 적어야 합니다.");
+              return;
+            }
+            run({
+              kind: "create",
+              handle: trimmed,
+              name: name.trim(),
+              responsibility: responsibility.trim(),
+              parentHandle: node.handle,
+              scope: "persistent",
+              role: "operator",
+            });
+          }}
+        >
+          {/* 라벨을 입력 안에 중첩합니다. placeholder는 글자를 넣는 순간 사라져 라벨을 대신하지 못합니다. */}
+          <label className="grid gap-1 text-[11px] text-muted">
+            {translate("handle")}
+            <Input
+              autoFocus
+              disabled={busy}
+              onChange={(event) => {
+                setHandle(event.target.value);
+              }}
+              placeholder="refund-analysis"
+              value={handle}
+            />
+          </label>
+          <label className="grid gap-1 text-[11px] text-muted">
+            {translate("이름")}
+            <Input
+              disabled={busy}
+              onChange={(event) => {
+                setName(event.target.value);
+              }}
+              placeholder={translate("환불 분석")}
+              value={name}
+            />
+          </label>
+          <label className="grid gap-1 text-[11px] text-muted">
+            {translate("책임")}
+            <Input
+              disabled={busy}
+              onChange={(event) => {
+                setResponsibility(event.target.value);
+              }}
+              placeholder={translate("환불 지연 구간 조사")}
+              value={responsibility}
+            />
+          </label>
+          <div>
+            <Button disabled={busy} size="sm" type="submit" variant="outline">
+              {translate(busy ? "편성 중" : "편성")}
+            </Button>
+          </div>
+        </form>
+      ) : null}
+      {failure ? (
+        <p className="mt-2 text-[11px] leading-4 text-danger" role="alert">
+          {translate(failure)}
+        </p>
+      ) : null}
+    </section>
   );
 }
 

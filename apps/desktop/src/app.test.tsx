@@ -382,4 +382,48 @@ describe("AgentOS 데스크톱", () => {
       "대기 지시를 안전한 실행 경계에서 지금 반영하도록 변경했습니다",
     );
   });
+
+  // 폼이 스스로 막는 것과 도메인이 거절하는 것은 다릅니다. 둘 다 사람이 읽을 수 있어야 합니다.
+  it("팀 편성 폼이 handle과 필수 항목을 막고, 막지 못한 것은 거절 사유를 그대로 보여준다", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await user.click(screen.getByRole("button", { name: "조직" }));
+    expect(await screen.findByRole("main", { name: "조직" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: /^Atlas/ }));
+    await user.click(screen.getByRole("button", { name: "여기 아래 팀 만들기" }));
+
+    // 라벨은 눈에 보여야 합니다. placeholder는 글자를 넣는 순간 사라집니다.
+    const handleField = screen.getByRole("textbox", { name: "handle" });
+    expect(handleField).toHaveFocus();
+    const nameField = screen.getByRole("textbox", { name: "이름" });
+    const responsibilityField = screen.getByRole("textbox", { name: "책임" });
+
+    await user.click(screen.getByRole("button", { name: "편성" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("handle은 소문자·숫자·하이픈만 쓰고 소문자로 시작합니다.");
+
+    await user.type(handleField, "Refund-Analysis");
+    await user.click(screen.getByRole("button", { name: "편성" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("handle은 소문자·숫자·하이픈만 쓰고 소문자로 시작합니다.");
+
+    await user.clear(handleField);
+    await user.type(handleField, "refund-analysis");
+    await user.click(screen.getByRole("button", { name: "편성" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("이름과 책임을 모두 적어야 합니다.");
+
+    await user.type(nameField, "환불 분석");
+    await user.type(responsibilityField, "환불 지연 구간 조사");
+    await user.click(screen.getByRole("button", { name: "편성" }));
+
+    // Fixture에는 조직 원장이 없습니다. 편성된 척 그리지 않고 거절 사유를 그대로 세웁니다.
+    expect(await screen.findByRole("alert")).toHaveTextContent("Fixture는 조직 편성을 구성하지 않았습니다: create");
+    expect(screen.getByRole("textbox", { name: "handle" })).toHaveValue("refund-analysis");
+
+    // 다른 자리를 고르면 앞 자리에 적던 입력과 앞 자리의 거절 사유를 버립니다.
+    // 남겨 두면 화면은 Vega를 보여 주면서 Atlas에 적던 내용을 Vega 아래로 편성합니다.
+    await user.click(screen.getByRole("button", { name: /^Vega/ }));
+    expect(screen.queryByRole("textbox", { name: "handle" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "여기 아래 팀 만들기" })).toBeInTheDocument();
+  });
 });

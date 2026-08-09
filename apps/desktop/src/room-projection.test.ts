@@ -13,6 +13,7 @@ const nodes: OrganizationNodeView[] = [
   {
     id: "node-rep",
     handle: "representative",
+    builtin: true,
     name: "Representative",
     responsibility: "사용자 요청 접수, 조정, 최종 응답",
     status: "active",
@@ -22,6 +23,7 @@ const nodes: OrganizationNodeView[] = [
   {
     id: "node-evidence",
     handle: "evidence-research",
+    builtin: true,
     name: "Evidence & Research",
     responsibility: "코드·문서·외부 근거 조사, 출처 검증",
     status: "active",
@@ -31,6 +33,7 @@ const nodes: OrganizationNodeView[] = [
   {
     id: "node-context",
     handle: "context-strategy",
+    builtin: true,
     name: "Context & Strategy",
     responsibility: "맥락 구성, 계획, 위험 분석",
     status: "active",
@@ -40,6 +43,7 @@ const nodes: OrganizationNodeView[] = [
   {
     id: "node-assurance",
     handle: "assurance",
+    builtin: true,
     name: "Assurance",
     responsibility: "독립 리뷰, 테스트·보안·운영 검증",
     status: "active",
@@ -301,6 +305,7 @@ describe("협업방 투영", () => {
     const generatedNode: OrganizationNodeView = {
       id: "node-generated",
       handle: "staff-generated",
+      builtin: false,
       name: "Generated Worker",
       responsibility: "Work task internal-task-key 실행",
       status: "active",
