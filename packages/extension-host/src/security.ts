@@ -74,8 +74,20 @@ export function assertSafeExtensionFile(path: string): void {
   }
 }
 
+/**
+ * 텍스트인지 판정하는 범위. git이 쓰는 것과 같은 관례입니다.
+ *
+ * 파일 전체에서 NUL을 찾으면 «앞은 평문인데 뒤 어딘가에 NUL이 하나 있는» 파일이 binary로 분류돼
+ * 검사를 통째로 건너뜁니다. 그러면 NUL 한 바이트를 끼워 넣는 것만으로 스캔을 끌 수 있습니다.
+ */
+const TEXT_PROBE_BYTES = 8_000;
+
 export function assertNoEmbeddedCredential(path: string, body: Buffer): void {
-  if (body.length > 1024 * 1024 || body.includes(0)) return;
+  // binary는 검사하지 않습니다. 판정은 앞부분만 봅니다 — 위 상수 설명 참고.
+  if (body.subarray(0, TEXT_PROBE_BYTES).includes(0)) return;
+  // 크기로는 건너뛰지 않습니다. 예전에는 1MiB를 넘으면 그대로 통과시켜서, 평문 앞에 padding을
+  // 1MiB 넘게 채우고 private key를 넣으면 검사를 우회할 수 있었습니다. 보안 검사를 크기로 끄면
+  // 그 크기가 곧 우회 방법이 됩니다. 비용은 package-service의 파일당 16MiB 상한이 이미 잡습니다.
   if (CREDENTIAL.test(body.toString("utf8"))) {
     throw new Error(`Extension package에서 credential 후보를 탐지했습니다: ${path}`);
   }
