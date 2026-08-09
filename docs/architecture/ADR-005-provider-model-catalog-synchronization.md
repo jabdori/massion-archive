@@ -88,10 +88,22 @@ runtime 실행 검증을 한 묶음으로 구현해야 합니다.
 `ai-sdk`는 OpenAI 호환 `/models`를 시도할 수 있지만, Provider가 다른 계약을 쓰면 마지막 정상
 snapshot을 보존한 `degraded`가 됩니다. adapter 이름만 보고 Anthropic 응답을 OpenAI로 꾸미지 않습니다.
 
+### 6. 모델 목록의 주 상태는 발견 여부가 아니라 실행 활성 여부입니다
+
+원격 API에서 왔다는 구현 사실을 행마다 `발견됨`으로 반복하지 않습니다. Endpoint의 마지막 동기화 상태와
+새로고침이 카탈로그 출처를 설명하고, 모델 행은 서버 `model_profile.enabled`를 기준으로 On/Off를 먼저
+보입니다. 카탈로그에만 있고 ModelProfile이 없는 모델은 Off이며, 이것을 실행 가능·검증 완료로 꾸미지
+않습니다. stale과 미확인은 필요한 행에만 보조 상태로 남깁니다.
+
+과거 화면 메모리의 `disabledModels`로 동작한 스위치는 재시작하면 설정이 되살아나는 가짜 제어였으므로
+복원하지 않습니다. 영속 On/Off 조작을 추가하려면 감사되는 Router 명령이 `model_profile.enabled` flag만
+원자적으로 갱신해야 합니다. candidate와 과거 route attempt 계보는 삭제하거나 다시 쓰지 않고 보존합니다.
+그 계약 전에는 화면이 저장되지 않는 클릭을 제공하지 않습니다.
+
 ## 결과
 
 - OpenRouter 같은 Provider는 하드코딩 모델 목록 없이 API 카탈로그를 표시할 수 있습니다.
-- 발견됨, stale, 검증됨, 라우팅 가능 상태를 화면과 allocator가 혼동하지 않습니다.
+- 카탈로그 출처, stale, 검증, 실행 활성 상태를 화면과 allocator가 혼동하지 않습니다.
 - 동기화 실패나 앱 재시작이 마지막 정상 목록과 실행 계보를 지우지 않습니다.
 - 모델 활성화와 동적 할당은 관측 카탈로그를 입력으로 쓰되 실제 실행 evidence를 계속 요구합니다.
 

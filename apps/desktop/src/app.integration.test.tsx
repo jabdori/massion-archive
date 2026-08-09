@@ -1542,7 +1542,7 @@ describe("AgentOS native data flow", () => {
     expect(screen.queryByText("사용 가능")).not.toBeInTheDocument();
     expect(screen.queryByText("로그인이 필요합니다")).not.toBeInTheDocument();
     expect(screen.queryByText("Base URL")).not.toBeInTheDocument();
-    expect(screen.queryByText(/0 검증됨/u)).not.toBeInTheDocument();
+    expect(screen.queryByText(/0\/0 활성/u)).not.toBeInTheDocument();
 
     await act(async () => {
       pending.resolve({
@@ -1685,14 +1685,15 @@ describe("AgentOS native data flow", () => {
     expect(registerEndpoint).toHaveBeenCalledOnce();
   });
 
-  it("발견 모델·검증 상태를 분리해 표시하고 같은 자리에서 새로고침한다", async () => {
+  it("API 모델은 실행 비활성으로 표시하고 내부 발견 상태를 노출하지 않는다", async () => {
     const user = userEvent.setup();
-    const syncProviderModels = vi.fn(async () => ({
-      status: "available" as const,
-      activeCount: 1,
-      invalidCount: 0,
-      duplicateCount: 0,
-    }));
+    const synced = deferred<{
+      status: "available";
+      activeCount: number;
+      invalidCount: number;
+      duplicateCount: number;
+    }>();
+    const syncProviderModels = vi.fn(async () => await synced.promise);
     const loadSettings = vi.fn(async () => ({
       catalog: {
         providers: [
@@ -1742,9 +1743,22 @@ describe("AgentOS native data flow", () => {
     render(<App service={service({ loadSettings, syncProviderModels })} />);
 
     await user.click(screen.getByRole("button", { name: "프로바이더" }));
-    expect(await screen.findByText("vendor/free-model")).toBeInTheDocument();
-    expect(screen.getByText("발견됨")).toBeInTheDocument();
+    const model = await screen.findByText("vendor/free-model");
+    const modelRow = model.closest("li") as HTMLElement;
+    expect(within(modelRow).getByText("꺼짐")).toBeInTheDocument();
+    expect(within(modelRow).queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.getByText("0/1 활성")).toBeInTheDocument();
+    expect(screen.queryByText("발견됨")).not.toBeInTheDocument();
+    expect(screen.queryByText("등록됨")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /모델 새로고침/u }));
+    const busyMessage = await screen.findByText("모델 목록을 확인하고 있습니다.");
+    const busyLiveRegion = busyMessage.closest('[aria-live="polite"]');
+    expect(busyLiveRegion).toHaveAttribute("aria-atomic", "true");
+    expect(busyLiveRegion?.querySelector("ul")).toBeNull();
+    expect(modelRow.closest('[aria-live="polite"]')).toBeNull();
+    await act(async () => {
+      synced.resolve({ status: "available", activeCount: 1, invalidCount: 0, duplicateCount: 0 });
+    });
 
     expect(syncProviderModels).toHaveBeenCalledWith("endpoint-openrouter");
     expect(await screen.findByRole("status")).toHaveTextContent("모델 목록을 확인했습니다.");
@@ -1865,12 +1879,22 @@ describe("AgentOS native data flow", () => {
     render(<App service={service({ loadSettings, syncProviderModels })} />);
 
     await user.click(screen.getByRole("button", { name: "프로바이더" }));
-    expect(await screen.findByText("vendor/registered")).toBeInTheDocument();
-    expect(screen.getByText("등록됨")).toBeInTheDocument();
-    expect(screen.getByText("검증됨 · 이전 목록")).toBeInTheDocument();
-    expect(
-      screen.getByText("모델 API가 빈 목록을 반환했습니다. 저장된 이전 목록은 교체하지 않았습니다."),
-    ).toBeInTheDocument();
+    const registered = await screen.findByText("vendor/registered");
+    expect(within(registered.closest("li") as HTMLElement).getByText("켜짐")).toBeInTheDocument();
+    expect(within(registered.closest("li") as HTMLElement).getByText("미확인")).toBeInTheDocument();
+    expect(screen.queryByText("등록됨")).not.toBeInTheDocument();
+    expect(screen.queryByText("발견됨")).not.toBeInTheDocument();
+    const verifiedStale = screen.getByText("vendor/verified-stale").closest("li") as HTMLElement;
+    expect(within(verifiedStale).getByText("이전 목록")).toBeInTheDocument();
+    expect(within(verifiedStale).queryByText(/검증됨/u)).not.toBeInTheDocument();
+    const catalogWarning = screen.getByText(
+      "모델 API가 빈 목록을 반환했습니다. 저장된 이전 목록은 교체하지 않았습니다.",
+    );
+    const catalogLiveRegion = catalogWarning.closest('[aria-live="polite"]');
+    expect(catalogLiveRegion).not.toBeNull();
+    expect(catalogLiveRegion).toHaveAttribute("aria-atomic", "true");
+    expect(catalogLiveRegion?.querySelector("ul")).toBeNull();
+    expect(verifiedStale.closest('[aria-live="polite"]')).toBeNull();
     expect(screen.getByText("비활성 주소 · 읽기 전용 이전 목록")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /모델 새로고침 · Retired/u })).toBeDisabled();
 
@@ -2084,6 +2108,11 @@ describe("AgentOS native data flow", () => {
       const modelScroll = screen.getByTestId("provider-model-scroll");
       const modelClip = screen.getByTestId("provider-model-clip");
       expect(modelScroll).toHaveClass("min-w-0", "overflow-y-auto");
+      expect(modelScroll).toHaveAttribute("role", "region");
+      expect(modelScroll).toHaveAccessibleName("모델 목록");
+      expect(modelScroll).toHaveAttribute("tabindex", "0");
+      modelScroll.focus();
+      expect(modelScroll).toHaveFocus();
       expect(modelScroll).not.toHaveClass("overflow-x-auto", "overflow-x-scroll");
       expect(modelClip).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
       expect(modelScroll.closest("aside")).toHaveClass("min-w-0", "overflow-hidden");
@@ -2092,14 +2121,15 @@ describe("AgentOS native data flow", () => {
       expect(lastModelRow).not.toBeNull();
       expect(lastModelRow).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
       const modelList = lastModelRow?.parentElement;
-      const liveRegion = modelList?.parentElement;
-      const endpointSection = liveRegion?.parentElement;
+      const modelContainer = modelList?.parentElement;
+      const endpointSection = modelContainer?.parentElement;
       const modelGrid = endpointSection?.parentElement;
       expect(modelList).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
-      expect(liveRegion).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      expect(modelContainer).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
+      expect(modelContainer).not.toHaveAttribute("aria-live");
       expect(endpointSection).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
       expect(modelGrid).toHaveClass("min-w-0", "max-w-full", "overflow-hidden");
-      expect(within(lastModelRow as HTMLElement).getByText("발견됨")).toHaveClass("shrink-0");
+      expect(within(lastModelRow as HTMLElement).getByText("꺼짐")).toHaveClass("shrink-0");
       const koreanRefresh = screen.getByRole("button", { name: /모델 새로고침 · API/u });
       koreanRefresh.focus();
       await koreanUser.keyboard("{Enter}");
@@ -2124,7 +2154,9 @@ describe("AgentOS native data flow", () => {
       const englishUser = userEvent.setup();
       await englishUser.click(screen.getByRole("button", { name: "Provider" }));
       expect(await screen.findByText("vendor/model-399")).toBeInTheDocument();
-      expect(screen.getAllByText("Discovered")).toHaveLength(400);
+      expect(screen.getByRole("region", { name: "Model list" })).toHaveAttribute("tabindex", "0");
+      expect(screen.getAllByText("Off")).toHaveLength(400);
+      expect(screen.queryByText("Discovered")).not.toBeInTheDocument();
       const englishRefresh = screen.getByRole("button", { name: /Refresh models · API/u });
       englishRefresh.focus();
       await englishUser.keyboard("{Enter}");
@@ -2618,6 +2650,10 @@ describe("AgentOS native data flow", () => {
     expect(screen.getAllByRole("button", { name: /OpenAI Codex/ })).toHaveLength(1);
     expect(await screen.findByText("구독 계정으로 연결됨")).toBeInTheDocument();
     expect(screen.getAllByText("활성").length).toBeGreaterThan(0);
+    const modelRegion = screen.getByRole("region", { name: "모델 목록" });
+    expect(screen.queryByRole("button", { name: /모델 새로고침/u })).not.toBeInTheDocument();
+    modelRegion.focus();
+    expect(modelRegion).toHaveFocus();
   }, 15_000);
 
   it("잘못된 Adapter의 기존 Codex ID를 연결 충돌로 표시하고 공식 로그인을 유지한다", async () => {

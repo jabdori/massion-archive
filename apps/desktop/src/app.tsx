@@ -5603,17 +5603,19 @@ function ProviderSurface({ service }: { service: DesktopService }) {
             <h2 className="text-label text-fg-4">{translate("모델")}</h2>
             {settings !== undefined && selected ? (
               <span className="truncate text-figure tabular-nums text-fg-4">
-                {selected.endpoints.some((endpoint) => endpoint.catalogStatus)
-                  ? `${String(selected.endpoints.reduce((sum, endpoint) => sum + (endpoint.catalogStatus?.activeCount ?? 0), 0))} ${translate("발견")}`
-                  : null}
-                {selected.endpoints.some((endpoint) => endpoint.catalogStatus) ? " · " : null}
-                {String(selected.models.filter((model) => model.enabled && model.verified).length)}{" "}
-                {translate("검증됨")}
+                {String(selected.models.filter((model) => model.enabled).length)}/{String(selected.models.length)}{" "}
+                {translate("활성")}
               </span>
             ) : null}
           </div>
         </header>
-        <div className="min-h-0 min-w-0 overflow-y-auto pb-3" data-testid="provider-model-scroll">
+        <div
+          aria-label={translate("모델 목록")}
+          className="min-h-0 min-w-0 overflow-y-auto pb-3 outline-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg-3"
+          data-testid="provider-model-scroll"
+          role="region"
+          tabIndex={0}
+        >
           <div className="min-w-0 max-w-full overflow-hidden" data-testid="provider-model-clip">
             {selected === undefined ? null : (
               <ProviderModelList
@@ -5823,52 +5825,58 @@ function ProviderModelList({
                   aria-label={`${translate(busy ? "모델 확인 중" : "모델 새로고침")} · ${endpoint.name || endpoint.baseUrl}`}
                   className="shrink-0 rounded-[5px] px-1.5 py-1 text-figure text-fg-4 transition-colors hover:text-primary focus-visible:outline focus-visible:outline-1 focus-visible:outline-fg-3 disabled:cursor-not-allowed disabled:opacity-40"
                   disabled={!endpoint.enabled || busy}
-                  onClick={() => onSync(endpoint.endpointId)}
+                  onClick={() => {
+                    onSync(endpoint.endpointId);
+                  }}
                   type="button"
                 >
                   {translate(busy ? "확인 중…" : "새로고침")}
                 </button>
               )}
             </header>
-            <div aria-live="polite" className="min-w-0 max-w-full overflow-hidden">
-              {busy ? (
-                <p className="sr-only" role="status">
-                  {translate("모델 목록을 확인하고 있습니다.")}
-                </p>
-              ) : null}
-              {warning ? (
-                <p className="px-3 pb-1 text-figure leading-4 text-fg-4" role="status">
-                  {translate(warning)}
-                </p>
+            <div className="min-w-0 max-w-full overflow-hidden">
+              {busy || warning ? (
+                <div aria-atomic="true" aria-live="polite">
+                  {busy ? <p className="sr-only">{translate("모델 목록을 확인하고 있습니다.")}</p> : null}
+                  {warning ? <p className="px-3 pb-1 text-figure leading-4 text-fg-4">{translate(warning)}</p> : null}
+                </div>
               ) : null}
               {models.length === 0 ? (
                 <p className="px-3 py-2 text-[12px] leading-5 text-muted">{translate(empty)}</p>
               ) : (
                 <ul className="min-w-0 max-w-full overflow-hidden">
                   {models.map((model) => {
-                    const labels = [
-                      ...(model.verified ? ["검증됨"] : []),
-                      ...(model.catalogState === "stale" ? ["이전 목록"] : model.discovered ? ["발견됨"] : ["등록됨"]),
+                    const details = [
+                      ...(!model.verified && model.modelProfileId ? ["미확인"] : []),
+                      ...(model.catalogState === "stale" ? ["이전 목록"] : []),
                     ];
                     return (
                       <li
                         className={`flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden px-3 py-1.5 ${model.catalogState === "stale" || !endpoint.enabled ? "opacity-60" : ""}`}
                         key={model.modelProfileId ?? model.catalogEntryId ?? `${endpoint.endpointId}:${model.modelId}`}
                       >
+                        {/* 실행 활성 상태는 서버의 ModelProfile 값만 읽습니다. API 목록에만 있는 모델은 Off입니다. */}
                         <span
                           aria-hidden="true"
-                          className={`size-1.5 shrink-0 rounded-full ${
-                            model.enabled && model.verified
-                              ? "bg-fg-3"
-                              : model.catalogState === "active"
-                                ? "border border-fg-3"
-                                : "border border-fg-4"
-                          }`}
-                        />
-                        <span className="min-w-0 flex-1 truncate font-mono text-speaker text-secondary">
+                          className={`relative h-3 w-6 shrink-0 rounded-full ${model.enabled ? "bg-control" : "bg-border"}`}
+                        >
+                          <span
+                            className={`absolute top-0.5 h-2 w-2 rounded-full ${
+                              model.enabled ? "left-3.5 bg-fg" : "left-0.5 bg-fg-3"
+                            }`}
+                          />
+                        </span>
+                        <span
+                          className={`min-w-0 flex-1 truncate font-mono text-speaker ${model.enabled ? "text-secondary" : "text-muted"}`}
+                        >
                           {model.modelId}
                         </span>
-                        <span className="shrink-0 text-figure text-fg-4">{labels.map(translate).join(" · ")}</span>
+                        <span className={`shrink-0 text-figure ${model.enabled ? "text-secondary" : "text-fg-4"}`}>
+                          {translate(model.enabled ? "켜짐" : "꺼짐")}
+                        </span>
+                        {details.length === 0 ? null : (
+                          <span className="shrink-0 text-figure text-fg-4">{details.map(translate).join(" · ")}</span>
+                        )}
                       </li>
                     );
                   })}
