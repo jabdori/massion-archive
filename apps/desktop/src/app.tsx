@@ -3762,6 +3762,14 @@ function BudgetSurface({ service }: { service: DesktopService }) {
     };
   }, [service]);
 
+  const reloadSettings = () => {
+    void service
+      .loadSettings()
+      .then(setSettings)
+      .catch((cause: unknown) => {
+        setError(surfaceErrorMessage(cause, "예산을 불러오지 못했습니다."));
+      });
+  };
   const routes = settings ? projectModelRoutes(settings.routes, settings.catalog) : [];
   const selected = routes.find((route) => route.routeId === selectedId);
   const all = attempts ?? [];
@@ -3872,6 +3880,7 @@ function BudgetSurface({ service }: { service: DesktopService }) {
         </header>
 
         <div className="min-h-0 overflow-y-auto">
+          {selected ? <RouteLimit onSaved={reloadSettings} route={selected} service={service} /> : null}
           {attemptError ? (
             <div className="px-5 py-3">
               <SurfaceError message={attemptError} />
@@ -4355,6 +4364,103 @@ function DetailRow({ children, label }: { children: ReactNode; label: string }) 
  * 한 행. 게이지가 가리키는 것은 예산이 아니라 «가장 가까운 알림»입니다 — 알림이 없으면
  * 잴 기준이 없으므로 막대도 그리지 않습니다. 차단을 넘겼으면 danger, 알림만 넘겼으면 gate.
  */
+/**
+ * 선택한 경로의 **실제로 강제되는** 한도입니다. 라우터가 예약 시점에
+ * `spent + estimated > total`이면 막으므로, 이 숫자는 화면 상태가 아니라 실행 경계입니다.
+ *
+ * 옆의 알림 임계값과 다릅니다 — 그쪽은 아직 저장소가 없어 표면을 떠나면 사라집니다.
+ * 둘을 한 목록에 섞으면 어느 것이 실제로 막는지 알 수 없게 됩니다.
+ */
+function RouteLimit({
+  onSaved,
+  route,
+  service,
+}: {
+  onSaved: () => void;
+  route: ModelRouteView;
+  service: DesktopService;
+}) {
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState("");
+  const current = route.totalBudgetMicros;
+  const remaining = Math.max(0, current - route.spentMicros);
+
+  const save = () => {
+    const dollars = Number(draft);
+    if (!Number.isFinite(dollars) || dollars < 0) {
+      setFailure("한도는 0 이상의 숫자여야 합니다.");
+      return;
+    }
+    setFailure("");
+    setSaving(true);
+    void service
+      .setRouteBudget({
+        routeId: route.routeId,
+        requestBudgetMicros: route.requestBudgetMicros,
+        totalBudgetMicros: Math.round(dollars * 1_000_000),
+      })
+      .then(() => {
+        setDraft("");
+        onSaved();
+      })
+      .catch((cause: unknown) => {
+        setFailure(surfaceErrorMessage(cause, "한도를 저장하지 못했습니다."));
+      })
+      .finally(() => {
+        setSaving(false);
+      });
+  };
+
+  return (
+    <section aria-label={translate("경로 한도")} className="border-b border-border px-5 py-3">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <span className="text-[13px] text-secondary">{translate("한도")}</span>
+        <span className="font-mono text-[13px] tabular-nums text-primary">
+          {current === 0 ? translate("없음") : costText(current)}
+        </span>
+        {current === 0 ? null : (
+          <span className="font-mono text-[12px] tabular-nums text-muted">
+            {translate("남음")} {costText(remaining)}
+          </span>
+        )}
+        <form
+          aria-label={translate("경로 한도 변경")}
+          className="ml-auto flex items-center gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            save();
+          }}
+        >
+          <Input
+            aria-label={translate("새 한도(달러)")}
+            className="h-7 w-28"
+            disabled={saving}
+            inputMode="decimal"
+            onChange={(event) => {
+              setDraft(event.target.value);
+            }}
+            placeholder="0.00"
+            value={draft}
+          />
+          <Button disabled={saving || draft.trim().length === 0} size="sm" type="submit" variant="outline">
+            {translate(saving ? "저장 중" : "한도 저장")}
+          </Button>
+        </form>
+      </div>
+      {/* 라우터가 실제로 막는 값이므로 무엇이 일어나는지 한 줄로 말합니다. */}
+      <p className="mt-1 text-[11px] text-muted">
+        {translate("한도를 넘으면 이 경로의 새 호출이 차단됩니다. 지금까지 쓴 금액은 그대로 남습니다.")}
+      </p>
+      {failure ? (
+        <p className="mt-1 text-[11px] text-danger" role="alert">
+          {translate(failure)}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 function RouteBudgetRow({ crossed, label, spent }: { crossed: readonly BudgetAlert[]; label: string; spent: number }) {
   const blocked = crossed.some((alert) => alert.action === "block");
   return (

@@ -91,7 +91,7 @@ export interface ApplicationDomainDependencies {
     ProviderService,
     "registerProvider" | "removeProvider" | "registerEndpoint" | "addCredential" | "revokeCredential"
   >;
-  readonly router?: Pick<ModelRouter, "registerModel" | "createRoute" | "addCandidate">;
+  readonly router?: Pick<ModelRouter, "registerModel" | "createRoute" | "addCandidate" | "setRouteBudget">;
   readonly optimization?: {
     readonly evaluations: Pick<
       ModelOptimizationStore,
@@ -1788,6 +1788,31 @@ function registerRouter(registry: ApplicationCommandRegistry, dependencies: Appl
         return result(command, {
           resource: { type: "ModelProfile", id: registered.profile.model_profile_id },
           data: { modelProfileId: registered.profile.model_profile_id, modelId: registered.profile.model_id },
+        });
+      },
+    });
+    register(registry, {
+      operation: "router.route.budget.set",
+      requiredScopes: ["router:write"],
+      allowedRoles: ["owner", "admin"],
+      recovery: "replay-domain",
+      validate: (value) => payload(value, ["routeId", "requestBudgetMicros", "totalBudgetMicros"], ["routeId"]),
+      async handle(context, command, value) {
+        const changed = await dependencies.router?.setRouteBudget(context, {
+          commandId: command.commandId,
+          routeId: string(value.routeId, "routeId"),
+          requestBudgetMicros: Number(value.requestBudgetMicros ?? 0),
+          totalBudgetMicros: Number(value.totalBudgetMicros ?? 0),
+        });
+        if (!changed) throw new Error("Model Router가 구성되지 않았습니다");
+        return result(command, {
+          resource: { type: "ModelRoute", id: changed.route.route_id },
+          data: {
+            routeId: changed.route.route_id,
+            requestBudgetMicros: changed.route.request_budget_micros,
+            totalBudgetMicros: changed.route.total_budget_micros,
+            spentMicros: changed.route.spent_micros,
+          },
         });
       },
     });

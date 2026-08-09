@@ -2509,6 +2509,22 @@ describe("Application desktop service", () => {
     );
   });
 
+  it("경로 예산 한도는 지출을 리셋하지 않는 전용 명령으로 보낸다", async () => {
+    const native = transport();
+    const service = createApplicationDesktopService(native, { createId: () => "request-0001" });
+
+    await service.setRouteBudget({ routeId: "route-1", requestBudgetMicros: 1_000, totalBudgetMicros: 50_000 });
+
+    // router.route.configure를 쓰면 새 route_id가 생기고 spent_micros가 0으로 돌아갑니다.
+    // 한도를 못 거는 것보다 나쁜 상태라 전용 명령을 씁니다.
+    expect(native.command).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: "router.route.budget.set",
+        payload: { routeId: "route-1", requestBudgetMicros: 1_000, totalBudgetMicros: 50_000 },
+      }),
+    );
+  });
+
   it("조직 편성은 Organization Version을 낙관적 잠금으로 실어 typed command로 보낸다", async () => {
     const native = transport();
     const service = createApplicationDesktopService(native, { createId: () => "request-0001" });

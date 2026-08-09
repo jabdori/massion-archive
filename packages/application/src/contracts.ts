@@ -815,6 +815,20 @@ export interface ApplicationCommandMapV1 {
     readonly payload: { readonly suggestionId: string; readonly expectedRevision: number; readonly reason: string };
   };
   /**
+   * 이미 있는 경로의 예산 한도. 지출과 후보는 그대로 두고 한도만 바꿉니다.
+   *
+   * `router.route.configure`를 여기 쓰지 않습니다 — 그것은 이름과 달리 새 경로를 만들고
+   * `spent_micros`를 0으로 리셋하므로, 화면의 「한도 설정」에 연결하면 경로가 중복되고 누적
+   * 지출이 사라집니다. 라우터는 예약 시점에 `spent + estimated > total`로 이미 차단합니다.
+   */
+  readonly "router.route.budget.set": {
+    readonly payload: {
+      readonly routeId: string;
+      readonly requestBudgetMicros: number;
+      readonly totalBudgetMicros: number;
+    };
+  };
+  /**
    * 조직 편성. `kind`가 결정하는 판별 합집합이며 도메인의 `OrganizationCommand`를 그대로 투영합니다.
    *
    * 헌법 §9.1은 조직 화면이 「읽기 전용」인 이유로 이 명령이 계약에 없다는 것을 들었습니다.

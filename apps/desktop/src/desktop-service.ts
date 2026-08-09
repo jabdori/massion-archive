@@ -256,6 +256,8 @@ export interface ModelRouteView {
   readonly enabled: boolean;
   readonly spentMicros: number;
   readonly totalBudgetMicros: number;
+  /** 호출 한 번의 상한. 한도를 바꿀 때 이 값을 함께 보내야 지워지지 않습니다. */
+  readonly requestBudgetMicros: number;
   /** 이 경로가 쓸 수 있는 모델 수. 0이면 경로가 있어도 실행되지 않습니다. */
   readonly candidateCount: number;
   /** 우선순위가 가장 높은 후보의 모델 id. 이 경로가 실제로 부르는 모델입니다. */
@@ -1443,6 +1445,15 @@ export interface DesktopService {
   disableCredential(credentialId: string, expectedVersion: number): Promise<void>;
   registerModel(input: Record<string, unknown>): Promise<void>;
   configureRoute(input: Record<string, unknown>): Promise<void>;
+  /**
+   * 이미 있는 경로의 예산 한도. 지출과 후보는 그대로 두고 한도만 바꿉니다.
+   * `configureRoute`는 새 경로를 만들고 지출을 0으로 리셋하므로 한도 변경에 쓰면 안 됩니다.
+   */
+  setRouteBudget(input: {
+    readonly routeId: string;
+    readonly requestBudgetMicros: number;
+    readonly totalBudgetMicros: number;
+  }): Promise<void>;
   addRouteCandidate(input: Record<string, unknown>): Promise<void>;
   configureSubscriptionPolicy(input: Record<string, unknown>): Promise<void>;
   searchRegistry(query: string, limit?: number): Promise<unknown>;
@@ -1854,6 +1865,9 @@ export function createApplicationDesktopService(
     },
     async configureRoute(input) {
       await command("router.route.configure", input);
+    },
+    async setRouteBudget(input) {
+      await client.command("router.route.budget.set", input);
     },
     async addRouteCandidate(input) {
       await command("router.candidate.add", input);
@@ -2722,6 +2736,7 @@ const fixtureSettings: SettingsView = {
       equivalenceGroup: "reasoning",
       spentMicros: fixtureSpent("route-reasoning"),
       totalBudgetMicros: 2_000_000,
+      requestBudgetMicros: 0,
       enabled: true,
     },
     {
@@ -2733,6 +2748,7 @@ const fixtureSettings: SettingsView = {
       equivalenceGroup: "utility",
       spentMicros: fixtureSpent("route-utility"),
       totalBudgetMicros: 500_000,
+      requestBudgetMicros: 0,
       enabled: true,
     },
     {
@@ -2744,6 +2760,7 @@ const fixtureSettings: SettingsView = {
       equivalenceGroup: "embedding",
       spentMicros: fixtureSpent("route-embedding"),
       totalBudgetMicros: 0,
+      requestBudgetMicros: 0,
       enabled: false,
     },
   ],
@@ -3637,6 +3654,11 @@ export function createFixtureDesktopService(): DesktopService {
           verified: input.verified,
           enabled: true,
         });
+      }),
+    setRouteBudget: (input) =>
+      fixturePromise(() => {
+        // 브라우저 개발 화면에는 라우터 원장이 없습니다. 한도를 바꾼 척하면 게이지가 거짓말을 합니다.
+        throw new Error(`Fixture는 경로 예산 변경을 구성하지 않았습니다: ${input.routeId}`);
       }),
     configureRoute: (input) =>
       fixturePromise(() => {
@@ -5278,6 +5300,7 @@ export function projectModelRoutes(routes: unknown, catalog: unknown): readonly 
         enabled: bool(row, "enabled"),
         spentMicros: num(row, "spentMicros"),
         totalBudgetMicros: num(row, "totalBudgetMicros"),
+        requestBudgetMicros: num(row, "requestBudgetMicros"),
         candidateCount: mine.length,
         ...(primary === undefined ? {} : { primaryModelId: str(primary, "modelId") }),
         ...(primary === undefined ? {} : { primaryVerified: bool(primary, "verified") }),

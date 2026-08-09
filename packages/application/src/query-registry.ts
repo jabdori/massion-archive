@@ -2747,6 +2747,8 @@ export function registerApplicationQueries(
           equivalenceGroup: route.equivalence_group,
           spentMicros: route.spent_micros,
           totalBudgetMicros: route.total_budget_micros,
+          // 한도를 바꿀 때 함께 보내야 요청 상한이 지워지지 않습니다.
+          requestBudgetMicros: route.request_budget_micros,
           enabled: route.enabled,
         })),
     });

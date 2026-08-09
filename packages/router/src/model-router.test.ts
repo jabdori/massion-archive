@@ -2546,4 +2546,56 @@ describe("Model Route simulation과 reservation", () => {
     expect(diagnostic.routes.find((item) => item.routeKind === "embedding")?.recovery).toContain("Candidate");
     expect(diagnostic.routes.find((item) => item.dataPolicy === "local-private")?.recovery).toContain("local");
   });
+
+  it("경로 예산 변경은 지출과 route_id를 보존하고 차단에 곧바로 반영된다", async () => {
+    const created = await route();
+    const reserved = await router.reserve(context, {
+      commandId: crypto.randomUUID(),
+      routeName: created.name,
+      estimatedTokens: 10,
+      estimatedCostMicros: 5_000,
+    });
+    await router.reportSuccess(context, {
+      commandId: crypto.randomUUID(),
+      attemptId: reserved.attempt.attempt_id,
+      actualInputTokens: 5,
+      actualOutputTokens: 5,
+      actualCostMicros: 5_000,
+    });
+
+    const changed = await router.setRouteBudget(context, {
+      commandId: crypto.randomUUID(),
+      routeId: created.route_id,
+      requestBudgetMicros: 1_000,
+      totalBudgetMicros: 6_000,
+    });
+
+    // createRoute를 재사용하면 새 route_id가 생기고 spent_micros가 0으로 돌아갑니다.
+    // 한도만 바꾸는 것이 사람이 기대하는 것이고, 누적 지출은 남아야 합니다.
+    expect(changed.route.route_id).toBe(created.route_id);
+    expect(changed.route.spent_micros).toBe(5_000);
+    expect(changed.route.total_budget_micros).toBe(6_000);
+    // 남은 여유는 1,000이므로 그보다 큰 예약은 라우터가 막습니다.
+    await expect(
+      router.reserve(context, {
+        commandId: crypto.randomUUID(),
+        routeName: created.name,
+        estimatedTokens: 10,
+        estimatedCostMicros: 2_000,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("음수 예산은 거부한다", async () => {
+    const created = await route();
+
+    await expect(
+      router.setRouteBudget(context, {
+        commandId: crypto.randomUUID(),
+        routeId: created.route_id,
+        requestBudgetMicros: -1,
+        totalBudgetMicros: 10,
+      }),
+    ).rejects.toThrow("Route budget");
+  });
 });

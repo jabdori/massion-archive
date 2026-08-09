@@ -1065,6 +1065,58 @@ export class ModelRouter {
     });
   }
 
+  /**
+   * 이미 있는 경로의 예산 한도를 바꿉니다.
+   *
+   * `createRoute`가 아니라 이 명령이 필요한 이유: `createRoute`는 이름과 달리 **새 route_id를 만들고
+   * `spent_micros`를 0으로 리셋**합니다. 그것을 화면의 「한도 설정」에 연결하면 경로가 중복 생성되고
+   * 누적 지출이 사라져, 한도를 못 거는 것보다 나쁜 상태가 됩니다.
+   *
+   * 지출과 후보는 건드리지 않습니다. 한도만 바꾸는 것이 사람이 기대하는 것이고, 라우터는 예약
+   * 시점에 `spent_micros + estimated > total_budget_micros`로 이미 차단합니다.
+   */
+  public async setRouteBudget(
+    context: TenantContext,
+    input: {
+      readonly commandId: string;
+      readonly routeId: string;
+      readonly requestBudgetMicros: number;
+      readonly totalBudgetMicros: number;
+    },
+    executor: QueryExecutor = this.database,
+  ): Promise<{ route: ModelRoute; audit: RouterAuditEvent }> {
+    if (
+      !Number.isFinite(input.requestBudgetMicros) ||
+      !Number.isFinite(input.totalBudgetMicros) ||
+      input.requestBudgetMicros < 0 ||
+      input.totalBudgetMicros < 0
+    ) {
+      throw new Error("Route budget이 유효하지 않습니다");
+    }
+    return await this.command(
+      context,
+      input.commandId,
+      "model_route_budget_set",
+      canonicalJson(input),
+      async (tx) => {
+        const route = await this.routeById(tx, context.organizationId, input.routeId);
+        const [routes] = await tx.query<[ModelRoute[]]>(
+          "UPDATE model_route SET request_budget_micros = $request_budget, total_budget_micros = $total_budget, updated_at = time::now() WHERE organization_id = $organization_id AND route_id = $route_id RETURN AFTER;",
+          {
+            organization_id: context.organizationId,
+            route_id: route.route_id,
+            request_budget: input.requestBudgetMicros,
+            total_budget: input.totalBudgetMicros,
+          },
+        );
+        const updated = routes[0];
+        if (!updated) throw new Error("Model Route 예산 변경 결과가 없습니다");
+        return { route: updated };
+      },
+      { executor },
+    );
+  }
+
   public async addCandidate(
     context: TenantContext,
     input: AddCandidateInput,
