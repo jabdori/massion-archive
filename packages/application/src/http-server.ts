@@ -171,6 +171,7 @@ export interface ApplicationHttpDependencies {
     dispatch(context: TenantContext, scopes: readonly string[], input: unknown): Promise<{ readonly outcome?: string }>;
   };
   readonly events: {
+    recover?(context: TenantContext): Promise<boolean>;
     read(
       context: TenantContext,
       input: { readonly after: number; readonly limit: number },
@@ -681,7 +682,11 @@ export class ApplicationHttpServer {
       if (!hasScope(access.scopes, "event:read")) throw this.scope();
       this.acceptJson(request);
       const after = parseEventCursor(undefined, url.searchParams.get("after") ?? undefined);
-      sendJson(response, 200, await this.readEvents(access.context, { after, limit: 1000 }));
+      let batch = await this.readEvents(access.context, { after, limit: 1000 });
+      if (await this.dependencies.events.recover?.(access.context)) {
+        batch = await this.readEvents(access.context, { after, limit: 1000 });
+      }
+      sendJson(response, 200, batch);
       return;
     }
     const fixedQueries: Readonly<Record<string, string>> = {
@@ -963,6 +968,9 @@ export class ApplicationHttpServer {
     this.streams.add(response);
     try {
       let batch = await this.readEvents(context, { after: cursor, limit: 1000 });
+      if (this.streamClosed(request, response)) return;
+      await this.dependencies.events.recover?.(context);
+      if (this.streamClosed(request, response)) return;
       response.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",

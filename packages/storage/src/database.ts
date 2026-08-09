@@ -1,3 +1,5 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 import { createNodeEngines } from "@surrealdb/node";
 import { createRemoteEngines, DateTime, isRetryableConflict, Surreal, type SurrealTransaction } from "surrealdb";
 
@@ -88,8 +90,11 @@ export class MassionDatabase implements QueryExecutor, AsyncDisposable {
         await transaction.commit();
         return result;
       } catch (error) {
-        await cancelBestEffort(transaction);
+        // 서버가 이미 버린 transaction을 다시 cancel하면 같은 not-found 경고만 한 번 더 만듭니다.
+        if (!isLostTransaction(error)) await cancelBestEffort(transaction);
         if (!isCompatibleRetryableConflict(error) || attempt >= 3) throw error;
+        // 즉시 재시도하면 경쟁 상대의 다음 transaction과 계속 같은 시점에 충돌할 수 있습니다.
+        await delay(2 ** attempt);
       }
     }
   }

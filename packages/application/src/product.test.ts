@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { PolicyStore } from "@massion/governance";
 import { IdentityService, OrganizationService } from "@massion/identity";
@@ -335,6 +336,7 @@ describe("ApplicationProduct", () => {
     const identities = await IdentityService.create(database);
     const organizations = await OrganizationService.create(database);
     const graph = await OrganizationGraphService.create(database, organizations);
+    const works = await WorkService.create(database, organizations, graph);
     const policies = await PolicyStore.create(database, organizations);
     const stages = ["intake", "context-strategy", "evidence", "delivery", "assurance", "records"] as const;
     const executors = Object.fromEntries(
@@ -367,6 +369,7 @@ describe("ApplicationProduct", () => {
     })) as {
       access: { token: string };
       context: { userId: string; organizationId: string; membershipId: string; role: "owner" };
+      coreOffice: { version: { version_id: string } };
     };
     const client = new ApplicationHttpClient({ baseUrl: endpoint.url, token: initialized.access.token });
     await expect(client.status()).resolves.toMatchObject({ data: { status: "ready" } });
@@ -438,7 +441,29 @@ describe("ApplicationProduct", () => {
     await expect(product.metrics.aggregate(initialized.context, "application_run_total")).resolves.toEqual([
       { dimensions: { stage: "terminal", result: "completed" }, value: 1 },
     ]);
-    await expect(client.events()).resolves.toMatchObject({ events: expect.any(Array) });
+    const streamProjection = vi.spyOn(product.projector, "projectPending");
+    const streamAbort = new AbortController();
+    const stream = client.streamEvents(0, streamAbort.signal);
+    await expect(stream.next()).resolves.toMatchObject({ done: false });
+    await delay(250);
+    expect(streamProjection).toHaveBeenCalledOnce();
+    streamAbort.abort();
+    await stream.return(undefined).catch(() => undefined);
+    streamProjection.mockRestore();
+    const pendingWork = await works.createWork(initialized.context, {
+      commandId: "product-event-recovery-work-0001",
+      text: "일반 event GET 복구 검증",
+      surface: "test",
+      organizationVersionId: initialized.coreOffice.version.version_id,
+    });
+    await expect(client.events()).resolves.toMatchObject({
+      events: expect.arrayContaining([
+        expect.objectContaining({
+          type: "work.created",
+          resource: expect.objectContaining({ type: "Work", id: pendingWork.work.work_id }),
+        }),
+      ]),
+    });
   });
 
   it("run.resume은 background retry를 한 번 예약하고 같은 command를 accepted로 replay한다", async () => {

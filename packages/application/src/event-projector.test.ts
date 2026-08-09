@@ -2,7 +2,7 @@ import { IdentityService, OrganizationService, type TenantContext } from "@massi
 import { OrganizationGraphService } from "@massion/organization";
 import { createDatabase, type MassionDatabase, type QueryExecutor } from "@massion/storage";
 import { WorkService } from "@massion/work";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApplicationEventProjector } from "./event-projector.js";
 import { ApplicationEventStore } from "./event-store.js";
@@ -42,7 +42,10 @@ describe("ApplicationEventProjector", () => {
       organizationVersionId: bootstrapped.version.version_id,
     });
 
+    const databaseQuery = vi.spyOn(database, "query");
     expect(await projector.projectPending(context, 10)).toBe(2);
+    expect(databaseQuery.mock.calls.filter(([query]) => query.includes("FROM application_outbox")).length).toBe(1);
+    databaseQuery.mockRestore();
     expect(await projector.projectPending(context, 10)).toBe(0);
     const projected = await events.read(context, { after: 0, limit: 10 });
     expect(projected.events.map((event) => [event.sequence, event.type])).toEqual([
@@ -90,6 +93,65 @@ describe("ApplicationEventProjector", () => {
     expect(new Set(projected.map((event) => event.eventId))).toHaveProperty("size", 4);
   });
 
+  it("pending outbox가 없으면 transaction을 열지 않는다", async () => {
+    let transactionCalls = 0;
+    const database = {
+      async query<R = unknown[]>(): Promise<R> {
+        return [[]] as R;
+      },
+      async transaction(): Promise<never> {
+        transactionCalls += 1;
+        throw new Error("빈 outbox에서 transaction을 열면 안 됩니다");
+      },
+    } as unknown as MassionDatabase;
+    const organizations = {
+      async verifyTenantContext(): Promise<void> {},
+    } as unknown as OrganizationService;
+    const isolated = Reflect.construct(ApplicationEventProjector, [
+      database,
+      organizations,
+    ]) as ApplicationEventProjector;
+    const isolatedContext: TenantContext = {
+      userId: "projector-idle-user",
+      organizationId: "projector-idle-organization",
+      membershipId: "projector-idle-membership",
+      role: "owner",
+    };
+
+    await expect(isolated.projectPending(isolatedContext, 10)).resolves.toBe(0);
+    expect(transactionCalls).toBe(0);
+  });
+
+  it("storage가 소유한 transaction 재시도를 projector에서 중첩하지 않는다", async () => {
+    const failure = new Error("projection transaction failure");
+    let transactionCalls = 0;
+    const database = {
+      async query<R = unknown[]>(): Promise<R> {
+        return [[{ outbox_id: "projector-retry-outbox" }]] as R;
+      },
+      async transaction(): Promise<never> {
+        transactionCalls += 1;
+        throw failure;
+      },
+    } as unknown as MassionDatabase;
+    const organizations = {
+      async verifyTenantContext(): Promise<void> {},
+    } as unknown as OrganizationService;
+    const isolated = Reflect.construct(ApplicationEventProjector, [
+      database,
+      organizations,
+    ]) as ApplicationEventProjector;
+    const isolatedContext: TenantContext = {
+      userId: "projector-retry-user",
+      organizationId: "projector-retry-organization",
+      membershipId: "projector-retry-membership",
+      role: "owner",
+    };
+
+    await expect(isolated.projectPending(isolatedContext, 10)).rejects.toBe(failure);
+    expect(transactionCalls).toBe(1);
+  });
+
   it("같은 조직의 투영은 첫 transaction이 끝나기 전 두 번째 transaction에 진입하지 않는다", async () => {
     let transactionCalls = 0;
     let firstTransactionEntered!: () => void;
@@ -106,6 +168,9 @@ describe("ApplicationEventProjector", () => {
       },
     };
     const database = {
+      async query<R = unknown[]>(): Promise<R> {
+        return [[{ outbox_id: "projector-serialization-outbox" }]] as R;
+      },
       async transaction<T>(operation: (transaction: QueryExecutor) => Promise<T>): Promise<T> {
         transactionCalls += 1;
         if (transactionCalls === 1) {

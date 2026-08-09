@@ -35,6 +35,9 @@ describe("ApplicationHttpServer", () => {
   let baseUrl: string;
   let events: ApplicationEventV1[];
   let calls: string[];
+  let eventReads: number;
+  let eventRecoveries: number;
+  let recoverEvents: () => boolean | Promise<boolean>;
   let bootstrapInitialize: () => Promise<unknown>;
   let bootstrapNow: number;
   let bootstrapConsumed: ReturnType<typeof vi.fn<(reason: ApplicationBootstrapDisposalReason) => Promise<void>>>;
@@ -45,6 +48,9 @@ describe("ApplicationHttpServer", () => {
   beforeEach(async () => {
     events = [];
     calls = [];
+    eventReads = 0;
+    eventRecoveries = 0;
+    recoverEvents = () => false;
     bootstrapNow = Date.now();
     bootstrapConsumed = vi.fn(async () => {});
     bootstrapCleanupError = vi.fn<(reason: ApplicationBootstrapDisposalReason) => void>();
@@ -96,7 +102,12 @@ describe("ApplicationHttpServer", () => {
         },
       },
       events: {
+        async recover() {
+          eventRecoveries += 1;
+          return await recoverEvents();
+        },
         async read(_context, input) {
+          eventReads += 1;
           if (input.after === 99) throw new ApplicationEventCursorExpiredError(100);
           const selected = events.filter((item) => item.sequence > input.after).slice(0, input.limit);
           return { events: selected, cursor: selected.at(-1)?.sequence ?? input.after };
@@ -550,6 +561,53 @@ describe("ApplicationHttpServer", () => {
     await reader.cancel().catch(() => undefined);
   });
 
+  it("일반 event GET은 cursor를 먼저 검증하고 recovery가 만든 event를 같은 응답에 포함한다", async () => {
+    recoverEvents = () => {
+      events.push(event(1));
+      return true;
+    };
+
+    const response = await fetch(`${baseUrl}/api/v1/events`, {
+      headers: { authorization: "Bearer test-token", accept: "application/json" },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ events: [expect.objectContaining({ sequence: 1 })] });
+    expect(eventReads).toBe(2);
+    expect(eventRecoveries).toBe(1);
+  });
+
+  it("일반 event GET의 만료 cursor는 recovery를 실행하지 않는다", async () => {
+    const response = await fetch(`${baseUrl}/api/v1/events?after=99`, {
+      headers: { authorization: "Bearer test-token", accept: "application/json" },
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ operatorCode: "APP_EVENT_CURSOR_EXPIRED" });
+    expect(eventReads).toBe(1);
+    expect(eventRecoveries).toBe(0);
+  });
+
+  it("SSE 시작 때만 outbox를 복구하고 idle poll에서는 projection을 반복하지 않는다", async () => {
+    const invalid = await fetch(`${baseUrl}/api/v1/events/stream`, {
+      headers: { authorization: "Bearer test-token", accept: "application/json" },
+    });
+    expect(invalid.status).toBe(400);
+    expect(eventRecoveries).toBe(0);
+
+    const abort = new AbortController();
+    const response = await fetch(`${baseUrl}/api/v1/events/stream`, {
+      headers: { authorization: "Bearer test-token", accept: "text/event-stream" },
+      signal: abort.signal,
+    });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(eventReads).toBeGreaterThanOrEqual(3));
+
+    expect(eventRecoveries).toBe(1);
+    abort.abort();
+    await response.body?.cancel().catch(() => undefined);
+  });
+
   it("SSE header를 열기 전에 만료 cursor를 공개 409 오류로 반환한다", async () => {
     const response = await fetch(`${baseUrl}/api/v1/events/stream?after=99`, {
       headers: { authorization: "Bearer test-token", accept: "text/event-stream" },
@@ -562,7 +620,119 @@ describe("ApplicationHttpServer", () => {
       operatorCode: "APP_EVENT_CURSOR_EXPIRED",
       retryable: true,
     });
+    expect(eventRecoveries).toBe(0);
   });
+
+  it.each([
+    { blockedStage: "read" as const, termination: "abort" as const },
+    { blockedStage: "recover" as const, termination: "reject" as const },
+  ])(
+    "maxStreams는 initial $blockedStage 대기 중 추가 stream을 거부하고 $termination 뒤 slot을 복구한다",
+    async ({ blockedStage, termination }) => {
+      await server.close();
+      let reads = 0;
+      let recoveries = 0;
+      let releaseStage!: () => void;
+      let rejectStage!: (error: Error) => void;
+      let reportStageEntered!: () => void;
+      let reportStageExited!: () => void;
+      let blockFirst = true;
+      const stageGate = new Promise<void>((resolve, reject) => {
+        releaseStage = resolve;
+        rejectStage = reject;
+      });
+      const stageEntered = new Promise<void>((resolve) => {
+        reportStageEntered = resolve;
+      });
+      const stageExited = new Promise<void>((resolve) => {
+        reportStageExited = resolve;
+      });
+      const gated = async (): Promise<void> => {
+        blockFirst = false;
+        reportStageEntered();
+        try {
+          await stageGate;
+        } finally {
+          reportStageExited();
+        }
+      };
+      server = new ApplicationHttpServer(
+        {
+          auth: {
+            authenticateAccess: async () => ({ context, tokenId: "stream-limit-token", scopes: ["application:*"] }),
+          },
+          queries: { query: async () => ({}) },
+          commands: { dispatch: async () => ({}) },
+          events: {
+            async read(_context, input) {
+              reads += 1;
+              if (blockedStage === "read" && blockFirst) await gated();
+              return { events: [], cursor: input.after };
+            },
+            async recover() {
+              recoveries += 1;
+              if (blockedStage === "recover" && blockFirst) await gated();
+              return false;
+            },
+          },
+        },
+        { maxStreams: 1, pollMs: 5, heartbeatMs: 20 },
+      );
+      baseUrl = (await server.start()).url;
+      const firstAbort = new AbortController();
+      const firstRequest = fetch(`${baseUrl}/api/v1/events/stream`, {
+        headers: { authorization: "Bearer test-token", accept: "text/event-stream" },
+        signal: firstAbort.signal,
+      }).then(
+        (response) => ({ response }),
+        (error: unknown) => ({ error }),
+      );
+      await stageEntered;
+      const ownedCounts = { reads, recoveries };
+
+      const overflow = await fetch(`${baseUrl}/api/v1/events/stream`, {
+        headers: { authorization: "Bearer test-token", accept: "text/event-stream" },
+      });
+      expect(overflow.status).toBe(429);
+      expect({ reads, recoveries }).toEqual(ownedCounts);
+
+      if (termination === "abort") {
+        firstAbort.abort();
+        await expect(firstRequest).resolves.toHaveProperty("error");
+        await delay(20);
+        const abortedOverflowAbort = new AbortController();
+        const abortedOverflow = await fetch(`${baseUrl}/api/v1/events/stream`, {
+          headers: { authorization: "Bearer test-token", accept: "text/event-stream" },
+          signal: abortedOverflowAbort.signal,
+        });
+        const abortedOverflowStatus = abortedOverflow.status;
+        abortedOverflowAbort.abort();
+        await abortedOverflow.body?.cancel().catch(() => undefined);
+        expect(abortedOverflowStatus).toBe(429);
+        expect({ reads, recoveries }).toEqual(ownedCounts);
+        releaseStage();
+        await stageExited;
+        await delay(0);
+        expect(recoveries).toBe(0);
+      } else {
+        rejectStage(new Error("initial stream recovery failed"));
+        await expect(firstRequest).resolves.toMatchObject({ response: { status: 500 } });
+        await stageExited;
+        await delay(0);
+      }
+
+      const nextAbort = new AbortController();
+      const next = await fetch(`${baseUrl}/api/v1/events/stream`, {
+        headers: { authorization: "Bearer test-token", accept: "text/event-stream" },
+        signal: nextAbort.signal,
+      });
+      expect(next.status).toBe(200);
+      expect(reads).toBeGreaterThan(ownedCounts.reads);
+      expect(recoveries).toBe(ownedCounts.recoveries + 1);
+      nextAbort.abort();
+      await next.body?.cancel().catch(() => undefined);
+    },
+  );
 
   it("loopback 밖 bind는 trusted proxy allowlist 없이는 생성부터 거부한다", () => {
     expect(() => new ApplicationHttpServer({} as ApplicationHttpDependencies, { host: "0.0.0.0" })).toThrow(

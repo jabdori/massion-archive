@@ -83,11 +83,38 @@ describe("SurrealDB 연결", () => {
     expect(cancellations).toBe(4);
   });
 
+  it("현재 서버의 conflict 재시도는 event loop를 양보해 경쟁 transaction이 끝날 시간을 준다", async () => {
+    const conflict = new Error(
+      "Transaction conflict: Write conflict, retry the transaction. This transaction can be retried",
+    );
+    let attempts = 0;
+    let competingTransactionFinished = false;
+    setTimeout(() => {
+      competingTransactionFinished = true;
+    }, 0);
+    const database = new MassionDatabase({
+      beginTransaction: async () => {
+        attempts += 1;
+        return {
+          query: async () => [],
+          commit: async () => {
+            if (!competingTransactionFinished) throw conflict;
+          },
+          cancel: async () => undefined,
+        };
+      },
+    } as never);
+
+    await expect(database.transaction(async () => undefined)).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+  });
+
   it("서버가 transaction을 잃어버리면 새 transaction으로 다시 시도한다", async () => {
     // WebSocket transactions map이 비면 진행 중이던 transaction이 통째로 사라집니다.
     // 아무것도 commit되지 않은 상태이므로 재시도가 안전합니다.
     const lost = new Error("Transaction 019fd3cd-9f78-7723-a5cb-b94e420b0fd0 not found");
     let attempts = 0;
+    let cancellations = 0;
     const database = new MassionDatabase({
       beginTransaction: async () => {
         attempts += 1;
@@ -98,7 +125,9 @@ describe("SurrealDB 연결", () => {
             return [];
           },
           commit: async () => undefined,
-          cancel: async () => undefined,
+          cancel: async () => {
+            cancellations += 1;
+          },
         };
       },
     } as never);
@@ -110,6 +139,7 @@ describe("SurrealDB 연결", () => {
       }),
     ).resolves.toBe("완료");
     expect(attempts).toBe(2);
+    expect(cancellations).toBe(0);
   });
 
   it("transaction은 응답을 막을 수 있는 별도 session 수명주기를 만들지 않는다", async () => {

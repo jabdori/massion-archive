@@ -104,22 +104,29 @@ export class ApplicationEventProjector {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
       throw new Error("Application projection limit이 유효하지 않습니다");
     return await this.projectForOrganization(context.organizationId, async () => {
+      if (!(await this.hasPending(context.organizationId))) return 0;
       let projected = 0;
-      let transientFailures = 0;
       while (projected < limit) {
         try {
           if (!(await this.projectOne(context))) break;
           projected += 1;
-          transientFailures = 0;
         } catch (error) {
           if (error instanceof ProjectionHookError) throw error.original;
-          transientFailures += 1;
-          if (transientFailures >= 8) throw error;
-          await Promise.resolve();
+          throw error;
         }
       }
       return projected;
     });
+  }
+
+  private async hasPending(organizationId: string): Promise<boolean> {
+    return Boolean(
+      await first<{ readonly outbox_id: string; readonly occurred_at: unknown }>(
+        this.database,
+        "SELECT outbox_id, occurred_at FROM application_outbox WHERE organization_id = $organization_id AND state = 'pending' ORDER BY occurred_at ASC, outbox_id ASC LIMIT 1;",
+        { organization_id: organizationId },
+      ),
+    );
   }
 
   private async projectForOrganization<T>(organizationId: string, operation: () => Promise<T>): Promise<T> {

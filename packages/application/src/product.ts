@@ -261,8 +261,12 @@ export class ApplicationProduct implements AsyncDisposable {
           },
         },
         events: {
+          async recover(context) {
+            const product = productReference.current;
+            if (!product) throw new Error("Application product 조립이 완료되지 않았습니다");
+            return await product.drainProjection(context);
+          },
           async read(context, input) {
-            await projector.projectPending(context, PROJECTION_BATCH);
             return await events.read(context, input);
           },
         },
@@ -347,12 +351,7 @@ export class ApplicationProduct implements AsyncDisposable {
         let pending: TenantContext | undefined;
         while ((pending = this.pendingProjectionContexts.get(organizationId)) !== undefined) {
           this.pendingProjectionContexts.delete(organizationId);
-          // 상한까지 꽉 채웠다는 것은 남은 것이 있다는 뜻이므로 곧바로 다시 겁니다. 예전에는 한 번만
-          // 투영하고 멈춰, 다음 명령이 올 때까지 나머지가 그대로 남았습니다. 명령이 없는 idle에는
-          // 부를 사람이 없어 outbox가 영원히 수렴하지 않습니다(2026-08-09 관측: pending 27,032건,
-          // 40초 동안 0건 감소 — 비우려면 명령을 28번 보내야 했습니다).
-          if ((await this.projector.projectPending(pending, PROJECTION_BATCH)) === PROJECTION_BATCH)
-            this.pendingProjectionContexts.set(organizationId, pending);
+          await this.drainProjection(pending);
         }
       } finally {
         this.activeProjectionOrganizations.delete(organizationId);
@@ -360,6 +359,17 @@ export class ApplicationProduct implements AsyncDisposable {
         if (pending) this.scheduleProjection(pending);
       }
     });
+  }
+
+  private async drainProjection(context: TenantContext): Promise<boolean> {
+    let projected = 0;
+    let batch: number;
+    do {
+      batch = await this.projector.projectPending(context, PROJECTION_BATCH);
+      projected += batch;
+      // 상한까지 찼으면 다음 명령이나 poll을 기다리지 않고 같은 wake-up에서 계속 비웁니다.
+    } while (batch === PROJECTION_BATCH);
+    return projected > 0;
   }
 
   private track(operation: () => Promise<void>): void {
