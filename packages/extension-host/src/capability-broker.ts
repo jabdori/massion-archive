@@ -119,8 +119,11 @@ export interface ExtensionBrokerDependencies {
         readonly maxValueBytes: number;
       },
     ): Promise<unknown>;
-    get(context: TenantContext, input: { readonly installationId: string; readonly key: string }): Promise<unknown>;
-    list(context: TenantContext, input: { readonly installationId: string; readonly limit?: number }): Promise<unknown>;
+    // `put`은 객체 인자, `get`·`list`는 위치 인자입니다 — ExtensionStorageService의 실제 모양입니다.
+    // 예전에는 셋 다 객체 인자로 선언돼 있어, 이 broker와 실제 storage 서비스가 한 번도 함께
+    // 컴파일된 적이 없었습니다. 조립하려는 순간 타입 오류가 나는 선언이었습니다.
+    get(context: TenantContext, installationId: string, key: string): Promise<unknown>;
+    list(context: TenantContext, installationId: string, limit?: number): Promise<unknown>;
   };
 }
 
@@ -315,14 +318,8 @@ export class ExtensionCapabilityBroker {
       });
     }
     if (operation.kind === "storage.get") {
-      return await this.dependencies.storage.get(context, {
-        installationId: session.installationId,
-        key: operation.key,
-      });
+      return await this.dependencies.storage.get(context, session.installationId, operation.key);
     }
-    return await this.dependencies.storage.list(context, {
-      installationId: session.installationId,
-      ...(operation.limit === undefined ? {} : { limit: operation.limit }),
-    });
+    return await this.dependencies.storage.list(context, session.installationId, operation.limit);
   }
 }

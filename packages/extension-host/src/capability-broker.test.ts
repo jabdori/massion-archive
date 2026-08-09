@@ -7,6 +7,18 @@ import {
   type ExtensionBrokerDependencies,
   type ExtensionWorkerSessionView,
 } from "./capability-broker.js";
+import type { ExtensionStorageService } from "./storage.js";
+
+/*
+ * broker가 선언한 storage 의존과 실제 `ExtensionStorageService`가 같은 모양인지 컴파일 시점에 봅니다.
+ *
+ * 이 확인이 없던 동안 broker는 `get`·`list`를 객체 인자로 선언했고 서비스는 위치 인자를 썼습니다.
+ * broker가 생산에 조립된 적이 없어 아무도 몰랐고, 테스트도 `put`만 지나갔습니다. 조립하려는 순간
+ * 타입 오류가 나는 선언이 남아 있으면, 그 다음 사람이 "미구현"이 아니라 "고장"을 만납니다.
+ */
+type StorageDependency = ExtensionBrokerDependencies["storage"];
+const _storageServiceSatisfiesBroker: (service: ExtensionStorageService) => StorageDependency = (service) => service;
+void _storageServiceSatisfiesBroker;
 
 const context: TenantContext = {
   userId: "user-1",
