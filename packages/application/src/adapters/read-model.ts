@@ -38,6 +38,7 @@ interface OrganizationNodeRecord {
   readonly responsibility: string;
   readonly capabilities: readonly string[];
   readonly parent_handle?: string;
+  readonly builtin?: boolean;
   readonly status: string;
   readonly role: string;
   readonly scope: string;
@@ -660,7 +661,7 @@ export class SurrealApplicationReadModel implements ApplicationReadModel {
     );
     if (!versions[0]) throw new Error("Application snapshot OrganizationVersion을 찾을 수 없습니다");
     const [nodes] = await this.database.query<[OrganizationNodeRecord[]]>(
-      "SELECT node_id, handle, name, responsibility, capabilities, parent_handle, status, role, scope, work_id FROM organization_node WHERE organization_id = $organization_id AND (scope != 'work' OR status = 'active') ORDER BY handle ASC;",
+      "SELECT node_id, handle, name, responsibility, capabilities, parent_handle, status, role, scope, work_id, builtin FROM organization_node WHERE organization_id = $organization_id AND (scope != 'work' OR status = 'active') ORDER BY handle ASC;",
       { organization_id: context.organizationId },
     );
     return {
@@ -673,6 +674,7 @@ export class SurrealApplicationReadModel implements ApplicationReadModel {
         responsibility: node.responsibility,
         capabilities: node.capabilities,
         ...(node.parent_handle === undefined ? {} : { parentHandle: node.parent_handle }),
+        builtin: node.builtin === true,
         status: node.status,
         role: node.role,
         scope: organizationNodeScope(node.scope),

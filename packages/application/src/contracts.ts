@@ -352,6 +352,8 @@ export interface OrganizationNodeViewV1 {
   readonly capabilities: readonly string[];
   readonly scope: "persistent" | "work";
   readonly work_id?: string;
+  /** Core Office 여덟 노드. 도메인이 변경을 거부하므로 화면이 편성 조작을 미리 막습니다. */
+  readonly builtin: boolean;
 }
 
 export interface OrganizationGraphSnapshotV1 {

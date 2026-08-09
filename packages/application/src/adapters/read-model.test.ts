@@ -576,6 +576,7 @@ describe("SurrealApplicationReadModel", () => {
           capabilities: ["analysis", "statistics"],
           parentHandle: "delivery-coordination",
           scope: "work",
+          builtin: false,
           workId: created.work.work_id,
           role: "operator",
         },
@@ -592,6 +593,7 @@ describe("SurrealApplicationReadModel", () => {
           capabilities: ["review"],
           parentHandle: "assurance",
           scope: "work",
+          builtin: false,
           workId: created.work.work_id,
           role: "coordinator",
         },
@@ -770,6 +772,8 @@ describe("SurrealApplicationReadModel", () => {
       nodeId: expect.any(String),
       parentHandle: "representative",
       scope: "persistent",
+      // Core Office 여덟은 builtin입니다. 화면이 이 값으로 편성 조작을 미리 막습니다.
+      builtin: true,
     });
     expect(organization.nodes.find((node) => node.handle === "context-strategy")).not.toHaveProperty("workId");
     const snapshot = await new CollaborationGraphSnapshotProjector(readModel).project(context);

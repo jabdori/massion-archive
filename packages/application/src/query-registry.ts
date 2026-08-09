@@ -873,6 +873,7 @@ function organizationGraphSnapshotView(snapshot: CollaborationGraphSnapshot) {
       capabilities: node.capabilities,
       scope: node.scope,
       ...(node.workId === undefined ? {} : { work_id: node.workId }),
+      builtin: node.builtin,
     })),
   };
 }

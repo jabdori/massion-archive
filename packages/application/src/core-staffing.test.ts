@@ -336,6 +336,7 @@ describe("DynamicStaffingCoordinator", () => {
     expect(installedNode).toMatchObject({
       status: "active",
       scope: "work",
+      builtin: false,
       work_id: created.work.work_id,
       parent_handle: "delivery-coordination",
       role: "operator",

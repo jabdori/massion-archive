@@ -32,6 +32,7 @@ const readModel: ApplicationReadModel = {
         status: "active",
         role: "orchestrator",
         scope: "persistent",
+        builtin: false,
       },
       {
         nodeId: "node-strategy",
@@ -43,6 +44,7 @@ const readModel: ApplicationReadModel = {
         status: "active",
         role: "coordinator",
         scope: "persistent",
+        builtin: false,
       },
     ],
   }),
@@ -135,6 +137,7 @@ describe("ApplicationQueryRegistry", () => {
           handle: "strategy",
           parent_handle: "representative",
           scope: "persistent",
+          builtin: false,
         },
       ],
     });

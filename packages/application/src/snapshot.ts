@@ -27,6 +27,8 @@ export interface CollaborationGraphNode {
   readonly role: string;
   readonly scope: "persistent" | "work";
   readonly workId?: string;
+  /** Core Office 여덟 노드. 화면이 편성 조작을 미리 막는 데 씁니다. */
+  readonly builtin: boolean;
   readonly currentTaskId?: string;
   readonly currentWorkId?: string;
   readonly executionId?: string;
@@ -170,6 +172,7 @@ export class CollaborationGraphSnapshotProjector {
         name: node.name,
         responsibility: node.responsibility,
         capabilities: [...node.capabilities],
+        builtin: node.builtin,
         ...(node.parentHandle === undefined ? {} : { parentHandle: node.parentHandle }),
         status: node.status,
         role: node.role,

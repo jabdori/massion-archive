@@ -4432,17 +4432,20 @@ function RouteLimit({
             save();
           }}
         >
-          <Input
-            aria-label={translate("새 한도(달러)")}
-            className="h-7 w-28"
-            disabled={saving}
-            inputMode="decimal"
-            onChange={(event) => {
-              setDraft(event.target.value);
-            }}
-            placeholder="0.00"
-            value={draft}
-          />
+          {/* cn은 tailwind-merge가 아니라 이어붙이기라 Input base의 `w-full`을 className으로 못 덮습니다.
+              폭은 감싸는 칸이 잡습니다(lib/utils.ts의 주석이 정한 규칙). */}
+          <div className="w-28">
+            <Input
+              aria-label={translate("새 한도(달러)")}
+              disabled={saving}
+              inputMode="decimal"
+              onChange={(event) => {
+                setDraft(event.target.value);
+              }}
+              placeholder="0.00"
+              value={draft}
+            />
+          </div>
           <Button disabled={saving || draft.trim().length === 0} size="sm" type="submit" variant="outline">
             {translate(saving ? "저장 중" : "한도 저장")}
           </Button>

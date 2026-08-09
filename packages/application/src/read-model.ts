@@ -14,6 +14,11 @@ export interface ApplicationOrganizationNodeSource {
   readonly role: string;
   readonly scope: "persistent" | "work";
   readonly workId?: string;
+  /**
+   * Core Office 여덟 노드. 도메인이 변경·비활성화를 거부하므로 화면이 이 사실을 알아야
+   * 편성 조작을 막을 수 있습니다. 모르면 사람이 눌러 보고 오류로만 알게 됩니다.
+   */
+  readonly builtin: boolean;
 }
 
 export interface ApplicationOrganizationSource {

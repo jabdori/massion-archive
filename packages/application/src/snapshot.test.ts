@@ -35,6 +35,7 @@ function source(overrides: Partial<ApplicationReadModel> = {}): ApplicationReadM
           status: "active",
           role: "orchestrator",
           scope: "persistent",
+          builtin: false,
         },
         {
           nodeId: "node-strategy",
@@ -46,6 +47,7 @@ function source(overrides: Partial<ApplicationReadModel> = {}): ApplicationReadM
           status: "active",
           role: "coordinator",
           scope: "persistent",
+          builtin: false,
         },
       ],
     }),
@@ -147,6 +149,7 @@ describe("CollaborationGraphSnapshotProjector", () => {
       nodeId: "node-representative",
       handle: "representative",
       scope: "persistent",
+      builtin: false,
       currentTaskId: "task-snapshot",
       executionId: "execution-snapshot",
       modelRoute: "balanced",
@@ -157,6 +160,7 @@ describe("CollaborationGraphSnapshotProjector", () => {
       handle: "strategy",
       parentHandle: "representative",
       scope: "persistent",
+      builtin: false,
     });
     expect(snapshot.works[0]).toMatchObject({
       workId: "work-snapshot",
