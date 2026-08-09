@@ -1187,6 +1187,8 @@ export interface ProviderConnectionView {
   readonly credentialVersion?: number;
   /** 키를 지우려면 식별자가 필요합니다. 없으면 화면이 제거를 제안할 수 없습니다. */
   readonly credentialId?: string;
+  /** 제거는 낙관적 동시성을 쓰므로 credential의 현재 version이 필요합니다. */
+  readonly credentialRevision?: number;
   /** 이 Provider가 제공하는 모델 프로필입니다. */
   readonly models: readonly ProviderModelView[];
 }
@@ -5256,12 +5258,17 @@ function keyAuthKind(row: Record<string, unknown>): "api-key" | "subscription-ke
   return undefined;
 }
 
-export function projectProviderConnections(catalog: unknown, providers?: unknown): readonly ProviderConnectionView[] {
+export function projectProviderConnections(
+  catalog: unknown,
+  providers?: unknown,
+  registeredCredentials?: unknown,
+): readonly ProviderConnectionView[] {
   const source = catalog && typeof catalog === "object" ? (catalog as Record<string, unknown>) : {};
   const endpoints = rows(source.endpoints);
   const circuits = rows(source.circuits);
   const evidence = rows(source.verificationEvidence);
-  const credentials = rows(source.credentials);
+  // router.catalog는 자격을 담지 않습니다. router.credentials가 정본이고, 없을 때만 catalog를 봅니다.
+  const credentials = registeredCredentials === undefined ? rows(source.credentials) : rows(registeredCredentials);
   const models = rows(source.models);
   const connections = rows(source.providers)
     .filter((row) => typeof row.providerId === "string")
@@ -5309,6 +5316,7 @@ export function projectProviderConnections(catalog: unknown, providers?: unknown
           ? { credentialVersion: credential.secretVersion }
           : {}),
         ...(credential && typeof credential.credentialId === "string" ? { credentialId: credential.credentialId } : {}),
+        ...(credential && typeof credential.version === "number" ? { credentialRevision: credential.version } : {}),
       };
     });
   // 지원 목록은 앱에 고정된 상수라 서버를 기다릴 이유가 없습니다. 연결 상태만 나중에 채웁니다.

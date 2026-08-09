@@ -2590,6 +2590,9 @@ export function registerApplicationQueries(
           endpointId: credential.endpoint_id,
           label: credential.label,
           status: credential.status,
+          // 화면이 키를 지우려면 낙관적 동시성 version이 필요하고, 언제 갈았는지 보이려면 secret version이 필요합니다.
+          version: credential.version,
+          secretVersion: credential.secret_version,
           priority: credential.priority,
           weight: credential.weight,
           requestCount: credential.request_count,

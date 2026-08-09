@@ -4822,7 +4822,7 @@ function ProviderSurface({ service }: { service: DesktopService }) {
   };
 
   // 지원 목록은 앱 상수라 서버를 기다리지 않습니다. 연결 상태만 도착한 뒤 채워집니다.
-  const connections = projectProviderConnections(settings?.catalog, settings?.providers);
+  const connections = projectProviderConnections(settings?.catalog, settings?.providers, settings?.credentials);
   const accounts = settings ? projectSubscriptionAccounts(settings.accounts) : [];
   const normalizedQuery = normalizeSearch(query, locale);
   const matched = connections.filter(
@@ -4855,12 +4855,12 @@ function ProviderSurface({ service }: { service: DesktopService }) {
     },
   ].filter((group) => group.items.length > 0);
   const removeKey = async (connection: ProviderConnectionView) => {
-    if (saving || connection.credentialId === undefined || connection.credentialVersion === undefined) return;
+    if (saving || connection.credentialId === undefined || connection.credentialRevision === undefined) return;
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      await service.disableCredential(connection.credentialId, connection.credentialVersion);
+      await service.disableCredential(connection.credentialId, connection.credentialRevision);
       setSettings(await service.loadSettings());
       setNotice("키를 제거했습니다.");
     } catch (cause) {
@@ -5338,7 +5338,8 @@ function ProviderOverviewTab({
   // manifest 밖에서 직접 등록한 Provider도 API 어댑터면 키를 받습니다.
   const directEndpointId = connection.endpoints[0]?.endpointId || undefined;
   // 키는 계정이 아니라 자격 증명이 사실입니다. mine으로 세면 직접 등록 Provider는 영원히 0입니다.
-  const hasKey = connection.credentialVersion !== undefined;
+  // 키가 있다는 사실은 자격의 존재입니다. secret version은 «언제 갈았는지»일 뿐이라 없을 수 있습니다.
+  const hasKey = connection.credentialId !== undefined;
   const credentialCount = usesAccounts ? mine.length : hasKey ? 1 : 0;
   const credentialEmpty = usesAccounts ? mine.length === 0 : !hasKey;
   const canConnectKey =

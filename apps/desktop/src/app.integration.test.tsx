@@ -1670,9 +1670,15 @@ describe("AgentOS native data flow", () => {
         ],
         models: [],
         candidates: [],
-        credentials: [{ providerId: "openrouter", endpointId: "endpoint-openrouter", secretVersion: 1 }],
       },
-      credentials: [],
+      credentials: [
+        {
+          providerId: "openrouter",
+          endpointId: "endpoint-openrouter",
+          credentialId: "credential-openrouter",
+          version: 1,
+        },
+      ],
       routes: [],
       providers: [],
       accounts: [],
@@ -1733,16 +1739,15 @@ describe("AgentOS native data flow", () => {
         ],
         models: [],
         candidates: [],
-        credentials: [
-          {
-            providerId: "openrouter",
-            endpointId: "endpoint-openrouter",
-            credentialId: "credential-openrouter",
-            secretVersion: 2,
-          },
-        ],
       },
-      credentials: [],
+      credentials: [
+        {
+          providerId: "openrouter",
+          endpointId: "endpoint-openrouter",
+          credentialId: "credential-openrouter",
+          version: 2,
+        },
+      ],
       routes: [],
       providers: [],
       accounts: [],
