@@ -340,7 +340,7 @@ stateDiagram-v2
 
 Organization Graph의 활성 노드는 tenant별 Agent map으로 투영됩니다. 제품 의도는 Agent가 상대를 발견해 직접 메시지나 다자 협업방에서 대화하고, 그 메시지·위임·공유 맥락·실행·사용자 개입이 모두 하나의 Work와 인과 계보에 귀속되는 것입니다.
 
-**현재 구현은 이 의도에 도달하지 않았습니다.** 협업방 도메인과 VoltAgent 위임은 각각 구현됐지만 둘이 연결돼 있지 않습니다. 생산 경로에서 협업 메시지를 기록하는 곳은 `packages/application/src/core-pipeline.ts` 두 지점(사용자 요청, Representative handoff)과 Surface가 호출하는 공개 command뿐이며, `packages/runtime/src`는 `postMessage`를 한 번도 호출하지 않습니다. 그래서 실제 방에는 Work당 메시지 두 건만 남고 에이전트 사이의 위임·질문·답변은 VoltAgent 메모리에서 끝납니다.
+**현재 구현은 이 의도에 도달하지 않았습니다.** 협업방 도메인과 Runtime delta 기록기는 구현됐지만 제품 계보를 만드는 Agent 간 직접 위임은 아직 없습니다. 생산 경로에서 협업 메시지를 기록하는 곳은 `packages/application/src/core-pipeline.ts`의 사용자 요청·Representative handoff, `core-staffing.ts`의 조건부 편성 proposal과 Surface가 호출하는 공개 command이며, `packages/runtime/src`는 `postMessage`를 한 번도 호출하지 않습니다. 실제 방의 baseline은 두 건이고 동적 편성이 필요하면 proposal이 추가됩니다. 과거 VoltAgent 암시적 위임은 Task·Runtime·권한·비용 계보를 우회해 [ADR-006](ADR-006-product-owned-agent-delegation.md)에서 생산 노출을 차단했습니다.
 
 이 절의 상태 표시는 **도메인이 표현할 수 있는 것**과 **실행 경로가 실제로 만드는 것**을 구분합니다. `packages/work`에 계약이 있다는 사실이 그 대화가 발생한다는 뜻은 아닙니다.
 
@@ -352,7 +352,7 @@ flowchart TB
   classDef external fill:#ffedd5,stroke:#c2410c,color:#7c2d12,stroke-width:2px;
 
   Org["Organization Graph<br/>활성 node · 관계 · capability"]:::implemented
-  Map["Tenant Agent Map<br/>Agent · Supervisor · Subagent<br/>직접 주소·위임 도구"]:::implemented
+  Map["Tenant Agent Map<br/>Agent · Supervisor · Subagent<br/>인접 관계"]:::implemented
   Observer["사용자 Surface<br/>관찰 · 메시지 · 승인 · 취소"]:::implemented
 
   subgraph WorkBoundary["하나의 Work에 귀속된 협업 경계"]
@@ -362,7 +362,7 @@ flowchart TB
     AgentB["Agent B<br/>Task·Assignment·Session<br/>방에 발언하지 않음"]:::planned
     AgentC["Agent C<br/>Task·Assignment·Session<br/>방에 발언하지 않음"]:::planned
     System["System participant<br/>상태·정책 event"]:::planned
-    Messages["순서화된 메시지<br/>reply · caused-by · handoff<br/>현재 Work당 2건"]:::implementing
+    Messages["순서화된 메시지<br/>reply · caused-by · handoff<br/>baseline 2건 + 조건부 편성 proposal"]:::implementing
     Shared["Shared Context Reference<br/>도메인만 · 생산 기록 없음"]:::planned
     Lease["Resource Lease<br/>도메인만 · 생산 기록 없음"]:::planned
     Events["Work · Runtime · Collaboration events<br/>correlation · causation"]:::implemented
@@ -375,7 +375,7 @@ flowchart TB
     Room --> Messages
     AgentA <-. "직접 질문·답변 · 기록 경로 없음" .-> AgentB
     AgentA -. "병렬 Task" .-> AgentC
-    AgentB -. "VoltAgent delegate_task · 방에 남지 않음" .-> AgentC
+    AgentB -. "제품 소유 위임 경로 미구현" .-> AgentC
     Messages -. "미연결" .-> Shared
     Messages -. "미연결" .-> Lease
     Messages --> Events
@@ -392,11 +392,11 @@ flowchart TB
 
 | 협업 요소 | 상태 | 도메인 계약 | 생산 실행 경로 |
 |---|---|---|---|
-| Agent map·위임 | 구현됨 | `packages/organization` | `packages/runtime/src/voltagent-topology.ts`가 조직 그래프를 supervisor·subAgent로 배선하고 VoltAgent가 위임을 실행 |
+| Agent map·위임 | 부분 | `packages/organization` | 생산 `EmbeddedVoltAgentRuntime`은 인접 관계만 보존하고 암시적 위임은 차단. 제품 계보를 만드는 직접 위임은 미구현([ADR-006](ADR-006-product-owned-agent-delegation.md)) |
 | 협업방 생성 | 구현됨 | `packages/work` | `core-pipeline.ts`가 Work마다 `Core Office` 방 하나를 보장. 사용자 + Core Office 8명 참가 |
 | 사용자 요청·Representative handoff 기록 | 구현됨 | `packages/work` | `core-pipeline.ts` 두 지점. `replyTo`·`causedBy`로 인과 연결 |
 | 사용자 관찰·개입 | 구현됨 | `packages/work` | 공개 command `collaboration.room.open` · `room.join` · `message.post`를 Surface가 호출 |
-| **에이전트 간 직접 대화 기록** | 구현됨 (2026-08-09) | `packages/work`에 10종 메시지 타입·인과·순서 계약 존재 | `packages/application/src/collaboration-recorder.ts`가 `delegate_task` 델타를 관찰해 `handoff`·`answer`로 기록. 주입은 `apps/server/src/product.ts`. 결정은 [ADR-004](ADR-004-runtime-collaboration-durability.md) |
+| **에이전트 간 직접 대화 기록** | 부분 | `packages/work`에 10종 메시지 타입·인과·순서 계약 존재 | recorder와 drain은 구현됐지만 생산 Embedded Runtime은 암시적 `delegate_task`를 노출하지 않음. 실제 제품 소유 위임과 연결 증거는 미완료([ADR-004](ADR-004-runtime-collaboration-durability.md), [ADR-006](ADR-006-product-owned-agent-delegation.md)) |
 | **다자 협업 라운드** | **미구현** | 방에 `max_parallel` · `max_rounds` · `round_count` 존재 | **없음.** 라운드를 진행시키는 실행 경로가 없음 |
 | **공유 상태** | **미구현** | `SharedContextReference` · `ResourceLease` 계약과 테스트 존재 | **없음.** 생산 호출 0건 |
 | 병렬 실행 | 부분 | `packages/work`의 Task·Assignment | Task 병렬은 동작. 협업방 안의 병렬 발언은 위 항목에 종속 |

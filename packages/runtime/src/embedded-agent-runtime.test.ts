@@ -41,6 +41,9 @@ describe("내장 VoltAgent Agent runtime", () => {
     }
     runtime.connect("organization:representative", "organization:assurance");
     expect(runtime.childIds("organization:representative")).toEqual(["organization:assurance"]);
+    const representative = runtime.getAgents().find((agent) => agent.id === "organization:representative");
+    expect(representative?.getSubAgents()).toEqual([]);
+    expect(representative?.getTools().map((tool) => tool.name)).not.toContain("delegate_task");
 
     runtime.remove("organization:assurance");
     expect(runtime.childIds("organization:representative")).toEqual([]);

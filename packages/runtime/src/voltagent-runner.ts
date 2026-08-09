@@ -220,6 +220,7 @@ export function failureSignal(error: unknown): FailureSignal {
     error instanceof Error &&
     (error.message.startsWith("No object generated:") ||
       error.message === "Invalid JSON response" ||
+      error.message === "Model text output is empty" ||
       error.message.toLowerCase().includes("structured output") ||
       error.message.includes("구조화 출력"))
   ) {
@@ -783,6 +784,8 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
     let fallbackFromLeaseId: string | undefined;
     for (let attempt = 0; attempt < MAX_FALLBACKS; attempt += 1) {
       let lease: RoutedModelLease | undefined;
+      let inputTokens = 0;
+      let outputTokens = 0;
       try {
         lease = await this.acquireModel(
           context,
@@ -832,10 +835,13 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
             [MASSION_TENANT_CONTEXT_KEY, context],
           ]),
         });
+        inputTokens = result.usage.inputTokens ?? 0;
+        outputTokens = result.usage.outputTokens ?? 0;
+        if (!result.text.trim()) throw new Error("Model text output is empty");
         await lease.complete({
           commandId: `${running.execution_id}:model:${String(attempt)}:complete`,
-          inputTokens: result.usage.inputTokens ?? 0,
-          outputTokens: result.usage.outputTokens ?? 0,
+          inputTokens,
+          outputTokens,
         });
         const current = await this.store.getRecovery(context, running.execution_id);
         await this.store.transition(context, {
@@ -865,8 +871,8 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
             signal: failureSignal(error),
             emittedTokens: 0,
             sideEffectsStarted: observedSideEffects(error, lease.kind === "agent-runtime"),
-            inputTokens: 0,
-            outputTokens: 0,
+            inputTokens,
+            outputTokens,
           });
           if (failed.fallbackAllowed) {
             fallbackFromAttemptId = lease.attemptId;
@@ -902,6 +908,8 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
     let fallbackFromLeaseId: string | undefined;
     for (let attempt = 0; attempt < MAX_FALLBACKS; attempt += 1) {
       let lease: RoutedModelLease | undefined;
+      let inputTokens = 0;
+      let outputTokens = 0;
       try {
         lease = await this.acquireModel(
           context,
@@ -953,8 +961,6 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
           ]),
         };
         let structuredOutput: unknown;
-        let inputTokens = 0;
-        let outputTokens = 0;
         if (lease.supportsStructuredOutput) {
           const schema = jsonSchema(
             output.jsonSchema as Parameters<typeof jsonSchema>[0],
@@ -976,9 +982,9 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
               output: Output.json({ name: output.name, description: output.description }),
             },
           );
-          structuredOutput = validateJsonOutput(result.output, output);
           inputTokens = result.usage.inputTokens ?? 0;
           outputTokens = result.usage.outputTokens ?? 0;
+          structuredOutput = validateJsonOutput(result.output, output);
         }
         await lease.complete({
           commandId: `${running.execution_id}:model:${String(attempt)}:complete`,
@@ -1014,8 +1020,8 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
             signal: failureSignal(error),
             emittedTokens: 0,
             sideEffectsStarted: observedSideEffects(error, lease.kind === "agent-runtime"),
-            inputTokens: 0,
-            outputTokens: 0,
+            inputTokens,
+            outputTokens,
           });
           if (failed.fallbackAllowed) {
             fallbackFromAttemptId = lease.attemptId;

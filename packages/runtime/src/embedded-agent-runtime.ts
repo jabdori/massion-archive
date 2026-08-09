@@ -1,10 +1,6 @@
-import { Agent, type AgentModelValue, type SubAgentConfig } from "@voltagent/core";
+import { Agent, type AgentModelValue } from "@voltagent/core";
 
 import type { AgentTopologyRuntime, MaterializedAgent } from "./agent-topology.js";
-
-function subAgentId(config: SubAgentConfig): string {
-  return config instanceof Agent ? config.id : config.agent.id;
-}
 
 /**
  * Massion daemon이 process lifecycle을 소유하면서 VoltAgent Agent 빌딩 블록을 직접 실행하는 레지스트리입니다.
@@ -12,6 +8,7 @@ function subAgentId(config: SubAgentConfig): string {
 export class EmbeddedVoltAgentRuntime implements AgentTopologyRuntime {
   private readonly agents = new Map<string, Agent>();
   private readonly metadata = new Map<string, MaterializedAgent>();
+  private readonly children = new Map<string, Set<string>>();
 
   public constructor(private readonly defaultModel: AgentModelValue) {}
 
@@ -49,28 +46,29 @@ export class EmbeddedVoltAgentRuntime implements AgentTopologyRuntime {
   }
 
   public remove(id: string): void {
-    const target = this.requireAgent(id);
-    for (const parent of this.agents.values()) {
-      if (parent.getSubAgents().some((child) => subAgentId(child) === id)) parent.removeSubAgent(id);
-    }
-    for (const child of target.getSubAgents()) target.removeSubAgent(subAgentId(child));
+    this.requireAgent(id);
+    for (const children of this.children.values()) children.delete(id);
+    this.children.delete(id);
     this.agents.delete(id);
     this.metadata.delete(id);
   }
 
   public connect(parentId: string, childId: string): void {
-    const parent = this.requireAgent(parentId);
-    const child = this.requireAgent(childId);
-    if (!parent.getSubAgents().some((config) => subAgentId(config) === childId)) parent.addSubAgent(child);
+    this.requireAgent(parentId);
+    this.requireAgent(childId);
+    const children = this.children.get(parentId) ?? new Set<string>();
+    children.add(childId);
+    this.children.set(parentId, children);
   }
 
   public disconnect(parentId: string, childId: string): void {
-    const parent = this.requireAgent(parentId);
-    if (parent.getSubAgents().some((config) => subAgentId(config) === childId)) parent.removeSubAgent(childId);
+    this.requireAgent(parentId);
+    this.children.get(parentId)?.delete(childId);
   }
 
   public childIds(parentId: string): string[] {
-    return this.requireAgent(parentId).getSubAgents().map(subAgentId).sort();
+    this.requireAgent(parentId);
+    return [...(this.children.get(parentId) ?? [])].sort();
   }
 
   private requireAgent(id: string): Agent {

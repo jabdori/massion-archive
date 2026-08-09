@@ -394,9 +394,10 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 ### 9.4 에이전트 협업 런타임
 
 - 협업방 도메인은 완성돼 있습니다. 메시지 10종, `reply`·`caused-by` 인과, 동시 커밋의 고유 sequence, 라운드·token·비용·deadline 한계, 참여·이탈, 불변 Shared Context Reference와 versioned lease가 모두 계약과 테스트로 존재합니다.
-- VoltAgent 위임도 구현돼 있습니다. 조직 그래프가 supervisor·subAgent로 배선되어 에이전트가 실제로 서로에게 일을 넘깁니다.
-- **(해소 2026-08-09) 둘을 연결했습니다.** `CollaborationRuntimeRecorder`가 `ExecutionDeltaObserver`로 `delegate_task` 위임·답변을 관찰해 협업방에 `handoff`·`answer` 두 메시지로 남기고, `apps/server`의 composition root가 기존 실행 스트림과 함께 주입합니다. 인과(`replyToMessageId`·`causedByMessageId`), `executionId` 계보, 방 예산에 쓰이는 token 수가 모두 실려 재시작 뒤에도 보존됩니다. 내구성 경계 결정은 [ADR-004](../architecture/ADR-004-runtime-collaboration-durability.md)가 소유합니다.
-- 남은 것: `challenge`·`decision`·`evidence` 같은 발화는 VoltAgent 기본 위임에서 나오지 않으므로 매핑하지 않았습니다. 없는 대화를 지어내지 않는다는 것이 그 이유입니다. 방에 참여하지 않은 동적 편성 Agent에게 위임하면 도메인이 거부하고 기록만 실패합니다 — 편성 Agent를 방에 참여시키는 것은 별도 작업입니다.
+- `CollaborationRuntimeRecorder`와 정상 종료 drain은 구현돼 있습니다. 실제 `delegate_task` delta가 들어오면 인과와 실행 계보를 가진 `handoff`·`answer`를 기록하는 내구성 경계는 [ADR-004](../architecture/ADR-004-runtime-collaboration-durability.md)가 소유합니다.
+- **(정정 2026-08-10) 생산 Embedded Runtime은 VoltAgent 암시적 위임을 노출하지 않습니다.** 실제 Work에서 이 도구가 Task·Assignment·Workspace capability·대상 Agent Route Attempt를 우회하고 숨은 실패를 빈 성공으로 만들었습니다. 조직 인접 관계는 유지하되 제품 소유 위임 경로가 전체 계보를 만들기 전까지 직접 호출을 차단합니다. 결정은 [ADR-006](../architecture/ADR-006-product-owned-agent-delegation.md)이 소유합니다.
+- 현재 실제 방의 baseline은 사용자 요청과 Representative handoff 두 건이며, 동적 편성이 필요하면 staffing proposal 메시지가 조건부로 추가됩니다. Agent 간 직접 질문·답변과 다자 라운드는 아직 생산 완료 증거가 없습니다.
+- 남은 것: 제품 소유 위임이 자식 Task·Runtime·권한·모델·비용·협업 메시지를 한 계보로 만들고, 편성 Agent를 실제 방 참가자로 연결해야 합니다. `challenge`·`decision`·`evidence` 같은 발화도 실제 사건이 생길 때만 기록합니다.
 - `SharedContextReference`와 `ResourceLease`는 생산 호출이 0건입니다. 도메인 포함과 실제 사용을 구분해야 합니다.
 - 이 갭은 `REQ-AGENT-HARNESS-001`이 요구하는 범위이며 요구사항 추적표에서 `in-progress`입니다.
 

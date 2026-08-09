@@ -80,7 +80,7 @@ Massion은 모델을 고를 수 있는 채팅 앱도, 에이전트 여러 개를
 
 작성된 핸드오프:
 
-- [에이전트 협업 런타임](docs/phases/30-surface-parity-agent-ux/agent-collaboration-runtime-handoff.md) — VoltAgent 위임을 협업방에 기록
+- [에이전트 협업 런타임](docs/phases/30-surface-parity-agent-ux/agent-collaboration-runtime-handoff.md) — 제품 계보를 보존하는 Agent 위임과 협업방 기록을 연결
 - [개선 채택·거부·되돌리기](docs/phases/30-surface-parity-agent-ux/growth-adoption-handoff.md) — 자가개선 command를 계약에 노출
 - [확장 Capability](docs/phases/30-surface-parity-agent-ux/extension-capability-handoff.md) — 설치된 확장이 조직에 무엇을 더했는지 계약에 노출
 - [설정 조회 계약](docs/phases/30-surface-parity-agent-ux/settings-contract-handoff.md) — `router.*`·`subscription.*` 일곱 조회에 타입 주기

@@ -1,14 +1,19 @@
 # ADR-004 — Runtime 협업 기록의 내구성 경계
 
-> **상태:** 승인됨
+> **상태:** 승인됨 — 생산 위임 소스는 ADR-006이 제한함
 > **승인일:** 2026-08-09
 > **대상:** `REQ-AGENT-HARNESS-001`, 헌법 §4.4, 아키텍처 §7
 
 ## 맥락
 
+> **2026-08-10 범위 정정:** [ADR-006](ADR-006-product-owned-agent-delegation.md)에 따라 생산
+> `EmbeddedVoltAgentRuntime`은 제품 계보를 우회하는 암시적 `delegate_task`를 노출하지 않습니다. 이 ADR은
+> 실제 delta가 발생했을 때의 기록 내구성을 결정하며, recorder의 존재 자체는 생산 Agent 협업 완료 증거가
+> 아닙니다.
+
 헌법 §4.4는 **대화가 아니라 Work와 버전된 사건이 실행·복구의 정본**이며 "모델의 transcript만으로 조직 상태나 완료를 복원하지 않는다"고 정합니다.
 
-협업방 도메인은 그 요구를 이미 충족합니다 — 메시지 10종, `reply`·`caused-by` 인과, 동시 커밋의 고유 sequence, 라운드·token·비용 한계가 계약과 테스트로 존재합니다. VoltAgent 위임도 구현돼 있어 `voltagent-topology.ts`가 조직 그래프를 supervisor·subAgent로 배선합니다.
+협업방 도메인은 그 요구를 이미 충족합니다 — 메시지 10종, `reply`·`caused-by` 인과, 동시 커밋의 고유 sequence, 라운드·token·비용 한계가 계약과 테스트로 존재합니다. `voltagent-topology.ts`에는 supervisor·subAgent adapter가 남아 있지만, ADR-006 이후 생산 Embedded Runtime은 이를 직접 위임 도구로 노출하지 않습니다.
 
 **그러나 둘이 연결돼 있지 않았습니다.** `packages/runtime/src`에 `postMessage` 호출이 0건이었고, 생산 경로에서 협업 메시지를 남기는 곳은 `core-pipeline.ts` 두 지점(사용자 요청, Representative handoff)과 `core-staffing.ts`의 편성 제안, 그리고 Surface가 부르는 공개 command뿐이었습니다. 에이전트끼리 묻고 답하고 인계하는 장면은 VoltAgent 메모리에서 끝나고 재시작에 사라졌습니다.
 

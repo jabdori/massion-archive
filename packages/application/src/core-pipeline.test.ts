@@ -50,6 +50,48 @@ describe("actual Core Work pipeline adapters", () => {
     expect(await works.getWork(context, (result as { workId: string }).workId)).toMatchObject({ status: "draft" });
   });
 
+  it("Representative가 빈 성공 출력을 반환하면 handoff 없이 명시적으로 차단한다", async () => {
+    await using database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
+    const identities = await IdentityService.create(database);
+    const organizations = await OrganizationService.create(database);
+    const owner = await identities.registerPersonalUser({
+      email: "empty-representative@example.com",
+      displayName: "Empty Representative",
+    });
+    const context = await organizations.resolveTenantContext(owner.user.user_id, owner.organization.organization_id);
+    const graph = await OrganizationGraphService.create(database, organizations);
+    await graph.bootstrap(context);
+    const works = await WorkService.create(database, organizations, graph);
+    const stages = createCoreWorkPipelineExecutors({
+      graph,
+      works,
+      runtimeExecutions: { findExecutionIdByCommand: async () => undefined },
+      representative: {
+        execute: async () => ({ executionId: "empty-representative-execution", status: "succeeded", output: " \n" }),
+        cancel: async () => undefined,
+      },
+      strategy: { plan: async () => ({}) as never },
+      evidence: { execute: async () => ({ outcome: "advanced" }) },
+      delivery: { execute: async () => ({ outcome: "advanced" }) },
+      assurance: { execute: async () => ({ outcome: "advanced" }) },
+      records: { execute: async () => ({ outcome: "advanced" }) },
+    });
+
+    const result = await stages.intake.execute(context, {
+      runId: "empty-representative-run",
+      commandId: "empty-representative-run:intake",
+      correlationId: "empty-representative-correlation",
+      request: { text: "빈 출력을 성공으로 처리하지 마세요" },
+    });
+
+    expect(result).toMatchObject({ outcome: "blocked", reason: "representative-invalid-output" });
+    const rooms = await works.listRooms(context, (result as { workId: string }).workId);
+    expect(rooms).toHaveLength(1);
+    const [room] = rooms;
+    if (!room) throw new Error("Representative 차단 Work의 협업방이 없습니다");
+    expect(await works.listMessages(context, (result as { workId: string }).workId, room.room_id)).toHaveLength(1);
+  });
+
   it("intake는 request의 workspaceId를 생성된 Work에 바인딩한다", async () => {
     await using database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
     const identities = await IdentityService.create(database);
@@ -424,7 +466,7 @@ describe("actual Core Work pipeline adapters", () => {
       representative: {
         execute: async () => {
           representativeCalls += 1;
-          return { executionId: "timeout-representative", status: "succeeded" };
+          return { executionId: "timeout-representative", status: "succeeded", output: "전략 단계로 전달합니다." };
         },
         cancel: async () => undefined,
       },
@@ -591,7 +633,11 @@ describe("actual Core Work pipeline adapters", () => {
       representative: {
         execute: async (_context: unknown, input: { workId: string; commandId: string }) => {
           representativeCalls.push({ workId: input.workId, commandId: input.commandId });
-          return { executionId: "retry-representative-execution", status: "succeeded" };
+          return {
+            executionId: "retry-representative-execution",
+            status: "succeeded",
+            output: "전략 단계로 전달합니다.",
+          };
         },
         cancel: async () => undefined,
       },

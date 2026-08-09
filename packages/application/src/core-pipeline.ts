@@ -480,6 +480,8 @@ export function createCoreWorkPipelineExecutors(
       if (runtime.status !== "succeeded")
         return { outcome: "blocked", reason: `representative-${runtime.status}`, workId };
       if (input.signal?.aborted) return { outcome: "blocked", reason: "representative-cancelled", workId };
+      if (typeof runtime.output !== "string" || !runtime.output.trim())
+        return { outcome: "blocked", reason: "representative-invalid-output", workId };
       await dependencies.works.postMessage(context, {
         commandId: `${input.commandId}:representative-handoff`,
         workId,

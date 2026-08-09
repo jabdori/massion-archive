@@ -373,6 +373,30 @@ describe("VoltAgent AgentRunner", () => {
     expect(registry.size).toBe(0);
   });
 
+  it("빈 text 출력은 모델 임대와 Runtime 실행을 성공 처리하지 않는다", async () => {
+    const routed = lease(
+      new MockLanguageModelV3({
+        doGenerate: {
+          content: [{ type: "text", text: " \n\t" }],
+          finishReason: { unified: "stop", raw: undefined },
+          usage: USAGE,
+          warnings: [],
+        },
+      }),
+    );
+    const runner = new VoltAgentRunner(voltAgent, store, { acquire: vi.fn().mockResolvedValue(routed) }, registry);
+
+    const result = await runner.execute(context, input());
+    const recovery = await store.getRecovery(context, result.executionId);
+
+    expect(result).toMatchObject({ status: "failed", error: { category: "output", retryable: false } });
+    expect(routed.complete).not.toHaveBeenCalled();
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: { kind: "output" }, inputTokens: 2, outputTokens: 3 }),
+    );
+    expect(recovery.events.at(-1)?.event_type).toBe("execution_failed");
+  });
+
   it("Agent runtime lease는 VoltAgent LanguageModel로 감싸지 않고 명시적 executor로 실행한다", async () => {
     const routed = agentLease({
       outcome: "completed",
@@ -1850,16 +1874,19 @@ describe("VoltAgent AgentRunner", () => {
   });
 
   it("structured schema 실패와 모델 부재를 secret 없는 terminal 상태로 기록한다", async () => {
-    const invalid = lease(
-      new MockLanguageModelV3({
-        doGenerate: {
-          content: [{ type: "text", text: JSON.stringify({ apiKey: "secret-value" }) }],
-          finishReason: { unified: "stop", raw: undefined },
-          usage: USAGE,
-          warnings: [],
-        },
-      }),
-    );
+    const invalid = {
+      ...lease(
+        new MockLanguageModelV3({
+          doGenerate: {
+            content: [{ type: "text", text: JSON.stringify({ apiKey: "secret-value" }) }],
+            finishReason: { unified: "stop", raw: undefined },
+            usage: USAGE,
+            warnings: [],
+          },
+        }),
+      ),
+      supportsStructuredOutput: false,
+    } as RoutedModelLease & { readonly supportsStructuredOutput: false };
     const invalidRunner = new VoltAgentRunner(
       voltAgent,
       store,
@@ -1885,6 +1912,7 @@ describe("VoltAgent AgentRunner", () => {
     const failedRecovery = await store.getRecovery(context, failed.executionId);
 
     expect(failed).toMatchObject({ status: "failed", error: { category: "output", retryable: false } });
+    expect(invalid.fail).toHaveBeenCalledWith(expect.objectContaining({ inputTokens: 2, outputTokens: 3 }));
     expect(JSON.stringify(failedRecovery)).not.toContain("secret-value");
 
     const blockedRunner = new VoltAgentRunner(
