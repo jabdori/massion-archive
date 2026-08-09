@@ -901,8 +901,8 @@ export class WorkService {
     return new WorkService(database, organizations, graph, governance, promptVersions, autonomy);
   }
 
-  private async verify(context: TenantContext): Promise<void> {
-    await this.organizations.verifyTenantContext(context);
+  private async verify(context: TenantContext, executor: QueryExecutor = this.database): Promise<void> {
+    await this.organizations.verifyTenantContext(context, undefined, executor);
   }
 
   public async createWork(context: TenantContext, input: CreateWorkInput): Promise<CreateWorkResult> {
@@ -988,7 +988,7 @@ export class WorkService {
   }
 
   public async getWork(context: TenantContext, workId: string, executor: QueryExecutor = this.database): Promise<Work> {
-    await this.verify(context);
+    await this.verify(context, executor);
     const work = await findWork(executor, context.organizationId, workId);
     if (!work) throw new Error(`Work를 찾을 수 없습니다: ${workId}`);
     return work;
@@ -1800,7 +1800,7 @@ export class WorkService {
     input: PostMessageInput,
     executor?: QueryExecutor,
   ): Promise<WorkCommandResult & { room: CollaborationRoom; message: CollaborationMessage }> {
-    await this.verify(context);
+    await this.verify(context, executor);
     const content = input.content.trim();
     if (!content) throw new Error("Collaboration message 내용은 비어 있을 수 없습니다");
     if (!COLLABORATION_MESSAGE_TYPES.has(input.messageType)) {
@@ -2958,7 +2958,7 @@ export class WorkService {
     operation: (transaction: QueryExecutor, work: Work) => Promise<Extra>,
     executor?: QueryExecutor,
   ): Promise<WorkCommandResult & Extra> {
-    await this.verify(context);
+    await this.verify(context, executor);
     const requestJson = canonicalJson(input);
     const mutate = async (transaction: QueryExecutor): Promise<WorkCommandResult & Extra> => {
       await this.organizations.verifyTenantContext(context, undefined, transaction);

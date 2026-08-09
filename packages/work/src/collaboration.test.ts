@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IdentityService, OrganizationService, type TenantContext } from "@massion/identity";
 import { OrganizationGraphService } from "@massion/organization";
@@ -204,6 +204,7 @@ describe("Collaboration Room과 resource lease", () => {
       agentHandle: "assurance",
     };
 
+    const defaultQuery = vi.spyOn(database, "query");
     const committed = await database.transaction(async (transaction) => {
       expect((await service.getActivePlan(context, created.work.work_id, transaction))?.plan_version_id).toBe(
         plan.plan_version_id,
@@ -212,6 +213,8 @@ describe("Collaboration Room과 resource lease", () => {
       const assigned = await service.assignTask(context, assignmentInput, transaction);
       return { posted, assigned };
     });
+    expect(defaultQuery).not.toHaveBeenCalled();
+    defaultQuery.mockRestore();
     const replayedMessage = await service.postMessage(context, messageInput);
     const replayedAssignment = await service.assignTask(context, assignmentInput);
 

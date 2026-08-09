@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IdentityService, OrganizationService, type TenantContext } from "@massion/identity";
 import { createDatabase, type MassionDatabase, type QueryExecutor } from "@massion/storage";
@@ -289,15 +289,19 @@ describe("Work workspace 바인딩", () => {
       organizationVersionId: "organization-version-1",
     });
     const queries: string[] = [];
+    const defaultQuery = database.query.bind(database);
+    const defaultQuerySpy = vi.spyOn(database, "query");
     const executor: QueryExecutor = {
       query: async <R>(surql: string, bindings?: Record<string, unknown>) => {
         queries.push(surql);
-        return await database.query<R>(surql, bindings);
+        return await defaultQuery<R>(surql, bindings);
       },
     };
 
     await service.listTasks(context, created.work.work_id, executor);
 
+    expect(defaultQuerySpy).not.toHaveBeenCalled();
+    expect(queries.some((query) => query.includes("FROM membership"))).toBe(true);
     expect(queries.some((query) => query.includes("FROM work "))).toBe(true);
     expect(queries.some((query) => query.includes("FROM work_task "))).toBe(true);
   });

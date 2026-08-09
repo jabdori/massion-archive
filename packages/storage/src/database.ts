@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { createNodeEngines } from "@surrealdb/node";
@@ -67,6 +68,24 @@ export interface QueryExecutor {
   query<R = unknown[]>(surql: string, bindings?: Record<string, unknown>): Promise<R>;
 }
 
+export type MassionDatabaseLifecycleErrorCode =
+  | "DATABASE_CLOSING"
+  | "DATABASE_CLOSED"
+  | "DATABASE_CLOSE_FAILED"
+  | "DATABASE_TRANSACTION_REENTRANT"
+  | "DATABASE_CLOSE_IN_TRANSACTION";
+
+export class MassionDatabaseLifecycleError extends Error {
+  public override readonly name = "MassionDatabaseLifecycleError";
+
+  public constructor(
+    public readonly code: MassionDatabaseLifecycleErrorCode,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 class TransactionExecutor implements QueryExecutor {
   public constructor(private readonly transaction: SurrealTransaction) {}
 
@@ -76,13 +95,46 @@ class TransactionExecutor implements QueryExecutor {
 }
 
 export class MassionDatabase implements QueryExecutor, AsyncDisposable {
+  private readonly transactionScope = new AsyncLocalStorage<true>();
+  private readonly activeClientOperations = new Set<Promise<unknown>>();
+  private transactionTail: Promise<void> = Promise.resolve();
+  private state: "open" | "closing" | "closed" = "open";
+  private closePromise: Promise<void> | undefined;
+
   public constructor(private readonly client: Surreal) {}
 
   public async query<R = unknown[]>(surql: string, bindings?: Record<string, unknown>): Promise<R> {
-    return (await this.client.query(surql, bindings)) as R;
+    return await this.runClientOperation(async () => (await this.client.query(surql, bindings)) as R);
   }
 
   public async transaction<T>(operation: (transaction: QueryExecutor) => Promise<T>): Promise<T> {
+    if (this.transactionScope.getStore()) {
+      throw new MassionDatabaseLifecycleError(
+        "DATABASE_TRANSACTION_REENTRANT",
+        "같은 MassionDatabase transaction에는 재귀적으로 진입할 수 없습니다",
+      );
+    }
+    this.assertOpen();
+    const previous = this.transactionTail;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(
+      () => gate,
+      () => gate,
+    );
+    this.transactionTail = tail;
+    await previous.catch(() => undefined);
+    try {
+      return await this.transactionScope.run(true, async () => await this.executeTransaction(operation));
+    } finally {
+      release();
+      if (this.transactionTail === tail) this.transactionTail = Promise.resolve();
+    }
+  }
+
+  private async executeTransaction<T>(operation: (transaction: QueryExecutor) => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
       const transaction = await this.client.beginTransaction();
       try {
@@ -100,23 +152,76 @@ export class MassionDatabase implements QueryExecutor, AsyncDisposable {
   }
 
   public async version(): Promise<string> {
-    return (await this.client.version()).version;
+    return await this.runClientOperation(async () => (await this.client.version()).version);
   }
 
   public async exportSql(): Promise<string> {
-    return await this.client.export();
+    return await this.runClientOperation(async () => await this.client.export());
   }
 
   public async importSql(sql: string): Promise<void> {
-    await this.client.import(sql);
+    await this.runClientOperation(async () => {
+      await this.client.import(sql);
+    });
   }
 
-  public async close(): Promise<void> {
-    if (this.client.isConnected) await this.client.close();
+  public close(): Promise<void> {
+    if (this.transactionScope.getStore()) {
+      return Promise.reject(
+        new MassionDatabaseLifecycleError(
+          "DATABASE_CLOSE_IN_TRANSACTION",
+          "활성 MassionDatabase transaction 안에서는 database를 닫을 수 없습니다",
+        ),
+      );
+    }
+    if (this.state === "closed") return Promise.resolve();
+    if (this.closePromise) return this.closePromise;
+    this.state = "closing";
+    const transactionDrain = this.transactionTail;
+    const clientOperations = [...this.activeClientOperations];
+    this.closePromise = this.closeAfterDrain(transactionDrain, clientOperations);
+    return this.closePromise;
   }
 
   public async [Symbol.asyncDispose](): Promise<void> {
     await this.close();
+  }
+
+  private assertOpen(): void {
+    if (this.state === "open") return;
+    if (this.state === "closing") {
+      throw new MassionDatabaseLifecycleError("DATABASE_CLOSING", "MassionDatabase가 종료 중입니다");
+    }
+    throw new MassionDatabaseLifecycleError("DATABASE_CLOSED", "MassionDatabase가 종료되었습니다");
+  }
+
+  private async runClientOperation<T>(operation: () => Promise<T>): Promise<T> {
+    this.assertOpen();
+    const task = Promise.resolve().then(operation);
+    this.activeClientOperations.add(task);
+    try {
+      return await task;
+    } finally {
+      this.activeClientOperations.delete(task);
+    }
+  }
+
+  private async closeAfterDrain(
+    transactionDrain: Promise<void>,
+    clientOperations: readonly Promise<unknown>[],
+  ): Promise<void> {
+    try {
+      await Promise.all([transactionDrain, Promise.allSettled(clientOperations)]);
+      try {
+        if (this.client.isConnected) await this.client.close();
+      } catch {
+        throw new MassionDatabaseLifecycleError("DATABASE_CLOSE_FAILED", "MassionDatabase 종료에 실패했습니다");
+      }
+    } finally {
+      this.state = "closed";
+      this.closePromise = undefined;
+      this.transactionScope.disable();
+    }
   }
 }
 

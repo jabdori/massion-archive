@@ -354,42 +354,57 @@ export class MassionSubscriptionExecutionContext
     input: { readonly workId: string; readonly taskId?: string; readonly agentHandle: string },
   ): Promise<WorkspaceSnapshot> {
     if (!this.transactions) throw new Error("Task Workspace transaction이 구성되지 않았습니다");
-    return await this.transactions.transaction(async (transaction) => {
-      const work = await this.requireWorkAccess(context, input.workId, transaction);
-      const taskId = input.taskId;
-      if (!work || !taskId || work.status !== "running" || !work.workspace_id) {
-        throw new Error("Task Workspace 실행 계보가 유효하지 않습니다");
-      }
-      const tasks = await this.works.listTasks?.(context, input.workId, transaction);
-      const assignments = await this.works.listAssignments?.(context, input.workId, transaction);
-      const task = tasks?.find((candidate) => candidate.task_id === taskId);
-      const assignment = assignments?.find(
-        (candidate) =>
-          candidate.task_id === taskId &&
-          candidate.agent_handle === input.agentHandle &&
-          candidate.status === "assigned",
+    try {
+      const preflight = await this.transactions.transaction(
+        async (transaction) => await this.readProjectWorkspace(context, input, transaction),
       );
-      if (task?.status !== "running" || !assignment || !this.workspaces) {
-        throw new Error("Task Workspace 실행 계보가 유효하지 않습니다");
-      }
-      const workspace = await this.workspaces.get(context, work.workspace_id, transaction);
-      if (
-        workspace.workspaceId !== work.workspace_id ||
-        workspace.organizationId !== context.organizationId ||
-        workspace.status !== "active" ||
-        workspace.trust !== "trusted" ||
-        !isAbsolute(workspace.path) ||
-        resolve(workspace.path) !== workspace.path
-      ) {
-        throw new Error("Task Workspace 실행 계보가 유효하지 않습니다");
-      }
-      try {
-        const snapshot = await directorySnapshot(workspace.path);
-        if (snapshot.workspaceRoot !== workspace.path) throw new Error("noncanonical");
+      const snapshot = await directorySnapshot(preflight.path);
+      if (snapshot.workspaceRoot !== preflight.path) throw new Error("noncanonical");
+      return await this.transactions.transaction(async (transaction) => {
+        const confirmed = await this.readProjectWorkspace(context, input, transaction);
+        if (
+          confirmed.workspaceId !== preflight.workspaceId ||
+          confirmed.path !== preflight.path ||
+          snapshot.workspaceRoot !== confirmed.path
+        ) {
+          throw new Error("workspace-changed");
+        }
         return snapshot;
-      } catch (error) {
-        throw new Error("Task Workspace 실행 계보가 유효하지 않습니다", { cause: error });
-      }
-    });
+      });
+    } catch (error) {
+      throw new Error("Task Workspace 실행 계보가 유효하지 않습니다", { cause: error });
+    }
+  }
+
+  private async readProjectWorkspace(
+    context: TenantContext,
+    input: { readonly workId: string; readonly taskId?: string; readonly agentHandle: string },
+    transaction: QueryExecutor,
+  ): Promise<Awaited<ReturnType<SubscriptionWorkspaceReader["get"]>>> {
+    const work = await this.requireWorkAccess(context, input.workId, transaction);
+    const taskId = input.taskId;
+    if (!work || !taskId || work.status !== "running" || !work.workspace_id) {
+      throw new Error("invalid-work");
+    }
+    const tasks = await this.works.listTasks?.(context, input.workId, transaction);
+    const assignments = await this.works.listAssignments?.(context, input.workId, transaction);
+    const task = tasks?.find((candidate) => candidate.task_id === taskId);
+    const assignment = assignments?.find(
+      (candidate) =>
+        candidate.task_id === taskId && candidate.agent_handle === input.agentHandle && candidate.status === "assigned",
+    );
+    if (task?.status !== "running" || !assignment || !this.workspaces) throw new Error("invalid-task-lineage");
+    const workspace = await this.workspaces.get(context, work.workspace_id, transaction);
+    if (
+      workspace.workspaceId !== work.workspace_id ||
+      workspace.organizationId !== context.organizationId ||
+      workspace.status !== "active" ||
+      workspace.trust !== "trusted" ||
+      !isAbsolute(workspace.path) ||
+      resolve(workspace.path) !== workspace.path
+    ) {
+      throw new Error("invalid-workspace");
+    }
+    return workspace;
   }
 }

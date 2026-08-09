@@ -2,8 +2,10 @@ export { createBackup, restoreBackup, type BackupManifest, type DatabaseBackup }
 export {
   createDatabase,
   MassionDatabase,
+  MassionDatabaseLifecycleError,
   serializeSurrealDateTime,
   type DatabaseConfig,
+  type MassionDatabaseLifecycleErrorCode,
   type QueryExecutor,
 } from "./database.js";
 export {

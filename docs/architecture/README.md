@@ -8,7 +8,7 @@
 
 > **제품 정체성 정본:** [Massion 제품 헌법과 현재 방향](../product/constitution.md). 이 문서는 현재 구현 구조를 설명하며 제품의 목적과 철학을 다시 정의하지 않습니다.
 
-> **이 문서보다 나중에 승인된 결정:** [ADR-001 개인용 전체 권한](ADR-001-personal-full-access.md)(2026-07-25, 2026-07-30 개정) · [ADR-002 지식 축과 표면 복원](ADR-002-knowledge-axis-restoration.md)(2026-07-27) · [ADR-003 작업 인지 모델 배치](ADR-003-task-aware-model-placement.md)(2026-07-28). 아래 그림과 표는 기준일 2026-07-24 시점이므로 세 결정이 반영돼 있지 않습니다. 표면 집합(아홉)과 모델 배치는 헌법 §6과 각 ADR이 정본입니다.
+> **이 문서보다 나중에 승인된 결정:** [ADR-001 개인용 전체 권한](ADR-001-personal-full-access.md) · [ADR-002 지식 축과 표면 복원](ADR-002-knowledge-axis-restoration.md) · [ADR-003 작업 인지 모델 배치](ADR-003-task-aware-model-placement.md) · [ADR-004 Runtime 협업 기록](ADR-004-runtime-collaboration-durability.md) · [ADR-005 Provider 모델 카탈로그](ADR-005-provider-model-catalog-synchronization.md) · [ADR-006 제품 소유 Agent 위임](ADR-006-product-owned-agent-delegation.md) · [ADR-007 Surreal transaction 승인](ADR-007-surreal-transaction-admission.md). 아래 그림과 표는 기준일 2026-07-24 시점이므로 이후 결정은 각 ADR이 정본입니다.
 
 이 문서는 Massion을 처음 접하는 사람과 구현 에이전트가 현재 구현 전체를 빠르게 파악하도록 돕습니다. 현재 공개 저장소에 존재하는 코드와 검증 가능한 동작을 같은 그림에 표시하되 상태를 명확히 구분합니다. 세부 계약은 도메인 코드·테스트, 운영 문서와 현재 Phase 문서가 소유하며, 이 문서는 그 관계를 연결하는 지도입니다.
 
