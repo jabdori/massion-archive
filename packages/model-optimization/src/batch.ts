@@ -283,50 +283,54 @@ export class OptimizationBatchService {
         const policy = policies[0];
         if (input.status === "shadow" && policy?.shadow_enabled !== true)
           throw new Error("shadow 동의가 활성화된 정책만 shadow batch를 만들 수 있습니다");
-        if (policy) {
-          if (!recommendation.primary_model_profile_id)
-            throw new Error("주 모델이 없는 추천은 batch로 승격할 수 없습니다");
-          const [receipts] = await tx.query<[OptimizationReceiptRecord[]]>(
-            "SELECT receipt_id, model_profile_id, sample_count, quality_score, completed, privacy_allowed FROM optimization_receipt WHERE organization_id = $organization_id AND receipt_id IN $receipt_ids;",
-            { organization_id: context.organizationId, receipt_ids: recommendation.receipt_ids },
+        // 정책이 없으면 candidate 밖으로 나갈 수 없습니다. 예전에는 여기가 `if (policy)`라서
+        // 정책이 없을 때 주 모델·완료·privacy receipt·최소 표본·개선 폭 검사가 전부 건너뛰어지고
+        // limited·active batch가 그대로 만들어졌습니다. recommend()가 정책 미설정 시
+        // policy_version_id에 실재하지 않는 "implicit-default"를 넣으므로 정상 사용에서도 열렸습니다.
+        // shadow는 이미 fail-closed였고, 승격 경로가 그보다 느슨할 이유가 없습니다.
+        if (!policy) throw new Error("활성 정책이 없으면 candidate 밖으로 batch를 승격할 수 없습니다");
+        if (!recommendation.primary_model_profile_id)
+          throw new Error("주 모델이 없는 추천은 batch로 승격할 수 없습니다");
+        const [receipts] = await tx.query<[OptimizationReceiptRecord[]]>(
+          "SELECT receipt_id, model_profile_id, sample_count, quality_score, completed, privacy_allowed FROM optimization_receipt WHERE organization_id = $organization_id AND receipt_id IN $receipt_ids;",
+          { organization_id: context.organizationId, receipt_ids: recommendation.receipt_ids },
+        );
+        const primaryReceipt = receipts.find(
+          (receipt) => receipt.model_profile_id === recommendation.primary_model_profile_id,
+        );
+        if (
+          !primaryReceipt ||
+          !primaryReceipt.completed ||
+          !primaryReceipt.privacy_allowed ||
+          primaryReceipt.sample_count < policy.minimum_sample_count
+        )
+          throw new Error("최소 표본과 완료된 privacy 허용 receipt가 필요합니다");
+        if (active[0]) {
+          const [parentBatches] = await tx.query<[BatchRecord[]]>(
+            "SELECT * OMIT id FROM optimization_batch WHERE organization_id = $organization_id AND batch_id = $batch_id LIMIT 1;",
+            { organization_id: context.organizationId, batch_id: active[0].batch_id },
           );
-          const primaryReceipt = receipts.find(
-            (receipt) => receipt.model_profile_id === recommendation.primary_model_profile_id,
-          );
-          if (
-            !primaryReceipt ||
-            !primaryReceipt.completed ||
-            !primaryReceipt.privacy_allowed ||
-            primaryReceipt.sample_count < policy.minimum_sample_count
-          )
-            throw new Error("최소 표본과 완료된 privacy 허용 receipt가 필요합니다");
-          if (active[0]) {
-            const [parentBatches] = await tx.query<[BatchRecord[]]>(
-              "SELECT * OMIT id FROM optimization_batch WHERE organization_id = $organization_id AND batch_id = $batch_id LIMIT 1;",
-              { organization_id: context.organizationId, batch_id: active[0].batch_id },
+          const parentBatch = parentBatches[0];
+          if (parentBatch?.primary_model_profile_id) {
+            const [parentRecommendations] = await tx.query<[RecommendationRecord[]]>(
+              "SELECT * OMIT id FROM optimization_recommendation WHERE organization_id = $organization_id AND recommendation_id = $recommendation_id LIMIT 1;",
+              { organization_id: context.organizationId, recommendation_id: parentBatch.recommendation_id },
             );
-            const parentBatch = parentBatches[0];
-            if (parentBatch?.primary_model_profile_id) {
-              const [parentRecommendations] = await tx.query<[RecommendationRecord[]]>(
-                "SELECT * OMIT id FROM optimization_recommendation WHERE organization_id = $organization_id AND recommendation_id = $recommendation_id LIMIT 1;",
-                { organization_id: context.organizationId, recommendation_id: parentBatch.recommendation_id },
-              );
-              const parentRecommendation = parentRecommendations[0];
-              const [parentReceipts] = parentRecommendation
-                ? await tx.query<[OptimizationReceiptRecord[]]>(
-                    "SELECT model_profile_id, sample_count, quality_score, completed, privacy_allowed FROM optimization_receipt WHERE organization_id = $organization_id AND receipt_id IN $receipt_ids;",
-                    { organization_id: context.organizationId, receipt_ids: parentRecommendation.receipt_ids },
-                  )
-                : [[]];
-              const parentReceipt = parentReceipts.find(
-                (receipt) => receipt.model_profile_id === parentBatch.primary_model_profile_id,
-              );
-              if (
-                parentReceipt &&
-                primaryReceipt.quality_score - parentReceipt.quality_score < policy.improvement_threshold
-              )
-                throw new Error("정책이 요구한 개선 폭을 충족하지 못했습니다");
-            }
+            const parentRecommendation = parentRecommendations[0];
+            const [parentReceipts] = parentRecommendation
+              ? await tx.query<[OptimizationReceiptRecord[]]>(
+                  "SELECT model_profile_id, sample_count, quality_score, completed, privacy_allowed FROM optimization_receipt WHERE organization_id = $organization_id AND receipt_id IN $receipt_ids;",
+                  { organization_id: context.organizationId, receipt_ids: parentRecommendation.receipt_ids },
+                )
+              : [[]];
+            const parentReceipt = parentReceipts.find(
+              (receipt) => receipt.model_profile_id === parentBatch.primary_model_profile_id,
+            );
+            if (
+              parentReceipt &&
+              primaryReceipt.quality_score - parentReceipt.quality_score < policy.improvement_threshold
+            )
+              throw new Error("정책이 요구한 개선 폭을 충족하지 못했습니다");
           }
         }
       }

@@ -21,7 +21,80 @@ describe("모델 최적화 batch lifecycle", () => {
 
   afterEach(async () => database.close());
 
+  /**
+   * candidate 밖으로 batch를 승격하려면 활성 정책이 필요합니다. 정책이 없으면 주 모델·완료·privacy
+   * receipt·최소 표본·개선 폭 검사가 통째로 건너뛰어지던 시절에는 이 seed 없이도 통과했습니다.
+   * 승격을 검증하지 않는 테스트가 게이트를 우회하지 않도록, 통과 가능한 최소 정책을 명시적으로 심습니다.
+   */
+  async function seedPromotionGate(
+    policyVersionId: string,
+    receipts: readonly { readonly receiptId: string; readonly profileId: string; readonly roleKey: string }[],
+  ): Promise<void> {
+    await database.query(
+      "CREATE optimization_policy_version CONTENT { policy_version_id: $policy_version_id, organization_id: $organization_id, version: 1, policy: 'quality', auto_optimize: false, production_learning: false, shadow_enabled: false, minimum_sample_count: 1, improvement_threshold: 0, status: 'active', checksum: $checksum, governance_decision_id: $decision_id, command_id: $command_id, request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() };",
+      {
+        policy_version_id: policyVersionId,
+        organization_id: context.organizationId,
+        checksum: "9".repeat(64),
+        decision_id: `decision-${policyVersionId}`,
+        command_id: `${policyVersionId}-command`,
+        request_hash: "8".repeat(64),
+        user_id: context.userId,
+      },
+    );
+    for (const receipt of receipts) {
+      await database.query(
+        "CREATE optimization_receipt CONTENT { receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_version: 1, sample_count: 1, quality_score: 0.9, latency_ms: 10, cost_micros: 1, privacy_allowed: true, completed: true, input_checksum: $input_checksum, receipt_checksum: $receipt_checksum, command_id: $command_id, request_hash: $request_hash, created_at: time::now() };",
+        {
+          receipt_id: receipt.receiptId,
+          run_id: `run-${receipt.receiptId}`,
+          organization_id: context.organizationId,
+          role_key: receipt.roleKey,
+          model_profile_id: receipt.profileId,
+          input_checksum: "7".repeat(64),
+          receipt_checksum: "6".repeat(64),
+          command_id: `${receipt.receiptId}-command`,
+          request_hash: "5".repeat(64),
+        },
+      );
+    }
+  }
+
+  it("활성 정책이 없으면 candidate 밖으로 batch를 승격하지 않는다", async () => {
+    await database.query(
+      "CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-ungated', organization_id: $organization_id, role_key: 'assurance', policy_version_id: 'implicit-default', primary_model_profile_id: 'profile-ungated', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: [], status: 'approved', checksum: $checksum, command_id: 'recommendation-ungated-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() };",
+      {
+        organization_id: context.organizationId,
+        checksum: "a".repeat(64),
+        request_hash: "b".repeat(64),
+        user_id: context.userId,
+      },
+    );
+
+    // recommend()는 정책이 없을 때 policy_version_id에 실재하지 않는 "implicit-default"를 넣습니다.
+    // 예전에는 그 값으로 정책 조회가 비고 `if (policy)`가 게이트 전체를 건너뛰어, 표본도 개선 폭도
+    // 확인하지 않은 batch가 limited·active로 바로 만들어졌습니다.
+    for (const status of ["limited", "active"] as const) {
+      await expect(
+        batches.createBatch(context, {
+          commandId: `batch-ungated-${status}`,
+          recommendationId: "recommendation-ungated",
+          status,
+        }),
+      ).rejects.toThrow("활성 정책");
+    }
+    // candidate는 승격이 아니므로 정책 없이도 만들 수 있어야 합니다.
+    await expect(
+      batches.createBatch(context, {
+        commandId: "batch-ungated-candidate",
+        recommendationId: "recommendation-ungated",
+        status: "candidate",
+      }),
+    ).resolves.toMatchObject({ status: "candidate" });
+  });
+
   it("승인된 추천만 immutable version batch로 원자 활성화한다", async () => {
+    await seedPromotionGate("policy-1", [{ receiptId: "receipt-1", profileId: "profile-1", roleKey: "assurance" }]);
     await database.query(
       "CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-1', organization_id: $organization_id, role_key: 'assurance', policy_version_id: 'policy-1', primary_model_profile_id: 'profile-1', fallback_model_profile_ids: ['profile-2'], excluded_json: '[]', receipt_ids: ['receipt-1'], status: 'pending-approval', checksum: $checksum, command_id: 'recommendation-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() };",
       {
@@ -113,14 +186,23 @@ describe("모델 최적화 batch lifecycle", () => {
   });
 
   it("같은 role의 세 번째 batch도 transaction 안에서 가장 큰 version 다음에 생성한다", async () => {
+    await seedPromotionGate(
+      "policy-versioning",
+      [1, 2, 3].map((index) => ({
+        receiptId: `receipt-versioning-${String(index)}`,
+        profileId: `profile-versioning-${String(index)}`,
+        roleKey: "assurance",
+      })),
+    );
     const batchIds: string[] = [];
     for (let index = 1; index <= 3; index += 1) {
       await database.query(
-        "CREATE optimization_recommendation CONTENT { recommendation_id: $recommendation_id, organization_id: $organization_id, role_key: 'assurance', policy_version_id: 'policy-versioning', primary_model_profile_id: $profile_id, fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: [], status: 'approved', checksum: $checksum, command_id: $command_id, request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() };",
+        "CREATE optimization_recommendation CONTENT { recommendation_id: $recommendation_id, organization_id: $organization_id, role_key: 'assurance', policy_version_id: 'policy-versioning', primary_model_profile_id: $profile_id, fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: [$receipt_id], status: 'approved', checksum: $checksum, command_id: $command_id, request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() };",
         {
           recommendation_id: `recommendation-versioning-${String(index)}`,
           organization_id: context.organizationId,
           profile_id: `profile-versioning-${String(index)}`,
+          receipt_id: `receipt-versioning-${String(index)}`,
           checksum: `${String(index).repeat(64)}`,
           command_id: `recommendation-versioning-command-${String(index)}`,
           request_hash: `${String(index).repeat(64)}`,
@@ -189,8 +271,12 @@ describe("모델 최적화 batch lifecycle", () => {
   });
 
   it("degraded 관측은 실행 중 batch를 자동으로 이전 healthy batch로 복구한다", async () => {
+    await seedPromotionGate("policy-1", [
+      { receiptId: "receipt-old", profileId: "profile-old", roleKey: "growth" },
+      { receiptId: "receipt-new", profileId: "profile-new", roleKey: "growth" },
+    ]);
     await database.query(
-      "CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-old', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-1', primary_model_profile_id: 'profile-old', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: [], status: 'approved', checksum: $checksum, command_id: 'recommendation-old-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-new', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-1', primary_model_profile_id: 'profile-new', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: [], status: 'approved', checksum: $checksum2, command_id: 'recommendation-new-command', request_hash: $request_hash2, created_by_user_id: $user_id, created_at: time::now() };",
+      "CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-old', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-1', primary_model_profile_id: 'profile-old', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-old'], status: 'approved', checksum: $checksum, command_id: 'recommendation-old-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-new', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-1', primary_model_profile_id: 'profile-new', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-new'], status: 'approved', checksum: $checksum2, command_id: 'recommendation-new-command', request_hash: $request_hash2, created_by_user_id: $user_id, created_at: time::now() };",
       {
         organization_id: context.organizationId,
         checksum: "a".repeat(64),
