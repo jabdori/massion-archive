@@ -3251,6 +3251,7 @@ describe("AgentOS native data flow", () => {
   it("생성 대기 중인 실행의 종료 이벤트를 받으면 임시 행을 제거한다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const runId = "26cd20b6-c6f9-40cd-9c36-82bd22f7f529";
     let durable: ((event: unknown) => void) | undefined;
     render(
@@ -3293,6 +3294,7 @@ describe("AgentOS native data flow", () => {
     async (eventType, runStatus, workStatus, title, notice) => {
       const user = userEvent.setup();
       const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+      delete active.run;
       const runId = `run-created-${runStatus}`;
       const created: WorkView = {
         ...active,
@@ -3357,6 +3359,7 @@ describe("AgentOS native data flow", () => {
   ] as const)("%s에 Work 연결 정보가 없어도 생성 대기를 해소한다", async (eventType, notice) => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const runId = `run-without-work-${eventType}`;
     let durable: ((event: unknown) => void) | undefined;
     render(
@@ -3389,6 +3392,7 @@ describe("AgentOS native data flow", () => {
   it("생성 응답 직후 목록에 실행 계보가 나타나면 durable 이벤트 없이 즉시 선택한다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const created: WorkView = {
       ...active,
       id: "work-created-in-start-reload",
@@ -3421,6 +3425,7 @@ describe("AgentOS native data flow", () => {
   it("생성 대기 중 재연결한 초기 목록의 실행 계보로 새 Work를 즉시 선택한다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const created: WorkView = {
       ...active,
       id: "work-created-on-reconnect",
@@ -3457,6 +3462,7 @@ describe("AgentOS native data flow", () => {
   it("work.created가 생성 응답보다 빨라도 응답 직후 새 Work를 선택한다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const created: WorkView = {
       ...active,
       id: "work-created-before-start-response",
@@ -3602,6 +3608,7 @@ describe("AgentOS native data flow", () => {
   it("start 응답 전에 받은 own correlation Work도 응답 직후 선택한다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const { run: _activeRun, ...withoutRun } = active;
     void _activeRun;
     const runId = "run-buffered-correlation";
@@ -3657,6 +3664,7 @@ describe("AgentOS native data flow", () => {
   it("완료 이벤트가 생성 연결보다 먼저 오면 payload Work를 선택하고 완료 목록으로 전환한다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const completed: WorkView = {
       ...active,
       id: "work-completed-before-creation-link",
@@ -3703,6 +3711,7 @@ describe("AgentOS native data flow", () => {
   it("종료 이벤트의 Work 조회가 일시 실패하면 미래 이벤트 없이 다시 연결한다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const failed: WorkView = {
       ...active,
       id: "work-transient-terminal-load",
@@ -3750,6 +3759,7 @@ describe("AgentOS native data flow", () => {
   it("이전 생성에서 받은 foreign run 이벤트를 다음 생성에 재사용하지 않는다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const first: WorkView = {
       ...active,
       id: "work-first-cleanup",
@@ -3812,6 +3822,7 @@ describe("AgentOS native data flow", () => {
   it("실패한 생성 요청 중 수집한 foreign 이벤트와 후보를 다음 생성에 재사용하지 않는다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const foreign: WorkView = {
       ...active,
       id: "work-foreign-before-start-reject",
@@ -3889,6 +3900,7 @@ describe("AgentOS native data flow", () => {
   it("완료 이벤트 payload가 다른 실행의 Work를 가리키면 선택하지 않는다", async () => {
     const user = userEvent.setup();
     const active = fixtureDataAdapter().works.find((candidate) => candidate.status === "active") as WorkView;
+    delete active.run;
     const foreign: WorkView = {
       ...active,
       id: "work-foreign-terminal-payload",

@@ -7318,7 +7318,7 @@ function Composer({
           </label>
           <Textarea
             aria-label={translate("추가 지시")}
-            className="border-0 bg-transparent px-3 pt-3"
+            className="px-3 pt-3"
             id="directive"
             onChange={(event) => {
               onChange(event.target.value);
