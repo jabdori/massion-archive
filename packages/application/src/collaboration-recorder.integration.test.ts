@@ -171,4 +171,64 @@ describe("Runtime 협업 기록기 · 실제 도메인", () => {
     expect(failures).toHaveLength(1);
     expect(await works.listMessages(context, workId, roomId)).toHaveLength(0);
   });
+
+  it("같은 Work의 여러 실행이 동시에 기록해도 메시지를 잃지 않는다", async () => {
+    // Codex 리뷰가 재현한 결함입니다. 직렬화를 실행 단위로 잡으면 같은 방의 next_sequence를
+    // 여러 실행이 동시에 밀어 write conflict가 나고, 저장소 재시도(4회)를 넘긴 기록은 사라집니다.
+    // 실측: 32개 동시 실행 → 27건 실패, 5건만 기록. 실제 경합 자원은 실행이 아니라 방입니다.
+    const { workId, roomId } = await coreOfficeWork();
+    const failures: unknown[] = [];
+    const subject = new CollaborationRuntimeRecorder({
+      executions: { get: async () => ({ work_id: workId }) },
+      works,
+      onFailure: (reason) => failures.push(reason),
+    });
+    const target = runtimeAgentName(context.organizationId, "context-strategy");
+
+    const executions = Array.from({ length: 32 }, (_value, index) => `execution-parallel-${String(index)}`);
+    for (const executionId of executions) {
+      subject.observe(context, {
+        executionId,
+        agentHandle: "representative",
+        toolName: "delegate_task",
+        toolCallId: "call-1",
+        kind: "tool-call",
+        sequence: 1,
+        occurredAt: "2026-08-09T00:00:00.000Z",
+        toolInput: JSON.stringify({ task: `동시 위임 ${executionId}`, targetAgents: [target] }),
+      });
+    }
+    await subject.drain();
+
+    expect(failures).toEqual([]);
+    expect(await works.listMessages(context, workId, roomId)).toHaveLength(32);
+  });
+
+  it("결과가 대상보다 짧아도 없는 답변을 만들지 않는다", async () => {
+    const { workId, roomId } = await coreOfficeWork();
+    const subject = recorder(workId);
+    const first = runtimeAgentName(context.organizationId, "context-strategy");
+    const second = runtimeAgentName(context.organizationId, "evidence-research");
+
+    subject.observe(
+      context,
+      delta({
+        kind: "tool-call",
+        sequence: 1,
+        toolInput: JSON.stringify({ task: "둘에게", targetAgents: [first, second] }),
+      }),
+    );
+    // 대상은 둘인데 결과는 하나입니다. 예전에는 두 번째가 문자열 "null"로 기록됐습니다.
+    subject.observe(
+      context,
+      delta({ kind: "tool-result", sequence: 2, toolOutput: JSON.stringify([{ response: "첫 답변" }]) }),
+    );
+    await subject.drain();
+
+    const messages = await works.listMessages(context, workId, roomId);
+    const answers = messages.filter((message) => message.message_type === "answer");
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.content).toBe("첫 답변");
+    expect(messages.map((message) => message.content)).not.toContain("null");
+  });
 });

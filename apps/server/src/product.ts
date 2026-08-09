@@ -1459,6 +1459,13 @@ export async function createMassionDaemon(
             await routedRunner.shutdown("daemon_shutdown");
           },
         },
+        {
+          // Runner를 세운 다음에 비웁니다. 순서가 반대면 마지막 위임의 기록이 큐에 남은 채
+          // Application과 DB가 닫혀 조용히 사라집니다. ADR-004의 정상 종료 경계가 이 지점입니다.
+          close: async () => {
+            await collaborationRecorder.drain();
+          },
+        },
       ],
       afterListenServices: [
         registryServer,

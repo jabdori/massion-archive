@@ -2975,12 +2975,15 @@ export class WorkService {
       if (work.revision !== input.expectedRevision)
         throw new Error(`현재 Work revision은 ${String(work.revision)}입니다`);
       const extra = await operation(transaction, work);
+      // 아래 revision 계산과 appendEvent가 같은 목록을 씁니다. event 행은 payload·result JSON을
+      // 통째로 실어 무거우므로, 한 transaction에서 두 번 읽으면 Work가 자랄수록 O(N²)가 됩니다.
+      let appended: readonly WorkEvent[] | undefined;
       if (eventType !== "work_state_changed") {
         // revision은 호출자의 산술이 아니라 원장에서 파생합니다. operation이 추가 event를 남기는
         // 경로(ready→failed 수렴)가 있고, work.revision + 1로 고정하면 auditWork가 강제하는
         // revision == events.length가 깨집니다. auditWork는 recoverWork 안에서 fail-closed라
         // 그 순간 Records·Assurance 단계가 통째로 멈춥니다. 아래 +1은 곧 append할 이 event의 몫입니다.
-        const appended = await listEventsWith(transaction, context.organizationId, work.work_id);
+        appended = await listEventsWith(transaction, context.organizationId, work.work_id);
         await transaction.query(
           "UPDATE work SET revision = $revision, updated_at = time::now() WHERE organization_id = $organization_id AND work_id = $work_id;",
           { revision: appended.length + 1, organization_id: context.organizationId, work_id: work.work_id },
@@ -2999,6 +3002,7 @@ export class WorkService {
         extra,
         provisional,
         input.causedByEventId,
+        appended,
       );
       const result = { ...provisional, event };
       await transaction.query("UPDATE work_event SET result_json = $result_json WHERE event_id = $event_id;", {
@@ -3025,8 +3029,10 @@ export class WorkService {
     payload: unknown,
     result: unknown,
     causedByEventId?: string,
+    /** 호출자가 이미 읽었으면 그것을 씁니다. event 행은 payload·result JSON을 통째로 실어 무겁습니다. */
+    knownEvents?: readonly WorkEvent[],
   ): Promise<WorkEvent> {
-    const existing = await listEventsWith(executor, context.organizationId, work.work_id);
+    const existing = knownEvents ?? (await listEventsWith(executor, context.organizationId, work.work_id));
     const sequence = existing.reduce((maximum, event) => Math.max(maximum, event.sequence), 0) + 1;
     if (causedByEventId && !existing.some((event) => event.event_id === causedByEventId)) {
       throw new Error(`원인 WorkEvent를 찾을 수 없습니다: ${causedByEventId}`);

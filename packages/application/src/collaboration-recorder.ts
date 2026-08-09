@@ -12,7 +12,8 @@ import type { CollaborationRoom, WorkService } from "@massion/work";
  * 내구성 경계는 ADR-004가 소유합니다. 요약하면:
  *   - 관찰자 계약이 «동기 fire-and-forget, 예외·배압을 실행 경로에 전파하지 않음»이라 여기서
  *     await하지 않습니다. 기록 실패가 에이전트 실행을 죽이면 안 됩니다.
- *   - 커밋은 제품의 추적된 background 작업으로 나가고, `drain()`이 그것을 기다립니다.
+ *   - 커밋은 조직 단위 큐로 직렬화됩니다. 경합 자원은 실행이 아니라 방입니다.
+ *   - 미완 커밋은 `drain()`이 기다리고, daemon 종료가 Runner 정지 뒤에 그것을 부릅니다.
  *   - commandId가 execution·sequence로 결정되므로 재시도·복구에서 중복 커밋이 없습니다.
  *   - 커밋 실패는 삼키지 않고 `onFailure`로 올려 로그·event가 됩니다.
  */
@@ -61,9 +62,13 @@ function parseDelegation(toolInput: string | undefined): DelegationRequest | und
 
 /**
  * `delegate_task` 결과에서 대상별 답변을 꺼냅니다. VoltAgent는 대상 순서대로 배열을 돌려주므로
- * 인덱스로 맞춥니다. 모양이 다르면 답변을 지어내지 않고 전체를 한 줄로 요약합니다.
+ * 인덱스로 맞춥니다.
+ *
+ * 값이 없으면 `undefined`를 돌려줍니다. 예전에는 `JSON.stringify(undefined ?? null)`이 걸려
+ * 문자열 `"null"`이 실제 답변처럼 기록됐습니다 — 배열이 대상보다 짧을 때 그렇습니다.
+ * 「없는 것을 지어내지 않는다」가 여기서 깨지고 있었습니다.
  */
-function parseAnswers(toolOutput: string | undefined, targets: readonly string[]): readonly string[] {
+function parseAnswers(toolOutput: string | undefined, targets: readonly string[]): readonly (string | undefined)[] {
   if (toolOutput === undefined) return [];
   let parsed: unknown;
   try {
@@ -71,16 +76,18 @@ function parseAnswers(toolOutput: string | undefined, targets: readonly string[]
   } catch {
     return [];
   }
-  const textOf = (value: unknown): string => {
-    if (typeof value === "string") return value.trim();
-    if (value && typeof value === "object") {
+  const textOf = (value: unknown): string | undefined => {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value === "string") return value.trim() || undefined;
+    if (typeof value === "object") {
       const record = value as Record<string, unknown>;
       for (const key of ["response", "result", "text", "output", "content"]) {
         const candidate = record[key];
         if (typeof candidate === "string" && candidate.trim().length > 0) return candidate.trim();
       }
     }
-    return JSON.stringify(value ?? null);
+    const encoded = JSON.stringify(value);
+    return encoded === undefined || encoded === "null" ? undefined : encoded;
   };
   if (Array.isArray(parsed)) return targets.map((_target, index) => textOf(parsed[index]));
   const single = textOf(parsed);
@@ -88,12 +95,21 @@ function parseAnswers(toolOutput: string | undefined, targets: readonly string[]
 }
 
 export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
-  /** 실행별 커밋 직렬화. 답변이 인계보다 먼저 커밋되면 replyToMessageId를 채울 수 없습니다. */
+  /**
+   * 커밋 직렬화 큐. 실행이 아니라 **조직** 단위입니다.
+   *
+   * 실제 경합 자원은 실행이 아니라 방입니다 — `postMessage`가 방의 `next_sequence`를 읽고 올리며
+   * 메시지 sequence에 고유 인덱스가 걸려 있습니다. 실행별로만 직렬화하면 같은 Work를 쓰는 여러
+   * 실행이 동시에 같은 방을 밀어 write conflict가 나고, 저장소의 재시도(4회)를 넘기면 기록이
+   * 통째로 사라집니다. 실측: 같은 Work 32개 동시 실행 → 27건 실패, 5건만 기록.
+   *
+   * ponytail: 조직 단위 직렬화. 방 단위로 좁히려면 방을 먼저 알아야 하는데 그 조회 자체가 이미
+   * 직렬화 대상입니다. 위임은 Work당 몇 건이라 지금은 이 상한이 싸고, 병목이 되면 방 단위 큐로 좁힙니다.
+   */
   private readonly chains = new Map<string, Promise<void>>();
   /** `${executionId}:${toolCallId}:${handle}` → 인계 메시지 ID. 답변이 이 값을 인용합니다. */
   private readonly handoffs = new Map<string, string>();
   private readonly delegations = new Map<string, DelegationRequest>();
-  private readonly rooms = new Map<string, CollaborationRoom>();
   /** 아직 커밋되지 않은 기록. 종료·테스트가 `drain()`으로 기다립니다. */
   private readonly pending = new Set<Promise<void>>();
 
@@ -103,8 +119,9 @@ export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
     if (delta.toolName !== DELEGATE_TOOL) return;
     if (delta.kind !== "tool-call" && delta.kind !== "tool-result") return;
     // 계약상 여기서 던지거나 기다리면 안 됩니다. 판단만 하고 커밋은 밖으로 넘깁니다.
+    // 큐 키는 실행이 아니라 조직입니다 — 경합하는 것은 실행이 아니라 방이기 때문입니다.
     this.enqueue(
-      delta.executionId,
+      context.organizationId,
       async () => {
         await this.record(context, delta);
       },
@@ -117,18 +134,18 @@ export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
     while (this.pending.size > 0) await Promise.all([...this.pending]);
   }
 
-  private enqueue(executionId: string, operation: () => Promise<void>, delta: ExecutionDelta): void {
-    const previous = this.chains.get(executionId) ?? Promise.resolve();
+  private enqueue(key: string, operation: () => Promise<void>, delta: ExecutionDelta): void {
+    const previous = this.chains.get(key) ?? Promise.resolve();
     const next = previous
       .then(operation, () => undefined)
       .catch((reason: unknown) => {
         this.dependencies.onFailure?.(reason, delta);
       });
-    this.chains.set(executionId, next);
+    this.chains.set(key, next);
     this.pending.add(next);
     void next.finally(() => {
       this.pending.delete(next);
-      if (this.chains.get(executionId) === next) this.chains.delete(executionId);
+      if (this.chains.get(key) === next) this.chains.delete(key);
     });
   }
 
@@ -137,9 +154,11 @@ export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
     if (delta.kind === "tool-call") {
       const delegation = parseDelegation(delta.toolInput);
       if (!delegation) return;
-      this.delegations.set(callKey, delegation);
       const room = await this.room(context, delta.executionId);
+      // 방이 아직 없으면 위임도 기억하지 않습니다. 기억해 두면 나중에 방이 생겼을 때 인계 없는
+      // 답변만 남아, ADR-004가 정한 「대상마다 정확히 한 쌍」이 깨집니다.
       if (!room) return;
+      this.delegations.set(callKey, delegation);
       for (const [index, target] of delegation.targets.entries()) {
         const posted = await this.dependencies.works.postMessage(context, {
           commandId: `${delta.executionId}:collab:${String(delta.sequence)}:${String(index)}`,
@@ -160,7 +179,22 @@ export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
     }
     const delegation = this.delegations.get(callKey);
     if (!delegation) return;
+    // tool-result는 위임당 한 번입니다. 성공하든 실패하든 이 호출의 기억은 여기서 놓습니다 —
+    // 예전에는 본문이 비면 handoff 항목이 남아 프로세스 수명 내내 쌓였습니다.
     this.delegations.delete(callKey);
+    try {
+      await this.recordAnswers(context, delta, callKey, delegation);
+    } finally {
+      for (const target of delegation.targets) this.handoffs.delete(`${callKey}:${target}`);
+    }
+  }
+
+  private async recordAnswers(
+    context: TenantContext,
+    delta: ExecutionDelta,
+    callKey: string,
+    delegation: DelegationRequest,
+  ): Promise<void> {
     const room = await this.room(context, delta.executionId);
     if (!room) return;
     const answers = parseAnswers(delta.toolOutput, delegation.targets);
@@ -168,7 +202,9 @@ export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
       const body = (answers[index] ?? "").slice(0, CONTENT_LIMIT);
       if (body.length === 0) continue;
       const replyTo = this.handoffs.get(`${callKey}:${target}`);
-      this.handoffs.delete(`${callKey}:${target}`);
+      // 인계 없는 답변은 남기지 않습니다. 질문 없는 대답은 화면에서 고아가 되고,
+      // 「대상마다 정확히 한 쌍」이라는 불변식을 깹니다.
+      if (replyTo === undefined) continue;
       await this.dependencies.works.postMessage(context, {
         commandId: `${delta.executionId}:collab:${String(delta.sequence)}:${String(index)}`,
         workId: room.work_id,
@@ -179,7 +215,8 @@ export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
         // 수신 Agent는 도메인이 handoff에만 허용합니다. 답변의 수신자는 아래 인용이 이미 말합니다.
         content: body,
         // 화면은 답변 들여쓰기와 인용을 이 둘로만 그립니다. 없으면 대화가 평평해집니다.
-        ...(replyTo === undefined ? {} : { replyToMessageId: replyTo, causedByMessageId: replyTo }),
+        replyToMessageId: replyTo,
+        causedByMessageId: replyTo,
         executionId: delta.executionId,
         tokenCount: estimateTokens(body),
         costMicros: 0,
@@ -190,14 +227,12 @@ export class CollaborationRuntimeRecorder implements ExecutionDeltaObserver {
   private async room(context: TenantContext, executionId: string): Promise<CollaborationRoom | undefined> {
     const execution = await this.dependencies.executions.get(context, executionId);
     if (!execution) return undefined;
-    const cached = this.rooms.get(execution.work_id);
-    if (cached) return cached;
-    const room = (await this.dependencies.works.listRooms(context, execution.work_id)).find(
+    // 캐시하지 않습니다. Work 수만큼 무한히 자라면서 정작 동시 쓰기는 막아 주지 못했습니다.
+    // 위임은 Work당 몇 건이라 조회 한 번이 캐시 수명 관리보다 쌉니다.
+    // 방을 여기서 만들지도 않습니다. 방 생성은 파이프라인이 Work revision과 함께 소유합니다.
+    return (await this.dependencies.works.listRooms(context, execution.work_id)).find(
       (candidate) => candidate.title === CORE_OFFICE_ROOM_TITLE && candidate.coordinator_handle === "representative",
     );
-    // 방을 여기서 만들지 않습니다. 방 생성은 파이프라인이 Work revision과 함께 소유합니다.
-    if (room) this.rooms.set(execution.work_id, room);
-    return room;
   }
 }
 
