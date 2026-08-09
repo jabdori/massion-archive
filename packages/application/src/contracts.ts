@@ -367,12 +367,25 @@ export interface GovernanceAutonomyViewV1 {
   readonly emergencyStopActive?: boolean;
 }
 
+/** 확장이 조직에 더한 능력. `kind`는 SDK의 contribution·permission 선언 그룹 이름입니다. */
+export interface ExtensionCapabilityViewV1 {
+  readonly kind: string;
+  readonly items: readonly string[];
+}
+
 export interface ExtensionInstallationViewV1 {
   readonly installationId: string;
   readonly packageName: string;
   readonly state: string;
   readonly activeVersionId?: string;
   readonly activationGeneration: number;
+  /**
+   * 헌법 6절은 확장 화면이 「조직에 추가된 Capability를 먼저」 보이라고 정합니다. 이 둘이 없던 동안
+   * 설치된 확장은 화면에서 언제나 빈 목록이었습니다. 활성 version이 없으면 여전히 비어 있습니다 —
+   * 설치만 되고 활성화 전이라 실제로 더한 것이 없기 때문입니다.
+   */
+  readonly contributions: readonly ExtensionCapabilityViewV1[];
+  readonly permissions: readonly ExtensionCapabilityViewV1[];
 }
 
 export interface ArtifactViewV1 {

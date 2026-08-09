@@ -402,7 +402,7 @@ Massion을 다음 중 하나로 축소하지 않습니다.
 - Extension SDK·Host 패키지에는 manifest, 권한, artifact, worker와 lifecycle 계약이 있습니다.
 - 서버는 Extension lifecycle, worker supervisor와 gateway를 생산 Application 경로에 조립하고 Registry 설치도 같은 lifecycle을 사용합니다. 다만 설치된 확장의 Tool·Skill·조직 Template 선언을 Core Agent Runtime이 실제 Capability로 소비하는 연결은 없습니다.
 - 현재 공식 예시는 외부 연동 중심이며 Skill·Tool·조직 Template이 실제 Agent Runtime에 기여하는 완성 경로가 없습니다.
-- **Application 계약이 Capability 선언을 버립니다.** SDK에는 `ExtensionContributionDeclaration` 8종과 `ExtensionPermissionDeclaration` 8종이 있는데 `ExtensionInstallationViewV1`은 다섯 필드뿐이고 그중 어느 것도 Capability가 아닙니다. `registry.*` 조회 넷은 계약에 반환 타입 자체가 없어 `Promise<unknown>`입니다. 그래서 6절이 요구하는 *"조직에 추가된 Capability를 먼저"*를 **설치된 확장에 대해 만족할 수 없습니다.**
+- **(해소 2026-08-09) Application 계약이 Capability 선언을 나릅니다.** `ExtensionInstallationViewV1`에 `contributions`·`permissions`가 생겼고, `extension.list`가 활성 version의 manifest에서 읽어 투영합니다. 같은 변경으로 도메인 view를 그대로 흘려 `organizationId`가 클라이언트로 새던 것도 막았습니다. 활성 version이 없으면(설치만 되고 활성화 전) 여전히 비어 있습니다 — 그때는 실제로 더한 것이 없기 때문입니다. `registry.*` 조회 넷은 계약에 반환 타입 자체가 없어 `Promise<unknown>`입니다. 그래서 6절이 요구하는 *"조직에 추가된 Capability를 먼저"*를 **설치된 확장에 대해 만족할 수 없습니다.**
 - 인계 문서: [확장 Capability 핸드오프](../phases/30-surface-parity-agent-ux/extension-capability-handoff.md)
 
 ### 9.6 지식·그래프·RAG·기억

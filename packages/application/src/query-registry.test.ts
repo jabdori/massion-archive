@@ -3162,4 +3162,52 @@ describe("협업방 조회", () => {
     expect(result.data).toHaveLength(3);
     expect(JSON.stringify(result.data)).not.toContain("다른 Work의 메시지");
   });
+
+  it("설치된 확장의 Capability를 계약으로 내보내고 조직 식별자는 남기지 않는다", async () => {
+    const registry = new ApplicationQueryRegistry();
+    registerApplicationQueries(registry, {
+      readModel,
+      extension: {
+        list: async () => [
+          {
+            installationId: "installation-1",
+            organizationId: "organization-secret",
+            packageName: "@massion-ext/echo",
+            state: "active",
+            activeVersionId: "version-1",
+            activationGeneration: 2,
+            contributions: {
+              runtimeTools: [{ id: "echo", handler: "echo" }],
+              skills: [],
+            },
+            permissions: {
+              network: [{ origin: "https://api.example", methods: ["GET"] }],
+              storage: { quotaBytes: 1024, maxValueBytes: 256 },
+              tools: [],
+            },
+          },
+        ],
+      } as never,
+    });
+
+    const result = await registry.query(context, ["extension:read"], "extension.list", {});
+
+    expect(result.data).toEqual([
+      {
+        installationId: "installation-1",
+        packageName: "@massion-ext/echo",
+        state: "active",
+        activeVersionId: "version-1",
+        activationGeneration: 2,
+        // 헌법 6절이 요구하는 「조직에 추가된 Capability」. 빈 그룹은 내보내지 않습니다.
+        contributions: [{ kind: "runtimeTools", items: ["echo"] }],
+        permissions: [
+          { kind: "network", items: ["https://api.example"] },
+          { kind: "storage", items: [] },
+        ],
+      },
+    ]);
+    // 예전에는 도메인 view를 그대로 통과시켜 organizationId가 클라이언트로 샜습니다.
+    expect(JSON.stringify(result.data)).not.toContain("organization-secret");
+  });
 });

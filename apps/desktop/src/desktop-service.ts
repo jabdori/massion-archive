@@ -135,6 +135,9 @@ export interface ExtensionView {
   readonly status: string;
   readonly activeVersionId?: string;
   readonly activationGeneration: number;
+  /** 활성 version의 manifest 선언. 활성화 전이면 비어 있습니다 — 아직 더한 것이 없기 때문입니다. */
+  readonly contributions: readonly { readonly kind: string; readonly items: readonly string[] }[];
+  readonly permissions: readonly { readonly kind: string; readonly items: readonly string[] }[];
 }
 
 /**
@@ -1855,11 +1858,8 @@ export function createApplicationDesktopService(
         client.query("extension.list", {}),
         query("registry.inventory", {}),
       ]);
-      /*
-       * 설치된 확장은 contributions·permissions가 비어서 나옵니다. 계약이 주지 않기 때문이고,
-       * 지어내면 안 되므로 그대로 둡니다. 화면이 "무엇이 늘었는지 알 수 없다"고 말합니다.
-       * registry.info는 manifest를 주지만 마켓플레이스 항목에만 있고, 선택할 때 채워집니다.
-       */
+      // 설치된 확장의 Capability는 `extension.list`가 활성 version manifest에서 실어 줍니다.
+      // 마켓플레이스 항목은 여전히 `registry.info`를 눌렀을 때 채워집니다.
       return projectExtensionEntries(extensions.map(projectExtension), safeView(inventory));
     },
     async loadGrowth() {
@@ -5092,6 +5092,8 @@ function projectExtension(extension: ExtensionInstallationViewV1): ExtensionView
     status: extension.state,
     ...(extension.activeVersionId === undefined ? {} : { activeVersionId: extension.activeVersionId }),
     activationGeneration: extension.activationGeneration,
+    contributions: extension.contributions,
+    permissions: extension.permissions,
   };
 }
 
@@ -5519,7 +5521,10 @@ export function projectExtensionEntries(
     provenance: "",
     installed: true,
     state: item.status,
-    ...projectManifestDeclarations(undefined),
+    // 계약이 활성 version의 manifest 선언을 실어 줍니다. 예전에는 여기가 언제나 빈 배열이라
+    // 헌법 6절의 「조직에 추가된 Capability를 먼저」가 설치된 확장에 대해 성립하지 않았습니다.
+    contributions: item.contributions as ExtensionEntryView["contributions"],
+    permissions: item.permissions as ExtensionEntryView["permissions"],
   }));
   return [
     ...entries,

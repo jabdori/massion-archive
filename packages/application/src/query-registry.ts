@@ -61,6 +61,8 @@ import type {
   KnowledgeNodeViewV1,
   KnowledgeRelationKindV1,
   WorkKnowledgeViewV1,
+  ExtensionCapabilityViewV1,
+  ExtensionInstallationViewV1,
 } from "./contracts.js";
 
 export interface ApplicationQueryResultV1 {
@@ -1434,6 +1436,41 @@ function subscriptionProfileHandle(organizationId: string, accountId: string): s
   return `${segment(organizationId)}/${segment(accountId)}`;
 }
 
+/** SDK 선언 그룹을 화면이 읽는 이름 목록으로 접습니다. 비어 있는 그룹은 내보내지 않습니다. */
+function extensionCapabilities(group: unknown): readonly ExtensionCapabilityViewV1[] {
+  if (!group || typeof group !== "object" || Array.isArray(group)) return [];
+  return Object.entries(group as Record<string, unknown>).flatMap(([kind, value]) => {
+    if (Array.isArray(value)) {
+      const items = value.map((item) =>
+        typeof item === "string"
+          ? item
+          : item && typeof item === "object" && typeof (item as { id?: unknown }).id === "string"
+            ? (item as { id: string }).id
+            : typeof item === "object" && item !== null && typeof (item as { origin?: unknown }).origin === "string"
+              ? (item as { origin: string }).origin
+              : JSON.stringify(item),
+      );
+      return items.length > 0 ? [{ kind, items }] : [];
+    }
+    // storage처럼 배열이 아닌 선언은 존재 사실만 남깁니다. 원문 값을 그대로 흘리지 않습니다.
+    return value && typeof value === "object" ? [{ kind, items: [] as readonly string[] }] : [];
+  });
+}
+
+/** 도메인 view를 그대로 흘리면 organizationId가 클라이언트로 샙니다. 계약이 선언한 것만 내보냅니다. */
+function publicExtensionInstallation(value: unknown): ExtensionInstallationViewV1 {
+  const record = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return {
+    installationId: String(record.installationId ?? ""),
+    packageName: String(record.packageName ?? ""),
+    state: String(record.state ?? ""),
+    ...(typeof record.activeVersionId === "string" ? { activeVersionId: record.activeVersionId } : {}),
+    activationGeneration: Number(record.activationGeneration ?? 0),
+    contributions: extensionCapabilities(record.contributions),
+    permissions: extensionCapabilities(record.permissions),
+  };
+}
+
 export function registerApplicationQueries(
   registry: ApplicationQueryRegistry,
   dependencies: ApplicationQueryDependencies,
@@ -2409,7 +2446,7 @@ export function registerApplicationQueries(
       requiredScopes: ["extension:read"],
       allowedRoles: EVERY_ROLE,
       validate: (value) => object(value, []),
-      handle: async (context) => await dependencies.extension?.list(context),
+      handle: async (context) => ((await dependencies.extension?.list(context)) ?? []).map(publicExtensionInstallation),
     });
   }
   if (dependencies.growth) {

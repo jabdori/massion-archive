@@ -186,6 +186,23 @@ describe("ExtensionLifecycleService", () => {
     expect(JSON.stringify(activated)).not.toContain(root);
   });
 
+  it("설치 목록이 활성 version이 선언한 Capability를 함께 나른다", async () => {
+    await lifecycle.install(context, {
+      commandId: "install-capability",
+      archive: versionTar("1.0.0"),
+      environment: "local",
+      riskClass: "extension-install",
+      executionId: "surface-capability",
+    });
+
+    const [installation] = await store.listInstallations(context);
+
+    // 헌법 6절: 확장 화면은 「조직에 추가된 Capability를 먼저」 보여야 합니다. 목록이 선언을
+    // 나르지 않으면 설치된 확장에 대해서는 그 질문에 영원히 답할 수 없습니다.
+    expect(installation?.contributions?.runtimeTools).toEqual([{ id: "echo", handler: "echo" }]);
+    expect(installation?.permissions?.storage).toMatchObject({ quotaBytes: expect.any(Number) });
+  });
+
   it("종료 시 활성 worker를 중지하고 session을 종료 상태로 기록한다", async () => {
     const activated = await lifecycle.install(context, {
       commandId: "install-close-v1",

@@ -77,6 +77,13 @@ export interface ExtensionInstallationView {
   readonly state: InstallationRecord["state"];
   readonly activeVersionId?: string;
   readonly activationGeneration: number;
+  /**
+   * 활성 version의 manifest가 선언한 것. 헌법 6절은 확장 화면이 「조직에 추가된 Capability를 먼저」
+   * 보이라고 하는데, 이 둘이 없으면 설치된 확장에 대해서는 그 질문에 답할 수 없습니다.
+   * 활성 version이 없으면(설치만 되고 활성화 전) 비어 있습니다.
+   */
+  readonly contributions?: ExtensionArtifactReport["manifest"]["contributions"];
+  readonly permissions?: ExtensionArtifactReport["manifest"]["permissions"];
 }
 
 export interface RecordedExtensionWorkerSession {
@@ -368,7 +375,20 @@ export class ExtensionStore {
       "SELECT * OMIT id FROM extension_installation WHERE organization_id = $organization_id ORDER BY package_name ASC;",
       { organization_id: context.organizationId },
     );
-    return installations.map((installation) => this.installationView(installation));
+    const activeVersionIds = installations.flatMap((installation) =>
+      installation.active_version_id === undefined ? [] : [installation.active_version_id],
+    );
+    const [versions] =
+      activeVersionIds.length === 0
+        ? [[] as VersionRecord[]]
+        : await this.database.query<[VersionRecord[]]>(
+            "SELECT * OMIT id FROM extension_version WHERE organization_id = $organization_id AND version_id IN $version_ids;",
+            { organization_id: context.organizationId, version_ids: activeVersionIds },
+          );
+    const manifests = new Map(versions.map((version) => [version.version_id, version.manifest_json]));
+    return installations.map((installation) =>
+      this.installationView(installation, manifests.get(installation.active_version_id ?? "")),
+    );
   }
 
   public async recordWorkerSession(
@@ -508,7 +528,17 @@ export class ExtensionStore {
     };
   }
 
-  private installationView(record: InstallationRecord): ExtensionInstallationView {
+  private installationView(record: InstallationRecord, manifestJson?: string): ExtensionInstallationView {
+    // manifest는 설치 시 검사를 통과한 원문이지만, 여기서 던지면 목록 전체가 죽습니다.
+    // 선언을 읽지 못하면 그 확장만 비워 두고 나머지는 보입니다.
+    let manifest: ExtensionArtifactReport["manifest"] | undefined;
+    if (manifestJson !== undefined) {
+      try {
+        manifest = JSON.parse(manifestJson) as ExtensionArtifactReport["manifest"];
+      } catch {
+        manifest = undefined;
+      }
+    }
     return {
       installationId: record.installation_id,
       organizationId: record.organization_id,
@@ -516,6 +546,8 @@ export class ExtensionStore {
       state: record.state,
       ...(record.active_version_id === undefined ? {} : { activeVersionId: record.active_version_id }),
       activationGeneration: record.activation_generation,
+      ...(manifest?.contributions === undefined ? {} : { contributions: manifest.contributions }),
+      ...(manifest?.permissions === undefined ? {} : { permissions: manifest.permissions }),
     };
   }
 }
