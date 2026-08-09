@@ -1506,7 +1506,8 @@ describe("AgentOS native data flow", () => {
       quota: [],
       policy: [],
     }));
-    render(<App service={service({ loadSettings })} />);
+    const loadAutonomy = vi.fn(createFixtureDesktopService().loadAutonomy);
+    render(<App service={service({ loadAutonomy, loadSettings })} />);
 
     await user.click(screen.getByRole("button", { name: "설정" }));
     await screen.findByRole("main", { name: "설정" });
@@ -1517,8 +1518,11 @@ describe("AgentOS native data flow", () => {
     // 프로바이더와 계정은 프로바이더 표면이 소유합니다.
     expect(screen.queryByText(/Provider 연결/)).not.toBeInTheDocument();
     expect(screen.queryByText("구독 계정")).not.toBeInTheDocument();
-    // 설정 표면 진입이 실제 조회를 유발했는지만 봅니다.
-    expect(loadSettings).toHaveBeenCalled();
+    // 설정 표면 진입이 실제 조회를 유발했는지만 봅니다. 소유한 것은 권한·자가개선·언어·작업공간이므로
+    // 그 조회만 나가야 합니다. router·subscription 7개를 부르면 렌더에 쓰지도 않으면서 왕복을 쓰고,
+    // 하나만 실패해도 이 화면과 무관한 오류가 뜹니다.
+    expect(loadAutonomy).toHaveBeenCalled();
+    expect(loadSettings).not.toHaveBeenCalled();
     expect(screen.queryByText("절대-표시되면-안됨")).not.toBeInTheDocument();
   });
 
@@ -2787,15 +2791,12 @@ describe("AgentOS native data flow", () => {
     expect(decideWorkspaceTrust).toHaveBeenCalledWith(current, "trusted");
   });
 
-  it("설정과 권한 조회 실패가 작업공간 신뢰 목록을 가리지 않는다", async () => {
+  it("권한 조회 실패가 작업공간 신뢰 목록을 가리지 않는다", async () => {
     const user = userEvent.setup();
     const pending = workspaceFixture("workspace-pending", "검토 폴더", "/tmp/pending", "pending", 1);
     render(
       <App
         service={service({
-          loadSettings: async () => {
-            throw new Error("설정 조회 실패");
-          },
           loadAutonomy: async () => {
             throw new Error("권한 조회 실패");
           },
@@ -2807,7 +2808,6 @@ describe("AgentOS native data flow", () => {
     await user.click(screen.getByRole("button", { name: "설정" }));
     const section = await screen.findByRole("region", { name: "작업공간 신뢰" });
     expect(within(section).getByRole("row", { name: /검토 폴더/u })).toBeInTheDocument();
-    expect(screen.getByText("설정 조회 실패")).toBeInTheDocument();
     expect(screen.getByText("권한 조회 실패")).toBeInTheDocument();
   });
 
