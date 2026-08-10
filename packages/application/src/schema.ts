@@ -421,32 +421,54 @@ DEFINE FIELD OVERWRITE correlation_id ON application_event TYPE option<string> A
  * 공개 sequence와 Runtime recovery cursor는 유지하면서 raw JSON만 정확한 tombstone으로 바꿉니다. 이미
  * 공개된 source의 outbox는 보존·정합화하고, 공개 event가 없는 pending outbox만 제거합니다.
  */
-export const APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION = defineMigration(
-  "0121-application-runtime-stream-retirement",
-  `
-LET $raw_runtime_event_ids = SELECT VALUE event_id
-  FROM runtime_event
-  WHERE string::starts_with(event_type, 'model_');
-LET $projected_raw_runtime_sources = SELECT organization_id, source_id, event_id
-  FROM application_event
+const APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL = `
+LET $pending_runtime_sources = SELECT organization_id, source_id
+  FROM application_outbox
   WHERE source_kind = 'runtime-event'
-    AND source_id IN $raw_runtime_event_ids;
-FOR $projection IN $projected_raw_runtime_sources {
-  UPDATE application_outbox
-    SET state = 'projected', public_event_id = $projection.event_id, updated_at = time::now()
-    WHERE organization_id = $projection.organization_id
-      AND source_kind = 'runtime-event'
-      AND source_id = $projection.source_id
-      AND state = 'pending';
-};
-DELETE application_outbox
-  WHERE source_kind = 'runtime-event'
-    AND source_id IN $raw_runtime_event_ids
     AND state = 'pending';
+FOR $pending IN $pending_runtime_sources {
+  LET $raw_events = SELECT event_id
+    FROM runtime_event
+    WHERE event_id = $pending.source_id
+      AND string::starts_with(event_type, 'model_')
+    LIMIT 1;
+  IF array::len($raw_events) = 1 {
+    LET $projections = SELECT event_id
+      FROM application_event
+      WHERE organization_id = $pending.organization_id
+        AND source_kind = 'runtime-event'
+        AND source_id = $pending.source_id
+      LIMIT 1;
+    IF array::len($projections) = 1 {
+      UPDATE application_outbox
+        SET state = 'projected', public_event_id = $projections[0].event_id, updated_at = time::now()
+        WHERE organization_id = $pending.organization_id
+          AND source_kind = 'runtime-event'
+          AND source_id = $pending.source_id
+          AND state = 'pending';
+    } ELSE {
+      DELETE application_outbox
+        WHERE organization_id = $pending.organization_id
+          AND source_kind = 'runtime-event'
+          AND source_id = $pending.source_id
+          AND state = 'pending';
+    };
+  };
+};
 UPDATE runtime_event
   SET request_json = '{}', payload_json = '{}', result_json = '{}'
-  WHERE event_id IN $raw_runtime_event_ids;
-`,
+  WHERE string::starts_with(event_type, 'model_');
+`;
+
+export const APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION = defineMigration(
+  "0121-application-runtime-stream-retirement",
+  APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL,
+  { compatibleChecksums: ["07199ea58b87cc9a0a1c199dcc9f3e4d2d01b11895a9907b34bb988f4ec91866"] },
+);
+
+export const APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION = defineMigration(
+  "0122-application-runtime-stream-reconciliation",
+  APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL,
 );
 
 export const APPLICATION_MIGRATIONS = [
@@ -466,4 +488,5 @@ export const APPLICATION_MIGRATIONS = [
   APPLICATION_RUN_EVENT_WORK_MIGRATION,
   APPLICATION_EVENT_LINEAGE_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+  APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
 ] as const;

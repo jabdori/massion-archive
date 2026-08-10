@@ -329,6 +329,35 @@ describe("공용 local daemon 제어", () => {
     expect((await stat(resolveLocalPaths({ HOME: root }).pidFile)).mode & 0o777).toBe(0o600);
   });
 
+  it("기존 30초 polling 경계를 넘긴 소유 server의 migration 완료를 기다린다", async () => {
+    const root = await mkdtemp(join(tmpdir(), "massion-local-control-slow-start-"));
+    roots.push(root);
+    const nodeExecutable = join(root, "node");
+    const serverScript = join(root, "server.js");
+    await Promise.all([writeFile(nodeExecutable, "", { mode: 0o700 }), writeFile(serverScript, "", { mode: 0o600 })]);
+    let readinessChecks = 0;
+    const signal = vi.fn();
+    const manager = new LocalDaemonManager({
+      environment: { HOME: root },
+      nodeExecutable,
+      serverScript,
+      fetcher: async () => Response.json({ status: (readinessChecks += 1) === 121 ? "ready" : "starting" }),
+      processExists: () => true,
+      processCommand: async () => `${nodeExecutable} ${serverScript}`,
+      signal,
+      wait: async () => undefined,
+      spawnProcess: () => ({ pid: 42, unref() {} }),
+      surrealRuntime: {
+        start: async () => ({ status: "already-running", pid: 41, endpoint: "http://127.0.0.1:7330" }),
+        stop: async () => ({ status: "stopped", pid: 41 }),
+      },
+    });
+
+    await expect(manager.start()).resolves.toMatchObject({ status: "started", pid: 42 });
+    expect(readinessChecks).toBe(121);
+    expect(signal).not.toHaveBeenCalled();
+  });
+
   it("사용하지 않은 manager capability 메모리를 발급 TTL 뒤 자동 zeroize한다", async () => {
     const now = Date.now();
     vi.useFakeTimers();
@@ -872,6 +901,42 @@ describe("공용 local daemon 제어", () => {
       pid: 41,
       endpoint: "http://127.0.0.1:7331",
     });
+    expect(spawnProcess).not.toHaveBeenCalled();
+    expect(signal).not.toHaveBeenCalled();
+  });
+
+  it("기존 30초 polling 경계를 넘겨 부팅 중인 현재 v3 process를 재사용한다", async () => {
+    const root = await mkdtemp(join(tmpdir(), "massion-local-control-slow-reuse-"));
+    roots.push(root);
+    const nodeExecutable = join(root, "node");
+    const serverScript = join(root, "server.js");
+    const spawnProcess = vi.fn(() => ({ pid: 42, unref() {} }));
+    const signal = vi.fn();
+    let readinessChecks = 0;
+    const manager = new LocalDaemonManager({
+      environment: { HOME: root },
+      nodeExecutable,
+      serverScript,
+      runtimeVersion: "2.4.0",
+      fetcher: async () => Response.json({ status: (readinessChecks += 1) === 121 ? "ready" : "starting" }),
+      processExists: () => true,
+      processCommand: async () => `${nodeExecutable} ${serverScript}`,
+      signal,
+      wait: async () => undefined,
+      spawnProcess,
+      surrealRuntime: {
+        start: async () => ({ status: "already-running", pid: 41, endpoint: "http://127.0.0.1:7330" }),
+        stop: async () => ({ status: "stopped", pid: 41 }),
+      },
+    });
+    await manager.initializeStateForTest({ pid: 41, endpoint: "http://127.0.0.1:7331" });
+
+    await expect(manager.start()).resolves.toEqual({
+      status: "already-running",
+      pid: 41,
+      endpoint: "http://127.0.0.1:7331",
+    });
+    expect(readinessChecks).toBe(121);
     expect(spawnProcess).not.toHaveBeenCalled();
     expect(signal).not.toHaveBeenCalled();
   });

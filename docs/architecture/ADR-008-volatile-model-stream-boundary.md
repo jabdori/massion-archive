@@ -58,7 +58,10 @@ Artifact가 아니므로 복원하지 않습니다. 정상 성공의 확정 text
 
 ### 4. 과거 raw event는 cursor를 보존한 tombstone으로 retire합니다
 
-Application migration `0121-application-runtime-stream-retirement`는 하나의 transaction에서 다음만 수행합니다.
+Application migration은 같은 정합화 SQL을 두 역할로 적용합니다. `0121-application-runtime-stream-retirement`는
+아직 0121을 적용하지 않은 DB를 정리하고 이전 0121 checksum을 호환합니다.
+`0122-application-runtime-stream-reconciliation`은 이전 checksum의 0121이 이미 적용된 DB에 이후 남은 raw
+stream을 다시 정리합니다. 두 migration은 각각 하나의 transaction에서 다음만 수행합니다.
 
 - event type이 `model_`로 시작하는 과거 raw Runtime Event의 ID·실행 ID·command ID·sequence·시각은 보존합니다.
 - `request_json`·`payload_json`·`result_json`을 정확히 `{}`로 바꿉니다.

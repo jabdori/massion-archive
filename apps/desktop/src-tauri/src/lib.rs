@@ -17,6 +17,7 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_INCOMING_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 128;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_LOGIN_POLL: Duration = Duration::from_millis(200);
@@ -55,6 +56,7 @@ impl BridgeMethod {
 
 fn response_timeout(method: BridgeMethod) -> Duration {
     match method {
+        BridgeMethod::Connect => CONNECT_RESPONSE_TIMEOUT,
         BridgeMethod::Command => COMMAND_RESPONSE_TIMEOUT,
         _ => RESPONSE_TIMEOUT,
     }
@@ -1004,7 +1006,6 @@ mod tests {
     fn non_command_response_timeouts_remain_thirty_seconds() {
         for method in [
             BridgeMethod::Hello,
-            BridgeMethod::Connect,
             BridgeMethod::Query,
             BridgeMethod::EventsStart,
             BridgeMethod::EventsStop,
@@ -1014,6 +1015,14 @@ mod tests {
         ] {
             assert_eq!(response_timeout(method), Duration::from_secs(30));
         }
+    }
+
+    #[test]
+    fn connect_response_timeout_outlives_local_daemon_startup_budget() {
+        assert_eq!(
+            response_timeout(BridgeMethod::Connect),
+            Duration::from_secs(600)
+        );
     }
 
     #[test]

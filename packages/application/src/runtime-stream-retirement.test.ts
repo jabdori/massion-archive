@@ -5,12 +5,17 @@ import { RuntimeExecutionStore, RuntimeRecovery, type RuntimeEvent } from "@mass
 import { applyMigrations, createDatabase, listAppliedMigrations, type MassionDatabase } from "@massion/storage";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { ApplicationEventProjector } from "./event-projector.js";
 import {
+  APPLICATION_MIGRATIONS,
   APPLICATION_EVENT_LINEAGE_MIGRATION,
   APPLICATION_EVENT_MIGRATION,
   APPLICATION_OUTBOX_MIGRATION,
+  APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
 } from "./schema.js";
+
+const LEGACY_RUNTIME_STREAM_RETIREMENT_CHECKSUM = "07199ea58b87cc9a0a1c199dcc9f3e4d2d01b11895a9907b34bb988f4ec91866";
 
 interface OutboxRecord {
   readonly outbox_id: string;
@@ -61,6 +66,42 @@ describe("과거 Runtime stream part retirement", () => {
 
   afterEach(async () => {
     await database.close();
+  });
+
+  async function markLegacyRetirementApplied(): Promise<void> {
+    await database.query(
+      "CREATE system_migration CONTENT { migration_id: '0121-application-runtime-stream-retirement', checksum: $checksum, applied_at: time::now() };",
+      { checksum: LEGACY_RUNTIME_STREAM_RETIREMENT_CHECKSUM },
+    );
+  }
+
+  it("pending raw source만 정합화하고 이전 0121 checksum을 호환한다", async () => {
+    await markLegacyRetirementApplied();
+
+    await expect(applyMigrations(database, [APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION])).resolves.toEqual([]);
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.compatibleChecksums).toContain(
+      LEGACY_RUNTIME_STREAM_RETIREMENT_CHECKSUM,
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.surql).toBe(
+      APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql,
+    );
+    expect(APPLICATION_MIGRATIONS).toContain(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION);
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("LET $pending_runtime_sources");
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("FOR $pending IN $pending_runtime_sources");
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain(
+      "FOR $projection IN $projected_raw_runtime_sources",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain("LET $raw_runtime_event_ids");
+  });
+
+  it("Application Event Projector가 기존 0121 DB에 0122 reconciliation을 적용한다", async () => {
+    await markLegacyRetirementApplied();
+
+    await ApplicationEventProjector.create(database, organizations);
+
+    expect((await listAppliedMigrations(database)).map((migration) => migration.migration_id)).toContain(
+      "0122-application-runtime-stream-reconciliation",
+    );
   });
 
   async function running(suffix: string) {
@@ -139,7 +180,12 @@ describe("과거 Runtime stream part retirement", () => {
     );
   });
 
-  it("혼합 projection을 보존·정합화하고 raw JSON만 tombstone한 뒤 recovery와 replay를 fail-closed로 유지한다", async () => {
+  it("기존 old-checksum DB의 0122는 혼합 projection을 보존·정합화하고 raw JSON만 tombstone한 뒤 recovery와 replay를 fail-closed로 유지한다", async () => {
+    await markLegacyRetirementApplied();
+    const migrations = [
+      APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+      APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+    ];
     let primary = await running("primary");
     primary = await runtime.appendEvent(context, {
       commandId: "retirement-primary-route",
@@ -224,8 +270,8 @@ describe("과거 Runtime stream part retirement", () => {
       { execution_ids: [primary.execution.execution_id, recoverable.execution.execution_id] },
     );
 
-    await expect(applyMigrations(database, [APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION])).resolves.toEqual([
-      "0121-application-runtime-stream-retirement",
+    await expect(applyMigrations(database, migrations)).resolves.toEqual([
+      "0122-application-runtime-stream-reconciliation",
     ]);
 
     const [rawAfter] = await database.query<
@@ -306,6 +352,6 @@ describe("과거 Runtime stream part retirement", () => {
     ]);
     expect(recovered.events[2]).toMatchObject({ request_json: "{}", payload_json: "{}", result_json: "{}" });
     expect(recovered.events.filter((event) => event.event_type === "execution_interrupted")).toHaveLength(1);
-    await expect(applyMigrations(database, [APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION])).resolves.toEqual([]);
+    await expect(applyMigrations(database, migrations)).resolves.toEqual([]);
   });
 });

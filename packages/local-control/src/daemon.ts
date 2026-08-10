@@ -50,6 +50,8 @@ export interface LocalPaths {
 
 const LOCAL_DATA_EPOCH = "massion-v1-data-epoch-1";
 const LOCAL_DATA_ROOT = "massion-v1";
+const LOCAL_DAEMON_READY_ATTEMPTS = 240;
+const LOCAL_DAEMON_READY_POLL_MS = 250;
 export const LOCAL_BOOTSTRAP_CAPABILITY_TTL_MS = 5 * 60_000;
 const epochOperations = new Map<string, Promise<void>>();
 
@@ -1066,7 +1068,7 @@ export class LocalDaemonManager {
       if (await this.#owned(existing)) {
         if (this.#current(existing)) {
           // 현재 runtime이면 준비 완료 또는 부팅 중인 process를 재사용한다.
-          for (let attempt = 0; attempt < 40; attempt += 1) {
+          for (let attempt = 0; attempt < LOCAL_DAEMON_READY_ATTEMPTS; attempt += 1) {
             if (await this.#ready(existing.endpoint)) {
               const binding = bootstrapBinding(existing);
               if (!binding) throw new Error("local bootstrap capability binding이 없습니다");
@@ -1080,7 +1082,7 @@ export class LocalDaemonManager {
               return { status: "already-running", pid: existing.pid, endpoint: existing.endpoint };
             }
             if (!this.#processExists(existing.pid)) break;
-            await this.#wait(250);
+            await this.#wait(LOCAL_DAEMON_READY_POLL_MS);
           }
         }
         // 구 schema·runtime 불일치·준비 실패 상태는 소유 process의 종료를 확인한 뒤 v3로 교체합니다.
@@ -1135,10 +1137,10 @@ export class LocalDaemonManager {
         startedAt: new Date().toISOString(),
       };
       await writePidRecord(this.#paths.pidFile, record);
-      for (let attempt = 0; attempt < 120; attempt += 1) {
+      for (let attempt = 0; attempt < LOCAL_DAEMON_READY_ATTEMPTS; attempt += 1) {
         if (await this.#ready(endpoint)) return { status: "started", pid: child.pid, endpoint };
         if (!this.#processExists(child.pid)) break;
-        await this.#wait(250);
+        await this.#wait(LOCAL_DAEMON_READY_POLL_MS);
       }
       throw new Error(`local Massion server가 준비되지 않았습니다. log: ${this.#paths.logFile}`);
     } catch (error) {
