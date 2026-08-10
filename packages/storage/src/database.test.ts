@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import { CallTerminatedError, Surreal } from "surrealdb";
 import { describe, expect, it, vi } from "vitest";
 
 import { createDatabase, MassionDatabase, serializeSurrealDateTime } from "./database.js";
@@ -19,6 +20,23 @@ async function nextTurn(): Promise<void> {
 }
 
 describe("SurrealDB 연결", () => {
+  it("SDK WebSocket의 pending RPC 자동 재전송을 비활성화한다", async () => {
+    const connect = vi.spyOn(Surreal.prototype, "connect").mockResolvedValue(true);
+    try {
+      const database = await createDatabase({
+        url: "ws://127.0.0.1:7330",
+        namespace: "massion",
+        database: "reconnect_contract",
+      });
+
+      expect(connect).toHaveBeenCalledOnce();
+      expect(connect.mock.calls[0]?.[1]).toMatchObject({ reconnect: false });
+      await database.close();
+    } finally {
+      connect.mockRestore();
+    }
+  });
+
   it("embedded memory DB에 연결하고 namespace와 database를 선택한다", async () => {
     await using db = await createDatabase({ url: "mem://", namespace: "massion", database: "test" });
 
@@ -292,6 +310,217 @@ describe("SurrealDB 연결", () => {
     await expect(result).resolves.toEqual([[], []]);
     expect(maximumActive).toBe(1);
     expect(log).toEqual(["start:first", "finish:first", "start:second", "finish:second"]);
+  });
+
+  it("WebSocket disconnect는 pending RPC를 재전송하지 않고 연결 복구 뒤 transaction callback 전체만 재시도한다", async () => {
+    const firstQueryEntered = deferred();
+    const reconnectReady = deferred();
+    const listeners = new Map<string, Set<() => void>>();
+    const committedAttempts: number[] = [];
+    const cancelledAttempts: number[] = [];
+    let rejectPendingQuery!: (error: Error) => void;
+    let reconnectCalls = 0;
+    let attempts = 0;
+    const client = {
+      isConnected: true,
+      subscribe(event: string, listener: () => void): () => void {
+        const eventListeners = listeners.get(event) ?? new Set<() => void>();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      beginTransaction: async () => {
+        const attempt = ++attempts;
+        return {
+          query: async () => {
+            if (attempt === 1) {
+              firstQueryEntered.resolve();
+              await new Promise<void>((_resolve, reject) => {
+                rejectPendingQuery = reject;
+              });
+            }
+            return [[attempt]];
+          },
+          commit: async () => {
+            committedAttempts.push(attempt);
+          },
+          cancel: async () => {
+            cancelledAttempts.push(attempt);
+          },
+        };
+      },
+    };
+    const database = new MassionDatabase(client as never, async () => {
+      reconnectCalls += 1;
+      await reconnectReady.promise;
+      client.isConnected = true;
+    });
+    const operation = database.transaction(async (transaction) => await transaction.query<number[][]>("RETURN 1;"));
+
+    await firstQueryEntered.promise;
+    client.isConnected = false;
+    rejectPendingQuery(new CallTerminatedError());
+    for (const listener of listeners.get("disconnected") ?? []) listener();
+    await nextTurn();
+    expect(attempts).toBe(1);
+    await vi.waitFor(() => expect(reconnectCalls).toBe(1), { timeout: 500 });
+    reconnectReady.resolve();
+
+    await vi.waitFor(() => expect(attempts).toBe(2), { timeout: 500 });
+    await expect(operation).resolves.toEqual([[2]]);
+    expect(committedAttempts).toEqual([2]);
+    expect(cancelledAttempts).toEqual([]);
+  });
+
+  it("commit 중 disconnect는 적용 여부를 추측해 callback을 재시도하지 않고 typed unknown으로 닫는다", async () => {
+    const commitEntered = deferred();
+    const listeners = new Map<string, Set<() => void>>();
+    let rejectCommit!: (error: Error) => void;
+    let reconnectCalls = 0;
+    let callbackAttempts = 0;
+    let beginAttempts = 0;
+    let committedWrites = 0;
+    let cancellations = 0;
+    const client = {
+      isConnected: true,
+      subscribe(event: string, listener: () => void): () => void {
+        const eventListeners = listeners.get(event) ?? new Set<() => void>();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      beginTransaction: async () => {
+        const attempt = ++beginAttempts;
+        return {
+          query: async () => [[attempt]],
+          commit: async () => {
+            committedWrites += 1;
+            if (attempt === 1) {
+              commitEntered.resolve();
+              await new Promise<void>((_resolve, reject) => {
+                rejectCommit = reject;
+              });
+            }
+          },
+          cancel: async () => {
+            cancellations += 1;
+          },
+        };
+      },
+    };
+    const database = new MassionDatabase(client as never, async () => {
+      reconnectCalls += 1;
+      client.isConnected = true;
+    });
+    const operation = database.transaction(async (transaction) => {
+      callbackAttempts += 1;
+      return await transaction.query<number[][]>("CREATE commit_probe;");
+    });
+
+    await commitEntered.promise;
+    client.isConnected = false;
+    rejectCommit(new CallTerminatedError());
+    for (const listener of listeners.get("disconnected") ?? []) listener();
+
+    await expect(operation).rejects.toMatchObject({
+      name: "MassionDatabaseLifecycleError",
+      code: "DATABASE_TRANSACTION_COMMIT_UNKNOWN",
+      message: "SurrealDB transaction commit 결과를 확인할 수 없습니다",
+    });
+    expect(callbackAttempts).toBe(1);
+    expect(beginAttempts).toBe(1);
+    expect(committedWrites).toBe(1);
+    expect(cancellations).toBe(0);
+    expect(reconnectCalls).toBe(0);
+  });
+
+  it("commit ACK 뒤 같은 turn의 disconnect는 완료된 결과를 unknown으로 되돌리지 않는다", async () => {
+    const commitEntered = deferred();
+    const commitAcknowledged = deferred();
+    const listeners = new Map<string, Set<() => void>>();
+    let callbackAttempts = 0;
+    let commits = 0;
+    const client = {
+      isConnected: true,
+      subscribe(event: string, listener: () => void): () => void {
+        const eventListeners = listeners.get(event) ?? new Set<() => void>();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      beginTransaction: async () => ({
+        query: async () => [[1]],
+        commit: () => {
+          commits += 1;
+          commitEntered.resolve();
+          return commitAcknowledged.promise;
+        },
+        cancel: async () => undefined,
+      }),
+    };
+    const database = new MassionDatabase(client as never, async () => {
+      client.isConnected = true;
+    });
+    const operation = database.transaction(async (transaction) => {
+      callbackAttempts += 1;
+      return await transaction.query<number[][]>("CREATE acknowledged_probe;");
+    });
+
+    await commitEntered.promise;
+    commitAcknowledged.resolve();
+    queueMicrotask(() => {
+      client.isConnected = false;
+      for (const listener of listeners.get("disconnected") ?? []) listener();
+    });
+
+    await expect(operation).resolves.toEqual([[1]]);
+    expect(callbackAttempts).toBe(1);
+    expect(commits).toBe(1);
+  });
+
+  it("disconnect된 일반 query는 자동 재전송하지 않고 다음 operation 진입 때만 연결을 복구한다", async () => {
+    const firstQueryEntered = deferred();
+    const listeners = new Map<string, Set<() => void>>();
+    const terminated = new CallTerminatedError();
+    let rejectPendingQuery!: (error: Error) => void;
+    let reconnectCalls = 0;
+    let queryCalls = 0;
+    const client = {
+      isConnected: true,
+      subscribe(event: string, listener: () => void): () => void {
+        const eventListeners = listeners.get(event) ?? new Set<() => void>();
+        eventListeners.add(listener);
+        listeners.set(event, eventListeners);
+        return () => eventListeners.delete(listener);
+      },
+      query: async () => {
+        const call = ++queryCalls;
+        if (call === 1) {
+          firstQueryEntered.resolve();
+          await new Promise<void>((_resolve, reject) => {
+            rejectPendingQuery = reject;
+          });
+        }
+        return [[call]];
+      },
+    };
+    const database = new MassionDatabase(client as never, async () => {
+      reconnectCalls += 1;
+      client.isConnected = true;
+    });
+    const first = database.query<number[][]>("CREATE non_idempotent_probe;");
+
+    await firstQueryEntered.promise;
+    client.isConnected = false;
+    rejectPendingQuery(terminated);
+    for (const listener of listeners.get("disconnected") ?? []) listener();
+
+    await expect(first).rejects.toBe(terminated);
+    expect(queryCalls).toBe(1);
+    expect(reconnectCalls).toBe(0);
+    await expect(database.query<number[][]>("RETURN 2;")).resolves.toEqual([[2]]);
+    expect(queryCalls).toBe(2);
+    expect(reconnectCalls).toBe(1);
   });
 
   it("callback이 기다리지 않은 query 실패도 commit하지 않는다", async () => {

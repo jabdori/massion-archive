@@ -2,11 +2,27 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { createNodeEngines } from "@surrealdb/node";
-import { createRemoteEngines, DateTime, isRetryableConflict, Surreal, type SurrealTransaction } from "surrealdb";
+import {
+  CallTerminatedError,
+  ConnectionUnavailableError,
+  createRemoteEngines,
+  DateTime,
+  isRetryableConflict,
+  Surreal,
+  type SurrealTransaction,
+} from "surrealdb";
 
 const SUPPORTED_PROTOCOLS = new Set(["mem:", "rocksdb:", "http:", "https:", "ws:", "wss:"]);
 const LEGACY_CONFLICT_PREFIX = "Transaction conflict: Write conflict";
 const ROLLBACK_TIMEOUT_MS = 1_000;
+
+class TransactionConnectionLostError extends Error {
+  public override readonly name = "TransactionConnectionLostError";
+
+  public constructor(options?: ErrorOptions) {
+    super("SurrealDB 연결이 변경되어 열린 transaction을 다시 시도합니다", options);
+  }
+}
 
 async function cancelBestEffort(transaction: SurrealTransaction): Promise<void> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -39,9 +55,18 @@ function isCompatibleRetryableConflict(error: unknown): boolean {
   return (
     isRetryableConflict(error) ||
     isLostTransaction(error) ||
+    isTransactionConnectionFailure(error) ||
     (error instanceof Error &&
       error.message.startsWith(LEGACY_CONFLICT_PREFIX) &&
       error.message.endsWith("can be retried"))
+  );
+}
+
+function isTransactionConnectionFailure(error: unknown): boolean {
+  return (
+    error instanceof TransactionConnectionLostError ||
+    error instanceof CallTerminatedError ||
+    error instanceof ConnectionUnavailableError
   );
 }
 
@@ -74,7 +99,8 @@ export type MassionDatabaseLifecycleErrorCode =
   | "DATABASE_CLOSE_FAILED"
   | "DATABASE_TRANSACTION_REENTRANT"
   | "DATABASE_CLOSE_IN_TRANSACTION"
-  | "DATABASE_TRANSACTION_SEALED";
+  | "DATABASE_TRANSACTION_SEALED"
+  | "DATABASE_TRANSACTION_COMMIT_UNKNOWN";
 
 export class MassionDatabaseLifecycleError extends Error {
   public override readonly name = "MassionDatabaseLifecycleError";
@@ -92,8 +118,15 @@ class TransactionExecutor implements QueryExecutor {
   private sealed = false;
   private failed = false;
   private failure: unknown;
+  private readonly failureSignal: Promise<never>;
+  private rejectFailure!: (error: unknown) => void;
 
-  public constructor(private readonly transaction: SurrealTransaction) {}
+  public constructor(private readonly transaction: SurrealTransaction) {
+    this.failureSignal = new Promise<never>((_resolve, reject) => {
+      this.rejectFailure = reject;
+    });
+    void this.failureSignal.catch(() => undefined);
+  }
 
   public query<R = unknown[]>(surql: string, bindings?: Record<string, unknown>): Promise<R> {
     if (this.sealed) {
@@ -107,7 +140,7 @@ class TransactionExecutor implements QueryExecutor {
     const task = this.tail.then(async () => {
       if (this.failed) throw this.failure;
       try {
-        return (await this.transaction.query(surql, bindings)) as R;
+        return (await Promise.race([this.transaction.query(surql, bindings), this.failureSignal])) as R;
       } catch (error) {
         this.fail(error);
         throw error;
@@ -138,17 +171,34 @@ class TransactionExecutor implements QueryExecutor {
     if (this.failed) return;
     this.failed = true;
     this.failure = error;
+    this.rejectFailure(error);
   }
 }
 
 export class MassionDatabase implements QueryExecutor, AsyncDisposable {
   private readonly transactionScope = new AsyncLocalStorage<true>();
   private readonly activeClientOperations = new Set<Promise<unknown>>();
+  private readonly activeTransactionInvalidators = new Set<(error: TransactionConnectionLostError) => void>();
+  private readonly unsubscribeConnectionLifecycle: () => void;
   private transactionTail: Promise<void> = Promise.resolve();
+  private reconnectPromise: Promise<void> | undefined;
   private state: "open" | "closing" | "closed" = "open";
   private closePromise: Promise<void> | undefined;
 
-  public constructor(private readonly client: Surreal) {}
+  public constructor(
+    private readonly client: Surreal,
+    private readonly reconnectClient?: () => Promise<void>,
+  ) {
+    if (typeof this.client.subscribe === "function") {
+      const disconnected = this.client.subscribe("disconnected", () => {
+        this.invalidateActiveTransactions();
+      });
+      this.unsubscribeConnectionLifecycle = disconnected;
+    } else {
+      // 단위 테스트의 최소 client 대역은 연결 lifecycle을 제공하지 않을 수 있습니다.
+      this.unsubscribeConnectionLifecycle = () => undefined;
+    }
+  }
 
   public async query<R = unknown[]>(surql: string, bindings?: Record<string, unknown>): Promise<R> {
     return await this.runClientOperation(async () => (await this.client.query(surql, bindings)) as R);
@@ -183,21 +233,70 @@ export class MassionDatabase implements QueryExecutor, AsyncDisposable {
 
   private async executeTransaction<T>(operation: (transaction: QueryExecutor) => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt += 1) {
-      const transaction = await this.client.beginTransaction();
-      const executor = new TransactionExecutor(transaction);
+      let transaction: SurrealTransaction | undefined;
+      let executor: TransactionExecutor | undefined;
+      const transactionState: { phase: "executing" | "committing" | "committed" } = { phase: "executing" };
+      let invalidated = false;
+      let rejectConnectionLoss!: (error: Error) => void;
+      const connectionLoss = new Promise<never>((_resolve, reject) => {
+        rejectConnectionLoss = reject;
+      });
+      void connectionLoss.catch(() => undefined);
+      const invalidate = (error: TransactionConnectionLostError): void => {
+        if (transactionState.phase === "committed") return;
+        if (invalidated) return;
+        invalidated = true;
+        const failure =
+          transactionState.phase === "committing"
+            ? new MassionDatabaseLifecycleError(
+                "DATABASE_TRANSACTION_COMMIT_UNKNOWN",
+                "SurrealDB transaction commit 결과를 확인할 수 없습니다",
+              )
+            : error;
+        executor?.abort(failure);
+        rejectConnectionLoss(failure);
+      };
       try {
-        const result = await operation(executor);
-        executor.seal();
-        await executor.drain();
-        await transaction.commit();
-        return result;
-      } catch (error) {
-        executor.abort(error);
+        await this.ensureConnected();
+        transaction = await this.client.beginTransaction();
+        executor = new TransactionExecutor(transaction);
+        const activeTransaction = transaction;
+        const activeExecutor = executor;
+        this.activeTransactionInvalidators.add(invalidate);
+        return await Promise.race([
+          (async () => {
+            const result = await operation(activeExecutor);
+            activeExecutor.seal();
+            await activeExecutor.drain();
+            transactionState.phase = "committing";
+            await activeTransaction.commit();
+            transactionState.phase = "committed";
+            return result;
+          })(),
+          connectionLoss,
+        ]);
+      } catch (caught) {
+        const error =
+          transactionState.phase === "committing" && isTransactionConnectionFailure(caught)
+            ? new MassionDatabaseLifecycleError(
+                "DATABASE_TRANSACTION_COMMIT_UNKNOWN",
+                "SurrealDB transaction commit 결과를 확인할 수 없습니다",
+              )
+            : caught;
+        executor?.abort(error);
         // 서버가 이미 버린 transaction을 다시 cancel하면 같은 not-found 경고만 한 번 더 만듭니다.
-        if (!isLostTransaction(error)) await cancelBestEffort(transaction);
+        if (
+          transaction &&
+          !isLostTransaction(error) &&
+          !isTransactionConnectionFailure(error) &&
+          !(error instanceof MassionDatabaseLifecycleError && error.code === "DATABASE_TRANSACTION_COMMIT_UNKNOWN")
+        )
+          await cancelBestEffort(transaction);
         if (!isCompatibleRetryableConflict(error) || attempt >= 3) throw error;
         // 즉시 재시도하면 경쟁 상대의 다음 transaction과 계속 같은 시점에 충돌할 수 있습니다.
         await delay(2 ** attempt);
+      } finally {
+        this.activeTransactionInvalidators.delete(invalidate);
       }
     }
   }
@@ -248,7 +347,10 @@ export class MassionDatabase implements QueryExecutor, AsyncDisposable {
 
   private async runClientOperation<T>(operation: () => Promise<T>): Promise<T> {
     this.assertOpen();
-    const task = Promise.resolve().then(operation);
+    const task = Promise.resolve().then(async () => {
+      await this.ensureConnected();
+      return await operation();
+    });
     this.activeClientOperations.add(task);
     try {
       return await task;
@@ -271,8 +373,29 @@ export class MassionDatabase implements QueryExecutor, AsyncDisposable {
     } finally {
       this.state = "closed";
       this.closePromise = undefined;
+      this.unsubscribeConnectionLifecycle();
       this.transactionScope.disable();
     }
+  }
+
+  private invalidateActiveTransactions(): void {
+    const error = new TransactionConnectionLostError();
+    for (const invalidate of [...this.activeTransactionInvalidators]) invalidate(error);
+  }
+
+  private async ensureConnected(): Promise<void> {
+    if (this.client.isConnected || !this.reconnectClient) {
+      await this.client.ready;
+      return;
+    }
+    this.reconnectPromise ??= this.reconnectClient()
+      .catch(() => {
+        throw new TransactionConnectionLostError();
+      })
+      .finally(() => {
+        this.reconnectPromise = undefined;
+      });
+    await this.reconnectPromise;
   }
 }
 
@@ -289,24 +412,32 @@ export async function createDatabase(config: DatabaseConfig): Promise<MassionDat
     },
   });
 
-  try {
-    const authentication = config.authentication
-      ? config.authentication.scope === "database"
-        ? {
-            namespace: config.namespace,
-            database: config.database,
-            username: config.authentication.username,
-            password: config.authentication.password,
-          }
-        : { username: config.authentication.username, password: config.authentication.password }
-      : undefined;
+  const authentication = config.authentication
+    ? config.authentication.scope === "database"
+      ? {
+          namespace: config.namespace,
+          database: config.database,
+          username: config.authentication.username,
+          password: config.authentication.password,
+        }
+      : { username: config.authentication.username, password: config.authentication.password }
+    : undefined;
+  const connect = async (): Promise<void> => {
     await client.connect(config.url, {
       namespace: config.namespace,
       database: config.database,
       ...(authentication ? { authentication } : {}),
       versionCheck: true,
+      // SDK auto-reconnect는 pending transaction RPC를 새 WebSocket에 재전송합니다. 서버의
+      // transaction map은 connection-local이므로 이를 끄고 MassionDatabase가 transaction
+      // callback 전체만 새 transaction ID로 다시 실행합니다.
+      reconnect: false,
     });
-    return new MassionDatabase(client);
+  };
+
+  try {
+    await connect();
+    return new MassionDatabase(client, connect);
   } catch (error) {
     await client.close().catch(() => undefined);
     throw error;

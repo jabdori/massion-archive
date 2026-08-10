@@ -15,6 +15,13 @@ Storage wrapper와 Event Projector가 각각 retry를 소유했던 기존 구조
 Projector 외부 retry와 idle poll transaction은 ADR 이전 수정에서 제거했지만, 실제 Work command가 동시에
 transaction을 열 수 있는 경계는 남았습니다.
 
+이후 새 Tauri 후보의 실제 환불 Work에서는 동적 Agent와 Task가 실행되고 Artifact까지 생성됐지만,
+`Transaction … not found`가 44,209건에서 44,356건으로 147건 증가하며 Assurance가 `running`에
+고착됐습니다. 모든 신규 경고는 commit/cancel이 아니라 transaction query였습니다. Surreal JavaScript SDK
+2.0.4와 공식 최신 2.0.8은 WebSocket 재연결 뒤 완료되지 않은 RPC를 새 socket에 자동 재전송하지만,
+interactive transaction ID는 연결별 map에 속합니다. 따라서 이전 연결의 query를 새 연결에 재전송하면
+서버에는 같은 transaction ID가 없어 반드시 실패합니다.
+
 또한 Subscription Workspace 확인은 transaction 안에서 `lstat`·`realpath` 파일 I/O를 기다렸습니다. 느리거나
 응답하지 않는 volume 하나가 공유 client의 모든 후속 transaction과 종료를 막을 수 있습니다.
 [SurrealDB 공식 transaction 가이드](https://surrealdb.com/docs/reference/javascript/concepts/transactions)도
@@ -43,7 +50,20 @@ operation을 추적합니다.
 측정되면 tenant·session별 client로 분리하지만, 동시 transaction을 같은 client에 다시 여는 방식으로
 최적화하지 않습니다.
 
-### 2. 재귀 transaction과 transaction 내부 종료는 즉시 거절합니다
+### 2. WebSocket 재연결은 transaction RPC를 재전송하지 않습니다
+
+Storage가 만드는 client는 SDK 자동 재연결을 끕니다. 연결이 끊기면 SDK가 완료되지 않은 RPC를 거절하고
+비운 뒤, `MassionDatabase`가 다음 작업 진입 전에 연결을 단일 비행으로 복구합니다. transaction query 단계의
+연결 손실은 서버가 해당 연결의 transaction map을 폐기하므로 새 transaction ID로 callback 전체를 bounded
+재시도합니다. 일반 query는 write 여부를 알 수 없으므로 끊긴 호출을 자동 재실행하지 않고, 호출자에게 오류를
+반환한 뒤 다음 operation 진입 때만 연결을 복구합니다.
+
+commit 요청 중 연결이 끊기면 서버가 반영한 뒤 응답만 잃었을 수 있습니다. 이 경우 callback을 재실행하지
+않고 `DATABASE_TRANSACTION_COMMIT_UNKNOWN`으로 fail-closed합니다. 상위 command replay가 같은 command ID로
+정본을 다시 읽어 결과를 확정해야 합니다. 반대로 commit 응답을 이미 받은 뒤 연결이 끊기면 성공을 그대로
+반환합니다.
+
+### 3. 재귀 transaction과 transaction 내부 종료는 즉시 거절합니다
 
 `AsyncLocalStorage`로 현재 transaction scope를 표시합니다. 같은 `MassionDatabase`의 재귀 transaction은
 두 번째 `begin` 전에, transaction 안의 `close()`는 자기 자신을 기다리기 전에 typed lifecycle error로
@@ -51,7 +71,7 @@ operation을 추적합니다.
 [Node `AsyncLocalStorage.disable()` 계약](https://nodejs.org/api/async_context.html#asynclocalstoragedisable)에
 따라 `disable()`을 호출해 wrapper가 garbage collection될 수 있게 합니다.
 
-### 3. Governance 승인은 원자 변경 전에 준비하고 permit은 원자 변경 안에서 소비합니다
+### 4. Governance 승인은 원자 변경 전에 준비하고 permit은 원자 변경 안에서 소비합니다
 
 Dynamic Staffing처럼 승인 생성과 여러 도메인 변경을 함께 조정하는 경로는 승인 요청을 이미 열린
 interactive transaction 안에서 만들지 않습니다. 저장된 proposal의 replay·계보를 먼저 확인한 뒤, 승인이
@@ -72,7 +92,7 @@ transaction executor로 수행합니다. 따라서 뒤의 메시지나 Assignmen
 rollback됩니다. 새 run retry command는 기존 approval ID에 연결된 proposal을 다시 사용하며, 알 수 없거나
 다른 Work의 approval ID로 새 proposal을 만들지 않습니다.
 
-### 4. 종료는 새 작업을 막고 이미 승인한 작업만 drain합니다
+### 5. 종료는 새 작업을 막고 이미 승인한 작업만 drain합니다
 
 첫 `close()`가 상태를 동기적으로 `closing`으로 바꾸므로 이후 query·transaction·version·import·export는
 시작되지 않습니다. 이미 FIFO에 들어온 transaction과 이미 시작한 client operation을 기다린 뒤 underlying
@@ -82,7 +102,7 @@ underlying close가 실패해도 instance는 다시 사용 가능한 상태로 �
 `DATABASE_CLOSE_FAILED`를 호출자에게 반환하고 terminal `closed` 상태로 남겨, 반쯤 닫힌 client에 새 작업을
 보내지 않습니다.
 
-### 5. 파일시스템 I/O는 transaction 밖에서 수행하고 마지막에 계보를 다시 확인합니다
+### 6. 파일시스템 I/O는 transaction 밖에서 수행하고 마지막에 계보를 다시 확인합니다
 
 Subscription Workspace snapshot은 다음 순서를 사용합니다.
 
@@ -96,6 +116,8 @@ transaction 밖으로 옮기되 TOCTOU 경계를 fail-closed로 유지합니다.
 ## 결과
 
 - 한 Surreal client에는 interactive transaction이 최대 하나만 열리고, 그 transaction 안에서도 query는 하나씩 실행됩니다.
+- WebSocket이 끊겨도 이전 연결의 transaction RPC를 새 연결에 재전송하지 않습니다.
+- query 단계 연결 손실만 전체 transaction을 재시도하고, commit 결과가 불명확하면 중복 쓰기 없이 fail-closed합니다.
 - 시작·본문·commit 실패와 bounded retry 뒤에도 다음 FIFO 호출이 진행됩니다.
 - 앱 종료가 승인된 DB 작업을 자르거나 새 작업을 받아 무기한 늘어나지 않습니다.
 - 느린 workspace volume이 공유 DB transaction을 잡고 있지 않습니다.
@@ -108,5 +130,8 @@ transaction 밖으로 옮기되 TOCTOU 경계를 fail-closed로 유지합니다.
 - **각 호출자에 semaphore 추가:** 200개가 넘는 transaction 호출 경계를 빠뜨리고 동일 client 불변량을 분산합니다.
 - **Projector retry 수만 늘리기:** 경합을 더 오래 반복하고 UI 지연을 키웁니다.
 - **모든 query를 FIFO에 넣기:** 실제 결함보다 넓은 직렬화로 읽기 처리량을 불필요하게 줄입니다.
+- **SDK 자동 reconnect 유지 후 Promise만 race:** SDK 내부 pending RPC가 남아 새 socket에 재전송되므로 서버 경고와
+  transaction 손실을 막지 못합니다.
+- **commit 중 연결 손실도 callback 재시도:** commit 적용 여부가 불명확해 같은 논리 쓰기를 중복할 수 있습니다.
 - **filesystem snapshot을 transaction 안에 유지:** 느린 외부 자원이 DB와 종료를 함께 점유합니다.
 - **close 실패 뒤 open으로 복귀:** client가 실제로 어느 정도 닫혔는지 증명할 수 없어 데이터 손실 위험이 있습니다.
