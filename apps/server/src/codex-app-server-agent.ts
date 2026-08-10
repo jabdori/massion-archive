@@ -329,9 +329,20 @@ export class CodexAppServerSubscriptionConnector implements SubscriptionAgentAda
           onNotification: (notification) => {
             this.notification(active, notification.method, notification.params);
           },
-          onFailure: (error) => {
-            active.completion.reject(error);
-            active.suspension.reject(error);
+          onFailure: () => {
+            const emittedTokens = Math.max(active.emittedTokens, (active.usage?.outputTokens ?? 0) > 0 ? 1 : 0);
+            const sideEffectsStarted = active.sideEffectsStarted || emittedTokens > 0;
+            active.completion.resolve({
+              outcome: "failed",
+              executionId: active.input.executionId,
+              ...(active.threadId ? { sessionId: active.threadId } : {}),
+              category: "codex-app-server-transport",
+              retryable: !sideEffectsStarted,
+              signal: { kind: "network" },
+              emittedTokens,
+              sideEffectsStarted,
+              ...(active.usage ? { usage: active.usage } : {}),
+            });
           },
         },
       );
@@ -503,12 +514,19 @@ export class CodexAppServerSubscriptionConnector implements SubscriptionAgentAda
     const threadId = active.threadId;
     if (!threadId) throw new Error("Codex app-server thread ID가 없습니다");
     if (turn.status === "interrupted") {
-      active.completion.resolve({ outcome: "cancelled", executionId: active.input.executionId, sessionId: threadId });
+      const emittedTokens = Math.max(active.emittedTokens, (active.usage?.outputTokens ?? 0) > 0 ? 1 : 0);
+      active.completion.resolve({
+        outcome: "cancelled",
+        executionId: active.input.executionId,
+        sessionId: threadId,
+        ...(emittedTokens > 0 ? { emittedTokens } : {}),
+        ...(active.usage ? { usage: active.usage } : {}),
+      });
       return;
     }
     if (turn.status === "failed") {
       if (turnItemsHaveSideEffects(turn.items)) active.sideEffectsStarted = true;
-      const emittedTokens = Math.max(active.emittedTokens, active.usage?.outputTokens ?? 0);
+      const emittedTokens = Math.max(active.emittedTokens, (active.usage?.outputTokens ?? 0) > 0 ? 1 : 0);
       const signal = appServerFailureSignal(turn.error);
       // 부작용과 출력은 관측 사실 그대로 보고하고, 어떤 상태 코드가 fallback 가능한지는 router가 판정합니다.
       const sideEffectsStarted = active.sideEffectsStarted || emittedTokens > 0;
@@ -522,6 +540,7 @@ export class CodexAppServerSubscriptionConnector implements SubscriptionAgentAda
         ...(safeFailure ? { signal } : {}),
         emittedTokens,
         sideEffectsStarted,
+        ...(active.usage ? { usage: active.usage } : {}),
       });
       return;
     }
@@ -535,7 +554,8 @@ export class CodexAppServerSubscriptionConnector implements SubscriptionAgentAda
         new SubscriptionStructuredOutputError(message, {
           cause,
           sideEffectsStarted: active.sideEffectsStarted,
-          emittedTokens: Math.max(active.emittedTokens, active.usage?.outputTokens ?? 0),
+          emittedTokens: Math.max(active.emittedTokens, (active.usage?.outputTokens ?? 0) > 0 ? 1 : 0),
+          ...(active.usage ? { usage: active.usage } : {}),
         });
       try {
         result = JSON.parse(active.finalText ?? "") as unknown;
@@ -576,6 +596,10 @@ export class CodexAppServerSubscriptionConnector implements SubscriptionAgentAda
 
   private async close(active: ActiveTurn): Promise<void> {
     if (this.active === active) this.active = undefined;
-    await active.connection?.close();
+    try {
+      await active.connection?.close();
+    } catch {
+      // transport terminal이 확정한 결과를 후속 process 정리 실패로 덮지 않습니다.
+    }
   }
 }

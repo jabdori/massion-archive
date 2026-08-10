@@ -8,7 +8,7 @@
 
 > **제품 정체성 정본:** [Massion 제품 헌법과 현재 방향](../product/constitution.md). 이 문서는 현재 구현 구조를 설명하며 제품의 목적과 철학을 다시 정의하지 않습니다.
 
-> **이 문서보다 나중에 승인된 결정:** [ADR-001 개인용 전체 권한](ADR-001-personal-full-access.md) · [ADR-002 지식 축과 표면 복원](ADR-002-knowledge-axis-restoration.md) · [ADR-003 작업 인지 모델 배치](ADR-003-task-aware-model-placement.md) · [ADR-004 Runtime 협업 기록](ADR-004-runtime-collaboration-durability.md) · [ADR-005 Provider 모델 카탈로그](ADR-005-provider-model-catalog-synchronization.md) · [ADR-006 제품 소유 Agent 위임](ADR-006-product-owned-agent-delegation.md) · [ADR-007 Surreal transaction 승인](ADR-007-surreal-transaction-admission.md). 아래 그림과 표는 기준일 2026-07-24 시점이므로 이후 결정은 각 ADR이 정본입니다.
+> **이 문서보다 나중에 승인된 결정:** [ADR-001 개인용 전체 권한](ADR-001-personal-full-access.md) · [ADR-002 지식 축과 표면 복원](ADR-002-knowledge-axis-restoration.md) · [ADR-003 작업 인지 모델 배치](ADR-003-task-aware-model-placement.md) · [ADR-004 Runtime 협업 기록](ADR-004-runtime-collaboration-durability.md) · [ADR-005 Provider 모델 카탈로그](ADR-005-provider-model-catalog-synchronization.md) · [ADR-006 제품 소유 Agent 위임](ADR-006-product-owned-agent-delegation.md) · [ADR-007 Surreal transaction 승인](ADR-007-surreal-transaction-admission.md) · [ADR-008 모델 stream 휘발성 경계](ADR-008-volatile-model-stream-boundary.md). 아래 그림과 표는 기준일 2026-07-24 시점이므로 이후 결정은 각 ADR이 정본입니다.
 
 이 문서는 Massion을 처음 접하는 사람과 구현 에이전트가 현재 구현 전체를 빠르게 파악하도록 돕습니다. 현재 공개 저장소에 존재하는 코드와 검증 가능한 동작을 같은 그림에 표시하되 상태를 명확히 구분합니다. 세부 계약은 도메인 코드·테스트, 운영 문서와 현재 Phase 문서가 소유하며, 이 문서는 그 관계를 연결하는 지도입니다.
 
@@ -341,6 +341,12 @@ stateDiagram-v2
 Organization Graph의 활성 노드는 tenant별 Agent map으로 투영됩니다. 제품 의도는 Agent가 상대를 발견해 직접 메시지나 다자 협업방에서 대화하고, 그 메시지·위임·공유 맥락·실행·사용자 개입이 모두 하나의 Work와 인과 계보에 귀속되는 것입니다.
 
 **현재 구현은 이 의도에 도달하지 않았습니다.** 협업방 도메인과 Runtime delta 기록기는 구현됐지만 제품 계보를 만드는 Agent 간 직접 위임은 아직 없습니다. 생산 경로에서 협업 메시지를 기록하는 곳은 `packages/application/src/core-pipeline.ts`의 사용자 요청·Representative handoff, `core-staffing.ts`의 조건부 편성 proposal과 Surface가 호출하는 공개 command이며, `packages/runtime/src`는 `postMessage`를 한 번도 호출하지 않습니다. 실제 방의 baseline은 두 건이고 동적 편성이 필요하면 proposal이 추가됩니다. 과거 VoltAgent 암시적 위임은 Task·Runtime·권한·비용 계보를 우회해 [ADR-006](ADR-006-product-owned-agent-delegation.md)에서 생산 노출을 차단했습니다.
+
+모델 stream의 non-empty text·reasoning, tool call·result, error, finish는 화면 관찰용 휘발성 semantic delta이며
+Runtime 정본이 아닙니다. start·end 같은 raw 경계 part는 버립니다. 일반 모델 stream은 chunk 수와 무관하게
+실행 상태·route·terminal 사실만 영속하고, 과거 raw `model_*` event는 sequence를 보존한 tombstone으로
+retire합니다. 내구성·복구·과거 outbox 처리 경계는
+[ADR-008](ADR-008-volatile-model-stream-boundary.md)이 소유합니다.
 
 이 절의 상태 표시는 **도메인이 표현할 수 있는 것**과 **실행 경로가 실제로 만드는 것**을 구분합니다. `packages/work`에 계약이 있다는 사실이 그 대화가 발생한다는 뜻은 아닙니다.
 

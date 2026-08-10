@@ -200,6 +200,86 @@ describe("Massion routed model factory", () => {
     expect(completed.actual_cost_micros).toBe(60);
   });
 
+  it("emitted fragment는 fallback sentinel로만 남기고 확인되지 않은 실제 token·cost는 0으로 정산한다", async () => {
+    const factory = new MassionModelFactory(router, providers, {
+      build: (selection) => ({ modelId: selection.modelId }) as LanguageModel,
+    });
+    const lease = await factory.acquire(context, {
+      commandId: crypto.randomUUID(),
+      routeName,
+      estimatedTokens: 100,
+      estimatedCostMicros: 1_000,
+    });
+    const reportFailure = vi.spyOn(router, "reportFailure");
+
+    await lease.fail({
+      commandId: "partial-stream-provider-usage-unknown",
+      signal: { kind: "network" },
+      emittedTokens: 3,
+      sideEffectsStarted: true,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+
+    expect(reportFailure).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        emittedTokens: 3,
+        sideEffectsStarted: true,
+        actualInputTokens: 0,
+        actualOutputTokens: 0,
+        actualCostMicros: 0,
+      }),
+    );
+    await expect(router.readAttempt(context, lease.attemptId)).resolves.toMatchObject({
+      status: "interrupted",
+      emitted_tokens: 3,
+      actual_input_tokens: 0,
+      actual_output_tokens: 0,
+      actual_cost_micros: 0,
+      fallback_allowed: false,
+    });
+  });
+
+  it("확정된 실패 usage는 emitted fragment와 분리해 Router의 실제 token·cost로 정산한다", async () => {
+    const factory = new MassionModelFactory(router, providers, {
+      build: (selection) => ({ modelId: selection.modelId }) as LanguageModel,
+    });
+    const lease = await factory.acquire(context, {
+      commandId: crypto.randomUUID(),
+      routeName,
+      estimatedTokens: 100,
+      estimatedCostMicros: 1_000,
+    });
+    const reportFailure = vi.spyOn(router, "reportFailure");
+
+    await lease.fail({
+      commandId: "failed-provider-usage-confirmed",
+      signal: { kind: "network" },
+      emittedTokens: 2,
+      sideEffectsStarted: false,
+      inputTokens: 8,
+      outputTokens: 37,
+    });
+
+    expect(reportFailure).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        emittedTokens: 2,
+        sideEffectsStarted: false,
+        actualInputTokens: 8,
+        actualOutputTokens: 37,
+        actualCostMicros: 45,
+      }),
+    );
+    await expect(router.readAttempt(context, lease.attemptId)).resolves.toMatchObject({
+      emitted_tokens: 2,
+      actual_input_tokens: 8,
+      actual_output_tokens: 37,
+      actual_cost_micros: 45,
+    });
+  });
+
   it("MassionModelFactory가 레거시 unsafe endpoint를 예약·비용·builder 호출 전에 차단한다", async () => {
     const build = vi.fn(() => ({ modelId: "unsafe-model" }) as LanguageModel);
     const factory = new MassionModelFactory(router, providers, { build });

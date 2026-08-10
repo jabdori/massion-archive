@@ -7,6 +7,7 @@ import {
   GeminiCliAcpConnector,
   GrokBuildAcpConnector,
   normalizeCodexExecutionEvidence,
+  SubscriptionStructuredOutputError,
   type AcpClientFactory,
   type SubscriptionAgentAdapter,
   type SubscriptionAgentInput,
@@ -303,7 +304,12 @@ describe("Edge Connector agent-turn 실행", () => {
     const { identity } = await fixture();
     let finish: ((result: SubscriptionAgentResult) => void) | undefined;
     const cancel = vi.fn(async (_context, executionId: string) => {
-      finish?.({ outcome: "cancelled", executionId });
+      finish?.({
+        outcome: "cancelled",
+        executionId,
+        emittedTokens: 2,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      });
     });
     const adapter: SubscriptionAgentAdapter = {
       execute: async (context, input) => {
@@ -339,7 +345,22 @@ describe("Edge Connector agent-turn 실행", () => {
       expect.objectContaining({ organizationId: identity.organizationId }),
       "execution-12345678",
     );
-    expect(events[0]).toMatchObject({ kind: "error", payload: { category: "cancelled" } });
+    expect(events).toEqual([
+      expect.objectContaining({
+        sequence: 0,
+        kind: "usage",
+        payload: { inputTokens: 8, outputTokens: 37 },
+      }),
+      expect.objectContaining({
+        sequence: 1,
+        kind: "error",
+        payload: expect.objectContaining({
+          category: "cancelled",
+          emittedTokens: 2,
+          usage: { inputTokens: 8, outputTokens: 37 },
+        }),
+      }),
+    ]);
     expect(executor.activeRequests).toBe(0);
   });
 
@@ -368,8 +389,69 @@ describe("Edge Connector agent-turn 실행", () => {
     expect(output).not.toContain("/Users/private");
     expect(events[0]).toMatchObject({
       kind: "error",
-      payload: { category: "provider-runtime-error", retryable: false, sideEffectsStarted: true },
+      payload: {
+        category: "provider-runtime-error",
+        retryable: false,
+        signal: { kind: "unknown" },
+        emittedTokens: 0,
+        sideEffectsStarted: true,
+      },
     });
+    expect(events[0]?.payload).not.toHaveProperty("usage");
+  });
+
+  it("구조화 출력 실패가 확인한 usage·출력 조각·부작용을 원문 없이 failure frame에 보존한다", async () => {
+    const { identity } = await fixture();
+    const adapter: SubscriptionAgentAdapter = {
+      execute: vi.fn(),
+      executeStructured: vi.fn().mockRejectedValue(
+        new SubscriptionStructuredOutputError("secret structured output", {
+          sideEffectsStarted: true,
+          emittedTokens: 2,
+          usage: { inputTokens: 8, outputTokens: 37 },
+        }),
+      ),
+      resume: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const executor = new EdgeRequestExecutor({
+      identity,
+      factory: { create: () => adapter },
+      healthProbe: healthyProfile,
+    });
+    const events: ConnectorEventFrame[] = [];
+
+    await executor.execute(
+      request(identity, {
+        output: {
+          name: "result",
+          description: "검증된 결과",
+          jsonSchema: { type: "object", properties: { result: { type: "string" } } },
+        },
+      }),
+      async (event) => events.push(event),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        sequence: 0,
+        kind: "usage",
+        payload: { inputTokens: 8, outputTokens: 37 },
+      }),
+      expect.objectContaining({
+        sequence: 1,
+        kind: "error",
+        payload: {
+          category: "provider-runtime-error",
+          retryable: false,
+          signal: { kind: "unknown" },
+          emittedTokens: 2,
+          sideEffectsStarted: true,
+          usage: { inputTokens: 8, outputTokens: 37 },
+        },
+      }),
+    ]);
+    expect(JSON.stringify(events)).not.toContain("secret structured output");
   });
 
   it("workspace capability를 다른 조직·Connector·Work 계보에서 재사용하지 못한다", async () => {
@@ -459,6 +541,7 @@ describe("Edge Connector agent-turn 실행", () => {
     });
     expect(events).toEqual([
       expect.objectContaining({
+        sequence: 0,
         kind: "error",
         payload: {
           category: "needs-reauth",
@@ -483,6 +566,7 @@ describe("Edge Connector agent-turn 실행", () => {
         signal: { kind: "http", statusCode: 429, retryAfter: "120" },
         emittedTokens: 2,
         sideEffectsStarted: false,
+        usage: { inputTokens: 8, outputTokens: 2 },
       }),
       resume: vi.fn(),
       cancel: vi.fn(),
@@ -500,6 +584,12 @@ describe("Edge Connector agent-turn 실행", () => {
 
     expect(events).toEqual([
       expect.objectContaining({
+        sequence: 0,
+        kind: "usage",
+        payload: { inputTokens: 8, outputTokens: 2 },
+      }),
+      expect.objectContaining({
+        sequence: 1,
         kind: "error",
         payload: {
           category: "rate-limit",
@@ -507,6 +597,7 @@ describe("Edge Connector agent-turn 실행", () => {
           signal: { kind: "http", statusCode: 429, retryAfter: "120" },
           emittedTokens: 2,
           sideEffectsStarted: false,
+          usage: { inputTokens: 8, outputTokens: 2 },
         },
       }),
     ]);

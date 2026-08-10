@@ -7,7 +7,7 @@ import { IdentityService, OrganizationService, type TenantContext } from "@massi
 import type { RouteAttempt } from "@massion/router";
 import { createDatabase, type MassionDatabase } from "@massion/storage";
 
-import type { AgentExecutionInput } from "./contracts.js";
+import type { AgentExecutionInput, ExecutionDelta } from "./contracts.js";
 import { MASSION_RUNTIME_EXECUTION_CONTEXT_KEY, MASSION_TENANT_CONTEXT_KEY } from "./agent-configuration.js";
 import { runtimeAgentName } from "./agent-topology.js";
 import { RuntimeExecutionStore } from "./execution-store.js";
@@ -20,7 +20,7 @@ import type {
 } from "./model-factory.js";
 import { RuntimeRecovery } from "./recovery.js";
 import { SubscriptionStructuredOutputError } from "./subscriptions/agent-runtime.js";
-import { normalizeVoltAgentStreamPart, RoutedModelRegistry, VoltAgentRunner } from "./voltagent-runner.js";
+import { RoutedModelRegistry, VoltAgentRunner } from "./voltagent-runner.js";
 
 const USAGE = {
   inputTokens: { total: 2, noCache: 2, cacheRead: 0, cacheWrite: 0 },
@@ -755,6 +755,51 @@ describe("VoltAgent AgentRunner", () => {
     expect(stages).toEqual(["acquired", "started", "terminal", "settled"]);
   });
 
+  it("Agent runtime generic throw도 fail-closed receipt 정산 뒤 interrupted로 종료한다", async () => {
+    const { stages, receipts } = subscriptionReceiptFixture();
+    const routed = agentLease({
+      outcome: "completed",
+      executionId: "provider-execution-generic-failure",
+      sessionId: "provider-session-generic-failure",
+      value: "사용되지 않음",
+    });
+    routed.executor.execute = vi.fn().mockRejectedValue(new TypeError("connector transport closed"));
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      {
+        acquire: vi.fn().mockResolvedValue(routed),
+        createSubscriptionReceipts: vi.fn(() => receipts as never),
+      },
+      registry,
+    );
+
+    await expect(runner.execute(context, input())).resolves.toMatchObject({
+      status: "interrupted",
+      error: { category: "network", retryable: true },
+    });
+    expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        outcome: "failed",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        emittedTokens: 0,
+        sideEffectsStarted: true,
+        signal: { kind: "network" },
+      }),
+    );
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        signal: { kind: "network" },
+        emittedTokens: 0,
+        sideEffectsStarted: true,
+        inputTokens: 0,
+        outputTokens: 0,
+      }),
+    );
+    expect(stages).toEqual(["acquired", "started", "terminal", "settled"]);
+  });
+
   it("Model acquire timeout은 실행을 종료하고 늦게 반환된 lease를 정산한다", async () => {
     let resolveLease: ((value: RoutedModelLease) => void) | undefined;
     const pending = new Promise<RoutedModelLease>((resolve) => {
@@ -903,7 +948,13 @@ describe("VoltAgent AgentRunner", () => {
           abortSignal?.addEventListener(
             "abort",
             () => {
-              resolve({ outcome: "cancelled", executionId, sessionId: "provider-session-timeout-cancelled" });
+              resolve({
+                outcome: "cancelled",
+                executionId,
+                sessionId: "provider-session-timeout-cancelled",
+                emittedTokens: 2,
+                usage: { inputTokens: 8, outputTokens: 37 },
+              });
             },
             { once: true },
           );
@@ -927,7 +978,13 @@ describe("VoltAgent AgentRunner", () => {
       error: { category: "timeout", retryable: true },
     });
     expect(routed.fail).toHaveBeenCalledWith(
-      expect.objectContaining({ signal: { kind: "timeout" }, emittedTokens: 0, sideEffectsStarted: true }),
+      expect.objectContaining({
+        signal: { kind: "timeout" },
+        emittedTokens: 2,
+        sideEffectsStarted: true,
+        inputTokens: 8,
+        outputTokens: 37,
+      }),
     );
     expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
       context,
@@ -935,7 +992,70 @@ describe("VoltAgent AgentRunner", () => {
         outcome: "failed",
         providerSessionId: "provider-session-timeout-cancelled",
         category: "timeout",
+        usage: { inputTokens: 8, outputTokens: 37 },
+        emittedTokens: 2,
       }),
+    );
+    expect(stages).toEqual(["acquired", "started", "terminal", "settled"]);
+  });
+
+  it("Agent runtime timeout과 동시에 난 구조화 오류도 관측된 usage와 fragment를 잃지 않는다", async () => {
+    const { stages, receipts } = subscriptionReceiptFixture();
+    const routed = agentLease({
+      outcome: "completed",
+      executionId: "provider-execution-timeout-structured",
+      sessionId: "provider-session-timeout-structured",
+      value: "사용되지 않음",
+    });
+    routed.executor.executeStructured = vi.fn(
+      async ({ abortSignal }) =>
+        await new Promise<RoutedAgentRuntimeResult>((_resolve, reject) => {
+          abortSignal?.addEventListener(
+            "abort",
+            () =>
+              reject(
+                new SubscriptionStructuredOutputError("구조화 결과가 유효하지 않습니다", {
+                  sideEffectsStarted: false,
+                  emittedTokens: 2,
+                  usage: { inputTokens: 8, outputTokens: 37 },
+                }),
+              ),
+            { once: true },
+          );
+        }),
+    );
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      {
+        acquire: vi.fn().mockResolvedValue(routed),
+        createSubscriptionReceipts: vi.fn(() => receipts as never),
+      },
+      registry,
+      undefined,
+      undefined,
+      { agentRuntimeTimeoutMs: 1 },
+    );
+
+    await expect(
+      runner.executeStructured(context, input(), {
+        name: "status",
+        description: "상태",
+        jsonSchema: { type: "object" },
+      }),
+    ).resolves.toMatchObject({ status: "interrupted", error: { category: "timeout" } });
+    expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        outcome: "failed",
+        usage: { inputTokens: 8, outputTokens: 37 },
+        emittedTokens: 2,
+        sideEffectsStarted: true,
+        signal: { kind: "timeout" },
+      }),
+    );
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ emittedTokens: 2, inputTokens: 8, outputTokens: 37 }),
     );
     expect(stages).toEqual(["acquired", "started", "terminal", "settled"]);
   });
@@ -1304,6 +1424,133 @@ describe("VoltAgent AgentRunner", () => {
     expect(routed.fail).toHaveBeenCalledWith(expect.objectContaining({ sideEffectsStarted: true }));
   });
 
+  it("Agent runtime 결과 직후 갱신 실패가 승리해도 결과의 confirmed usage와 fragment를 보존한다", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const { receipts } = subscriptionReceiptFixture();
+    const routed = agentLease({
+      outcome: "failed",
+      executionId: "provider-execution-late-renewal",
+      sessionId: "provider-session-late-renewal",
+      category: "provider",
+      retryable: true,
+      signal: { kind: "network" },
+      emittedTokens: 2,
+      sideEffectsStarted: false,
+      usage: { inputTokens: 8, outputTokens: 37 },
+    });
+    vi.mocked(routed.renewSession).mockRejectedValue(new Error("renew 실패"));
+    routed.executor.execute = vi.fn(async ({ executionId }) => {
+      await tasks[0]?.();
+      return {
+        outcome: "failed",
+        executionId,
+        sessionId: "provider-session-late-renewal",
+        category: "provider",
+        retryable: true,
+        signal: { kind: "network" },
+        emittedTokens: 2,
+        sideEffectsStarted: false,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      };
+    });
+    const clock = {
+      now: () => Date.parse("2030-01-01T00:00:00.000Z"),
+      schedule: vi.fn((_delayMs: number, task: () => Promise<void>) => {
+        tasks.push(task);
+        return () => undefined;
+      }),
+    };
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      {
+        acquire: vi.fn().mockResolvedValue(routed),
+        createSubscriptionReceipts: vi.fn(() => receipts as never),
+      },
+      registry,
+      undefined,
+      undefined,
+      { sessionRenewalClock: clock },
+    );
+
+    await expect(runner.execute(context, input())).resolves.toMatchObject({
+      status: "interrupted",
+      error: { category: "runtime" },
+    });
+    expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        usage: { inputTokens: 8, outputTokens: 37 },
+        emittedTokens: 2,
+        sideEffectsStarted: true,
+      }),
+    );
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ emittedTokens: 2, inputTokens: 8, outputTokens: 37 }),
+    );
+  });
+
+  it("승인 재개 결과 직후 갱신 실패도 같은 usage와 fragment를 terminal 정산에 보존한다", async () => {
+    const tasks: Array<() => Promise<void>> = [];
+    const { receipts } = subscriptionReceiptFixture();
+    const routed = agentLease({
+      outcome: "suspended",
+      executionId: "runtime에서-대체",
+      sessionId: "provider-session-resume-renewal",
+      approvalId: "approval-resume-renewal",
+    });
+    vi.mocked(routed.renewSession).mockRejectedValue(new Error("resume renew 실패"));
+    routed.executor.resume = vi.fn(async ({ executionId }) => {
+      await tasks.at(-1)?.();
+      return {
+        outcome: "failed",
+        executionId,
+        sessionId: "provider-session-resume-renewal",
+        category: "provider",
+        retryable: true,
+        signal: { kind: "network" } as const,
+        emittedTokens: 2,
+        sideEffectsStarted: false,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      };
+    });
+    const clock = {
+      now: () => Date.parse("2030-01-01T00:00:00.000Z"),
+      schedule: vi.fn((_delayMs: number, task: () => Promise<void>) => {
+        tasks.push(task);
+        return () => undefined;
+      }),
+    };
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      {
+        acquire: vi.fn().mockResolvedValue(routed),
+        createSubscriptionReceipts: vi.fn(() => receipts as never),
+      },
+      registry,
+      undefined,
+      undefined,
+      { sessionRenewalClock: clock, subscriptionApprovals: { consume: async () => "approved" } },
+    );
+    const suspended = await runner.execute(context, input());
+
+    await expect(
+      runner.resume(context, suspended.executionId, { approvalId: "approval-resume-renewal" }),
+    ).resolves.toMatchObject({ status: "interrupted", error: { category: "runtime" } });
+    expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        usage: { inputTokens: 8, outputTokens: 37 },
+        emittedTokens: 2,
+        sideEffectsStarted: true,
+      }),
+    );
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ emittedTokens: 2, inputTokens: 8, outputTokens: 37 }),
+    );
+  });
+
   it("Agent runtime 출력 전 실패는 Router attempt와 Broker lease fallback ID를 함께 넘긴다", async () => {
     const first = agentLease(
       {
@@ -1402,6 +1649,7 @@ describe("VoltAgent AgentRunner", () => {
   });
 
   it("Agent runtime의 구조화 출력 실패도 부작용이 관측됐으면 fallback하지 않는다", async () => {
+    const { receipts } = subscriptionReceiptFixture();
     const routed = agentLease(
       { outcome: "completed", executionId: "provider-execution-output", sessionId: "session-1", value: "쓰이지 않음" },
       "agent-output-attempt-2",
@@ -1411,21 +1659,43 @@ describe("VoltAgent AgentRunner", () => {
     routed.executor.execute = vi.fn(async () => {
       throw new SubscriptionStructuredOutputError("Codex app-server 구조화 출력 검증에 실패했습니다", {
         sideEffectsStarted: true,
-        emittedTokens: 3,
+        emittedTokens: 2,
+        usage: { inputTokens: 8, outputTokens: 37 },
       });
     });
     routed.fail = vi.fn(async (usage) => ({ status: "failed", fallbackAllowed: !usage.sideEffectsStarted }));
     const acquire = vi.fn().mockResolvedValue(routed);
-    const runner = new VoltAgentRunner(voltAgent, store, { acquire }, registry);
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      { acquire, createSubscriptionReceipts: vi.fn(() => receipts as never) },
+      registry,
+    );
 
     const result = await runner.execute(context, input());
 
     expect(result.status).not.toBe("succeeded");
-    expect(routed.fail).toHaveBeenCalledWith(expect.objectContaining({ sideEffectsStarted: true }));
+    expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        outcome: "failed",
+        usage: { inputTokens: 8, outputTokens: 37 },
+        emittedTokens: 2,
+      }),
+    );
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sideEffectsStarted: true,
+        emittedTokens: 2,
+        inputTokens: 8,
+        outputTokens: 37,
+      }),
+    );
     expect(acquire).toHaveBeenCalledTimes(1);
   });
 
-  it("Agent runtime이 출력을 만든 뒤 실패하면 자동 fallback하지 않고 interrupted로 종료한다", async () => {
+  it("Agent runtime 실패도 emitted fragment만 보존하고 확인되지 않은 usage를 만들지 않는다", async () => {
+    const { receipts } = subscriptionReceiptFixture();
     const routed = agentLease(
       {
         outcome: "failed",
@@ -1447,13 +1717,79 @@ describe("VoltAgent AgentRunner", () => {
         instruction: "Representative instruction",
       }),
     };
-    const runner = new VoltAgentRunner(voltAgent, store, { acquire }, registry, undefined, executionContext);
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      { acquire, createSubscriptionReceipts: vi.fn(() => receipts as never) },
+      registry,
+      undefined,
+      executionContext,
+    );
 
     const result = await runner.execute(context, input());
 
     expect(result).toMatchObject({ status: "interrupted", error: { category: "provider", retryable: true } });
     expect(acquire).toHaveBeenCalledOnce();
-    expect(routed.fail).toHaveBeenCalledWith(expect.objectContaining({ emittedTokens: 1, outputTokens: 1 }));
+    expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        outcome: "failed",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        emittedTokens: 1,
+      }),
+    );
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ emittedTokens: 1, inputTokens: 0, outputTokens: 0 }),
+    );
+  });
+
+  it("Agent runtime 실패의 confirmed usage와 emitted fragment를 분리해 receipt와 lease에 정산한다", async () => {
+    const { receipts } = subscriptionReceiptFixture();
+    const routed = agentLease(
+      {
+        outcome: "failed",
+        executionId: "provider-execution-confirmed-usage",
+        category: "provider",
+        retryable: true,
+        signal: { kind: "network" },
+        emittedTokens: 2,
+        sideEffectsStarted: false,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      },
+      "agent-attempt-confirmed-usage",
+      "agent-lease-confirmed-usage",
+      true,
+    );
+    const acquire = vi.fn().mockResolvedValue(routed);
+    const executionContext = {
+      resolve: vi.fn().mockResolvedValue({
+        workspaceRoot: "/tmp/massion-work-1",
+        instruction: "Representative instruction",
+      }),
+    };
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      { acquire, createSubscriptionReceipts: vi.fn(() => receipts as never) },
+      registry,
+      undefined,
+      executionContext,
+    );
+
+    await expect(runner.execute(context, input())).resolves.toMatchObject({ status: "interrupted" });
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(receipts.recordTerminalObserved).toHaveBeenCalledWith(
+      context,
+      expect.objectContaining({
+        outcome: "failed",
+        usage: { inputTokens: 8, outputTokens: 37 },
+        emittedTokens: 2,
+        sideEffectsStarted: false,
+      }),
+    );
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ emittedTokens: 2, inputTokens: 8, outputTokens: 37 }),
+    );
   });
 
   it("JSON Schema로 검증한 structured object를 Runtime 계보와 함께 반환한다", async () => {
@@ -1830,7 +2166,7 @@ describe("VoltAgent AgentRunner", () => {
       jsonSchema: { type: "object" },
     });
 
-    expect(result).toMatchObject({ status: "failed", error: { category: "output", retryable: false } });
+    expect(result).toMatchObject({ status: "interrupted", error: { category: "output", retryable: false } });
     expect(routed.fail).toHaveBeenCalledWith(expect.objectContaining({ signal: { kind: "output" } }));
   });
 
@@ -2000,40 +2336,72 @@ describe("VoltAgent AgentRunner", () => {
     expect(recovery.events.at(-1)?.event_type).toBe("execution_blocked_model_unavailable");
   });
 
-  it("stream part를 단조 Runtime Event로 영속하고 text delta 순서를 성공 출력에 보존한다", async () => {
-    const routed = lease(
-      new MockLanguageModelV3({
-        doStream: {
-          stream: simulateReadableStream({
-            chunks: [
-              { type: "stream-start", warnings: [] },
-              { type: "text-start", id: "text-1" },
-              { type: "text-delta", id: "text-1", delta: "hello" },
-              { type: "text-delta", id: "text-1", delta: "" },
-              { type: "text-delta", id: "text-1", delta: "hello" },
-              { type: "text-delta", id: "text-1", delta: "!" },
-              { type: "text-end", id: "text-1" },
-              { type: "finish", finishReason: "stop", usage: USAGE },
-            ],
-          }),
-        },
-      }),
-    );
-    const runner = new VoltAgentRunner(voltAgent, store, { acquire: vi.fn().mockResolvedValue(routed) }, registry);
+  it.each([1, 1_600])(
+    "%i개 stream chunk도 Runtime 정본과 Application outbox를 네 건만 만든다",
+    async (chunkCount) => {
+      await database.query(`
+DEFINE TABLE application_outbox SCHEMALESS;
+DEFINE EVENT application_outbox_from_runtime ON TABLE runtime_event
+WHEN $event = 'CREATE'
+THEN {
+  CREATE application_outbox CONTENT {
+    source_kind: 'runtime-event',
+    source_id: $after.event_id,
+    aggregate_id: $after.execution_id
+  };
+};
+`);
+      const textChunks = Array.from({ length: chunkCount }, (_, index) => ({
+        type: "text-delta" as const,
+        id: "text-1",
+        delta: String(index % 10),
+      }));
+      const routed = lease(
+        new MockLanguageModelV3({
+          doStream: {
+            stream: simulateReadableStream({
+              chunks: [
+                { type: "stream-start", warnings: [] },
+                { type: "text-start", id: "text-1" },
+                ...textChunks,
+                { type: "text-end", id: "text-1" },
+                { type: "finish", finishReason: "stop", usage: USAGE },
+              ],
+            }),
+          },
+        }),
+      );
+      const runner = new VoltAgentRunner(voltAgent, store, { acquire: vi.fn().mockResolvedValue(routed) }, registry);
 
-    const events = [];
-    for await (const event of runner.stream(context, input())) events.push(event);
+      const events = [];
+      for await (const event of runner.stream(context, input())) events.push(event);
 
-    expect(
-      events.some((event) => event.type === "model_text_delta" && JSON.stringify(event.payload).includes("hello")),
-    ).toBe(true);
-    expect(events.every((event, index) => event.sequence > (events[index - 1]?.sequence ?? 0))).toBe(true);
-    const first = events[0];
-    if (!first) throw new Error("stream event가 없습니다");
-    const recovery = await store.getRecovery(context, first.executionId);
-    expect(recovery.execution.status).toBe("succeeded");
-    expect(JSON.parse(recovery.execution.output_json ?? "null")).toMatchObject({ output: "hellohello!" });
-  });
+      expect(events.map((event) => event.type)).toEqual([
+        "execution_queued",
+        "execution_running",
+        "execution_succeeded",
+      ]);
+      const first = events[0];
+      if (!first) throw new Error("stream event가 없습니다");
+      const recovery = await store.getRecovery(context, first.executionId);
+      expect(recovery.execution.status).toBe("succeeded");
+      expect(recovery.events.map((event) => event.event_type)).toEqual([
+        "execution_queued",
+        "execution_running",
+        "model.route.selected",
+        "execution_succeeded",
+      ]);
+      expect(recovery.events.some((event) => event.event_type.startsWith("model_"))).toBe(false);
+      expect(JSON.parse(recovery.execution.output_json ?? "null")).toMatchObject({
+        output: textChunks.map((chunk) => chunk.delta).join(""),
+      });
+      const [outbox] = await database.query<[{ source_id: string }[]]>(
+        "SELECT source_id FROM application_outbox WHERE source_kind = 'runtime-event';",
+      );
+      expect(outbox).toHaveLength(4);
+    },
+    15_000,
+  );
 
   it("delta observer에 휘발성 실행 델타를 전달하고 observer 오류는 실행에 전파하지 않는다", async () => {
     const routed = lease(
@@ -2088,7 +2456,88 @@ describe("VoltAgent AgentRunner", () => {
     expect(recovery.execution.status).toBe("succeeded");
   });
 
-  it("stream 출력 후 실패는 Router가 허용해도 자동 fallback하지 않고 interrupted로 끝낸다", async () => {
+  it("observer는 지원 semantic delta만 보내고 stream·text·reasoning 경계 part는 버린다", () => {
+    const observed: ExecutionDelta[] = [];
+    const runner = new VoltAgentRunner(voltAgent, store, { acquire: vi.fn() }, registry, undefined, undefined, {
+      deltaObserver: { observe: (_observerContext, delta) => observed.push(delta) },
+    });
+    const emit = (
+      runner as unknown as {
+        emitStreamDelta(
+          observerContext: TenantContext,
+          executionId: string,
+          agentHandle: string,
+          part: { readonly type: string } & Record<string, unknown>,
+          text: string | undefined,
+        ): void;
+      }
+    ).emitStreamDelta.bind(runner);
+    const executionId = "semantic-delta-execution";
+    const agentHandle = "representative";
+
+    emit(context, executionId, agentHandle, { type: "stream-start" }, undefined);
+    emit(context, executionId, agentHandle, { type: "text-start" }, undefined);
+    emit(context, executionId, agentHandle, { type: "text-delta", delta: "" }, "");
+    emit(context, executionId, agentHandle, { type: "text-delta", delta: "answer" }, "answer");
+    emit(context, executionId, agentHandle, { type: "text-end" }, undefined);
+    emit(context, executionId, agentHandle, { type: "reasoning-start" }, undefined);
+    emit(context, executionId, agentHandle, { type: "reasoning-delta", delta: "reason" }, "reason");
+    emit(context, executionId, agentHandle, { type: "reasoning-end" }, undefined);
+    emit(
+      context,
+      executionId,
+      agentHandle,
+      { type: "tool-call", toolName: "search", toolCallId: "tool-1", input: { query: "contract" } },
+      undefined,
+    );
+    emit(
+      context,
+      executionId,
+      agentHandle,
+      { type: "tool-result", toolName: "search", toolCallId: "tool-1", output: { found: true } },
+      undefined,
+    );
+    emit(context, executionId, agentHandle, { type: "error", error: new Error("provider failed") }, undefined);
+    emit(context, executionId, agentHandle, { type: "finish" }, undefined);
+
+    expect(
+      observed.map((delta) => ({
+        sequence: delta.sequence,
+        kind: delta.kind,
+        ...(delta.text === undefined ? {} : { text: delta.text }),
+        ...(delta.toolName === undefined ? {} : { toolName: delta.toolName }),
+        ...(delta.toolCallId === undefined ? {} : { toolCallId: delta.toolCallId }),
+        ...(delta.summary === undefined ? {} : { summary: delta.summary }),
+        ...(delta.toolInput === undefined ? {} : { toolInput: delta.toolInput }),
+        ...(delta.toolOutput === undefined ? {} : { toolOutput: delta.toolOutput }),
+      })),
+    ).toEqual([
+      { sequence: 1, kind: "output-text", text: "answer" },
+      { sequence: 2, kind: "reasoning", text: "reason" },
+      {
+        sequence: 3,
+        kind: "tool-call",
+        toolName: "search",
+        toolCallId: "tool-1",
+        toolInput: '{"query":"contract"}',
+      },
+      {
+        sequence: 4,
+        kind: "tool-result",
+        toolName: "search",
+        toolCallId: "tool-1",
+        summary: '{"found":true}',
+        toolOutput: '{"found":true}',
+      },
+      { sequence: 5, kind: "error" },
+      { sequence: 6, kind: "lifecycle", summary: "finish" },
+    ]);
+    expect(observed.every((delta) => delta.executionId === executionId && delta.agentHandle === agentHandle)).toBe(
+      true,
+    );
+  });
+
+  it("부분 stream 실패는 emitted sentinel만 보존하고 확인되지 않은 token usage·cost를 만들지 않는다", async () => {
     const routed = lease(
       new MockLanguageModelV3({
         doStream: {
@@ -2112,23 +2561,20 @@ describe("VoltAgent AgentRunner", () => {
     for await (const event of runner.stream(context, input())) events.push(event);
 
     expect(acquire).toHaveBeenCalledTimes(1);
-    expect(routed.fail).toHaveBeenCalledWith(expect.objectContaining({ emittedTokens: 1, outputTokens: 1 }));
+    expect(routed.fail).toHaveBeenCalledWith(
+      expect.objectContaining({ emittedTokens: 1, sideEffectsStarted: true, inputTokens: 0, outputTokens: 0 }),
+    );
     expect(events.at(-1)?.type).toBe("execution_interrupted");
     const recovery = await store.getRecovery(context, events.at(-1)?.executionId ?? "");
     expect(recovery.execution.output_json).toBeUndefined();
-  });
-
-  it("tool·handoff 귀속 필드는 유지하고 provider secret은 제거한다", () => {
-    const payload = normalizeVoltAgentStreamPart({
-      type: "tool-call",
-      toolName: "delegate_task",
-      toolCallId: "handoff-1",
-      providerMetadata: { authorization: "secret-token" },
-      credential: "secret-token",
-    });
-
-    expect(payload).toEqual({ type: "tool-call", toolName: "delegate_task", toolCallId: "handoff-1" });
-    expect(JSON.stringify(payload)).not.toContain("secret-token");
+    expect(recovery.events.map((event) => event.event_type)).toEqual([
+      "execution_queued",
+      "execution_running",
+      "model.route.selected",
+      "execution_interrupted",
+    ]);
+    expect(recovery.events.some((event) => event.event_type.startsWith("model_"))).toBe(false);
+    expect(JSON.stringify(recovery)).not.toContain("partial");
   });
 
   it("stream 실행을 cancel하면 AbortSignal과 영속 상태가 한 번만 cancelled가 된다", async () => {

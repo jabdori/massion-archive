@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { TenantContext } from "@massion/identity";
 
-import { SubscriptionAgentRuntimeCoordinator } from "./agent-runtime.js";
+import { normalizeConfirmedAgentUsage, SubscriptionAgentRuntimeCoordinator } from "./agent-runtime.js";
 
 const context: TenantContext = {
   userId: "user-1",
@@ -12,6 +12,17 @@ const context: TenantContext = {
 };
 
 describe("구독 Agent runtime 중단·재개 bridge", () => {
+  it.each([
+    ["camelCase", { inputTokens: 8, outputTokens: 2 }, { inputTokens: 8, outputTokens: 2 }],
+    ["snake_case", { input_tokens: 8, output_tokens: 2 }, { inputTokens: 8, outputTokens: 2 }],
+    ["누락", { inputTokens: 8 }, undefined],
+    ["음수", { inputTokens: 8, outputTokens: -1 }, undefined],
+    ["소수", { inputTokens: 8, outputTokens: 1.5 }, undefined],
+    ["비객체", "8/2", undefined],
+  ])("Provider confirmed usage %s 경계를 정규화한다", (_case, raw, expected) => {
+    expect(normalizeConfirmedAgentUsage(raw)).toEqual(expected);
+  });
+
   it("승인된 session만 같은 adapter와 execution ID로 재개한다", async () => {
     const execute = vi.fn().mockResolvedValue({
       outcome: "suspended",

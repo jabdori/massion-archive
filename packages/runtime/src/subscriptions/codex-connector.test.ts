@@ -8,6 +8,7 @@ import type { TenantContext } from "@massion/identity";
 
 import { CodexSubscriptionConnector, type CodexSdkFactory } from "./codex-connector.js";
 import { normalizeCodexExecutionEvidence } from "./execution-evidence.js";
+import { SubscriptionStructuredOutputError } from "./agent-runtime.js";
 
 const context: TenantContext = {
   userId: "user-1",
@@ -253,6 +254,182 @@ describe("공식 Codex 구독 Connector", () => {
     expect(turnOptions).not.toHaveProperty("outputSchema");
     expect(result).toMatchObject({ outcome: "completed", sessionId: "thread-1", value: { status: "ok" } });
     expect(JSON.stringify(result)).not.toContain("SECRET_TOKEN");
+  });
+
+  it.each([
+    {
+      name: "JSON 파싱",
+      finalResponse: "not-json",
+      items: [],
+      validate: undefined,
+    },
+    {
+      name: "schema 검증",
+      finalResponse: JSON.stringify({ status: "invalid" }),
+      items: [],
+      validate: () => ({ success: false as const, error: new Error("status 불일치") }),
+    },
+    {
+      name: "실행 근거 검증",
+      finalResponse: JSON.stringify({ status: "ok" }),
+      items: [
+        {
+          id: "duplicate-command",
+          type: "command_execution",
+          command: "pnpm test",
+          aggregated_output: "1 passed",
+          exit_code: 0,
+          status: "completed",
+        },
+        {
+          id: "duplicate-command",
+          type: "command_execution",
+          command: "pnpm lint",
+          aggregated_output: "clean",
+          exit_code: 0,
+          status: "completed",
+        },
+      ],
+      validate: undefined,
+    },
+  ])("구조화 $name 실패는 confirmed usage와 출력 sentinel을 typed carrier로 보존한다", async (value) => {
+    const run = vi.fn().mockResolvedValue({
+      finalResponse: value.finalResponse,
+      items: value.items,
+      usage: { input_tokens: 8, output_tokens: 37 },
+    });
+    const connector = new CodexSubscriptionConnector({
+      create: () => ({ startThread: () => ({ id: "thread-structured-failure", run }), resumeThread: vi.fn() }),
+    });
+    let failure: unknown;
+
+    try {
+      await connector.executeStructured(
+        context,
+        {
+          executionId: "execution-structured-failure",
+          workId: "work-structured-failure",
+          agentHandle: "representative",
+          prompt: "구조화 결과를 반환하세요",
+          workspaceRoot: "/tmp/work-structured-failure",
+          profileRoot: "/tmp/profile-structured-failure",
+          environment: {},
+          allowedTools: [],
+          disallowedTools: [],
+        },
+        {
+          name: "status",
+          description: "상태",
+          jsonSchema: { type: "object" },
+          ...(value.validate ? { validate: value.validate } : {}),
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(SubscriptionStructuredOutputError);
+    expect(failure).toMatchObject({
+      usage: { inputTokens: 8, outputTokens: 37 },
+      emittedTokens: 1,
+      sideEffectsStarted: true,
+    });
+  });
+
+  it("응답 text와 usage가 없어도 command/file item을 본 구조화 실패는 부작용을 보존한다", async () => {
+    const run = vi.fn().mockResolvedValue({
+      finalResponse: "",
+      items: [
+        {
+          id: "file-side-effect",
+          type: "file_change",
+          changes: [{ path: "src/result.ts", kind: "update" }],
+          status: "completed",
+        },
+      ],
+      usage: { input_tokens: 8, output_tokens: 0 },
+    });
+    const connector = new CodexSubscriptionConnector({
+      create: () => ({ startThread: () => ({ id: "thread-side-effect", run }), resumeThread: vi.fn() }),
+    });
+    let failure: unknown;
+
+    try {
+      await connector.executeStructured(
+        context,
+        {
+          executionId: "execution-side-effect",
+          workId: "work-side-effect",
+          agentHandle: "representative",
+          prompt: "구조화 결과를 반환하세요",
+          workspaceRoot: "/tmp/work-side-effect",
+          profileRoot: "/tmp/profile-side-effect",
+          environment: {},
+          allowedTools: [],
+          disallowedTools: [],
+        },
+        { name: "status", description: "상태", jsonSchema: { type: "object" } },
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      usage: { inputTokens: 8, outputTokens: 0 },
+      emittedTokens: 0,
+      sideEffectsStarted: true,
+    });
+  });
+
+  it("일반 실행 근거 검증 실패도 confirmed usage와 부작용을 typed carrier로 보존한다", async () => {
+    const connector = new CodexSubscriptionConnector({
+      create: () => ({
+        startThread: () => ({
+          id: "thread-evidence-failure",
+          run: vi.fn().mockResolvedValue({
+            finalResponse: "완료",
+            items: [
+              {
+                id: "duplicate-command",
+                type: "command_execution",
+                command: "pnpm test",
+                aggregated_output: "1 passed",
+                exit_code: 0,
+                status: "completed",
+              },
+              {
+                id: "duplicate-command",
+                type: "command_execution",
+                command: "pnpm lint",
+                aggregated_output: "clean",
+                exit_code: 0,
+                status: "completed",
+              },
+            ],
+            usage: { input_tokens: 8, output_tokens: 37 },
+          }),
+        }),
+        resumeThread: vi.fn(),
+      }),
+    });
+
+    await expect(
+      connector.execute(context, {
+        executionId: "execution-evidence-failure",
+        workId: "work-evidence-failure",
+        agentHandle: "representative",
+        prompt: "작업을 완료하세요",
+        workspaceRoot: "/tmp/work-evidence-failure",
+        profileRoot: "/tmp/profile-evidence-failure",
+        environment: {},
+        allowedTools: [],
+        disallowedTools: [],
+      }),
+    ).rejects.toMatchObject({
+      usage: { inputTokens: 8, outputTokens: 37 },
+      emittedTokens: 1,
+      sideEffectsStarted: true,
+    });
   });
 
   it("성공한 terminal 명령과 파일 변경만 정규화한 실행 근거로 보존한다", async () => {

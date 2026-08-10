@@ -10,6 +10,8 @@ import {
   GeminiCliAcpConnector,
   GrokBuildAcpConnector,
   executionEvidenceIsSafe,
+  normalizeConfirmedAgentUsage,
+  SubscriptionStructuredOutputError,
   type AcpPermissionBridge,
   type ClaudeSubscriptionConnectorOptions,
   type ConnectorRuntimeBinding,
@@ -572,6 +574,7 @@ class RemoteConnectorAgentExecutor implements RoutedAgentRuntimeExecutor {
     };
     let usage: { readonly inputTokens: number; readonly outputTokens: number } | undefined;
     const chunks: string[] = [];
+    let readingErrorFrame = false;
     try {
       for await (const event of this.broker.invoke(this.context, request, controller.signal)) {
         if (event.kind === "data") {
@@ -584,7 +587,10 @@ class RemoteConnectorAgentExecutor implements RoutedAgentRuntimeExecutor {
           usage = usagePayload(event.payload);
           continue;
         }
-        if (event.kind === "error") return this.failure(event.payload, chunks.length);
+        if (event.kind === "error") {
+          readingErrorFrame = true;
+          return this.failure(event.payload, chunks.length, usage);
+        }
         const done = frameRecord(event.payload, "done");
         if (done.outcome !== "completed") {
           throw new ConnectorProtocolError("원격 Connector가 지원하지 않는 terminal 결과를 반환했습니다");
@@ -596,12 +602,24 @@ class RemoteConnectorAgentExecutor implements RoutedAgentRuntimeExecutor {
           if (value === undefined) {
             try {
               value = JSON.parse(chunks.join("")) as unknown;
-            } catch {
-              throw new ConnectorProtocolError("원격 Connector 구조화 출력이 유효하지 않습니다");
+            } catch (error) {
+              throw this.structuredFailure("원격 Connector 구조화 출력 JSON이 유효하지 않습니다", error, chunks, usage);
             }
           }
-          const validation = output.validate?.(value);
-          if (validation && !validation.success) throw validation.error;
+          let validation: ReturnType<NonNullable<StructuredOutputSpec["validate"]>> | undefined;
+          try {
+            validation = output.validate?.(value);
+          } catch (error) {
+            throw this.structuredFailure("원격 Connector 구조화 출력 검증에 실패했습니다", error, chunks, usage);
+          }
+          if (validation && !validation.success) {
+            throw this.structuredFailure(
+              "원격 Connector 구조화 출력 검증에 실패했습니다",
+              validation.error,
+              chunks,
+              usage,
+            );
+          }
           if (validation?.success) value = validation.value;
         }
         if (done.executionEvidence !== undefined && !executionEvidenceIsSafe(done.executionEvidence)) {
@@ -618,30 +636,63 @@ class RemoteConnectorAgentExecutor implements RoutedAgentRuntimeExecutor {
       }
       throw new ConnectorProtocolError("Connector Agent terminal frame이 없습니다");
     } catch (error) {
+      if (readingErrorFrame) throw safeTransportError(error);
       if (controller.signal.aborted) {
-        return { outcome: "cancelled", executionId: this.lineage.executionId };
+        return {
+          outcome: "cancelled",
+          executionId: this.lineage.executionId,
+          emittedTokens: chunks.length,
+          ...(usage ? { usage } : {}),
+        };
       }
-      throw safeTransportError(error);
+      if (error instanceof SubscriptionStructuredOutputError) throw error;
+      if (!usage && chunks.length === 0) throw safeTransportError(error);
+      return {
+        outcome: "failed",
+        executionId: this.lineage.executionId,
+        category: "remote-connector-error",
+        retryable: false,
+        signal: { kind: error instanceof ConnectorProtocolError ? "unknown" : "network" },
+        emittedTokens: chunks.length,
+        sideEffectsStarted: true,
+        ...(usage ? { usage } : {}),
+      };
     } finally {
       input.abortSignal?.removeEventListener("abort", abort);
       if (this.active === controller) this.active = undefined;
     }
   }
 
-  private failure(value: unknown, observedOutputParts: number): RoutedAgentRuntimeResult {
+  private failure(
+    value: unknown,
+    observedOutputParts: number,
+    streamedUsage?: { readonly inputTokens: number; readonly outputTokens: number },
+  ): RoutedAgentRuntimeResult {
     const payload = frameRecord(value, "error");
     const signal = failureSignal(payload.signal);
     const sessionId = typeof payload.sessionId === "string" ? this.sessionId(payload.sessionId) : undefined;
+    const hasDeclaredOutput = payload.emittedTokens !== undefined;
+    const declaredOutput = hasDeclaredOutput ? safeInteger(payload.emittedTokens, "출력 token") : 0;
+    const embeddedUsage = payload.usage === undefined ? undefined : usagePayload(payload.usage);
+    if ((streamedUsage === undefined) !== (embeddedUsage === undefined)) {
+      throw new ConnectorProtocolError("Connector Agent 실패 usage 계보가 일치하지 않습니다");
+    }
+    if (
+      streamedUsage?.inputTokens !== embeddedUsage?.inputTokens ||
+      streamedUsage?.outputTokens !== embeddedUsage?.outputTokens
+    ) {
+      throw new ConnectorProtocolError("Connector Agent 실패 usage 계보가 일치하지 않습니다");
+    }
+    const confirmedUsage = embeddedUsage ?? streamedUsage;
     if (signal.kind === "cancelled") {
       return {
         outcome: "cancelled",
         executionId: this.lineage.executionId,
         ...(sessionId ? { sessionId } : {}),
+        emittedTokens: Math.max(observedOutputParts, declaredOutput),
+        ...(confirmedUsage ? { usage: confirmedUsage } : {}),
       };
     }
-    const declaredOutput = Number.isSafeInteger(payload.emittedTokens)
-      ? safeInteger(payload.emittedTokens, "출력 token")
-      : 0;
     return {
       outcome: "failed",
       executionId: this.lineage.executionId,
@@ -650,8 +701,26 @@ class RemoteConnectorAgentExecutor implements RoutedAgentRuntimeExecutor {
       retryable: payload.retryable === true,
       signal,
       emittedTokens: Math.max(observedOutputParts, declaredOutput),
-      sideEffectsStarted: typeof payload.sideEffectsStarted === "boolean" ? payload.sideEffectsStarted : true,
+      sideEffectsStarted:
+        typeof payload.sideEffectsStarted === "boolean" && (hasDeclaredOutput || payload.sideEffectsStarted)
+          ? payload.sideEffectsStarted
+          : true,
+      ...(confirmedUsage ? { usage: confirmedUsage } : {}),
     };
+  }
+
+  private structuredFailure(
+    message: string,
+    cause: unknown,
+    chunks: readonly string[],
+    usage: { readonly inputTokens: number; readonly outputTokens: number } | undefined,
+  ): SubscriptionStructuredOutputError {
+    return new SubscriptionStructuredOutputError(message, {
+      cause,
+      sideEffectsStarted: true,
+      emittedTokens: chunks.length,
+      ...(usage ? { usage } : {}),
+    });
   }
 
   private sessionId(value: unknown): string {
@@ -786,14 +855,54 @@ function normalizeNativeResult(result: SubscriptionAgentResult): RoutedAgentRunt
           };
     return { ...completed, ...(normalizedUsage ? { usage: normalizedUsage } : {}) };
   }
+  if (result.outcome === "cancelled") {
+    const { usage: rawUsage, emittedTokens: rawEmittedTokens, ...cancelled } = result;
+    const usage = normalizeConfirmedAgentUsage(rawUsage);
+    if (rawUsage !== undefined && !usage) {
+      throw new ConnectorProtocolError("Native Agent 취소 usage가 유효하지 않습니다");
+    }
+    return {
+      ...cancelled,
+      emittedTokens: rawEmittedTokens === undefined ? 0 : safeInteger(rawEmittedTokens, "Native Agent 취소 출력 token"),
+      ...(usage ? { usage } : {}),
+    };
+  }
   if (result.outcome !== "failed") return result;
+  const { usage: rawUsage, ...failed } = result;
+  const usage = normalizeConfirmedAgentUsage(rawUsage);
+  if (rawUsage !== undefined && !usage) throw new ConnectorProtocolError("Native Agent 실패 usage가 유효하지 않습니다");
   return {
-    ...result,
+    ...failed,
     signal:
       result.signal === undefined ? { kind: result.retryable ? "network" : "unknown" } : failureSignal(result.signal),
     emittedTokens:
       result.emittedTokens === undefined ? 0 : safeInteger(result.emittedTokens, "Native Agent 출력 token"),
     sideEffectsStarted: typeof result.sideEffectsStarted === "boolean" ? result.sideEffectsStarted : true,
+    ...(usage ? { usage } : {}),
+  };
+}
+
+function nativeCancellationFailure(result: RoutedAgentRuntimeResult): RoutedAgentRuntimeResult {
+  const sessionId = "sessionId" in result ? result.sessionId : undefined;
+  const usage = "usage" in result ? result.usage : undefined;
+  const emittedTokens =
+    result.outcome === "failed"
+      ? result.emittedTokens
+      : result.outcome === "cancelled"
+        ? (result.emittedTokens ?? 0)
+        : result.outcome === "completed" && (usage?.outputTokens ?? 0) > 0
+          ? 1
+          : 0;
+  return {
+    outcome: "failed",
+    executionId: result.executionId,
+    ...(sessionId ? { sessionId } : {}),
+    category: "subscription-cancel",
+    retryable: false,
+    signal: { kind: "cancelled" },
+    emittedTokens,
+    sideEffectsStarted: true,
+    ...(usage ? { usage } : {}),
   };
 }
 
@@ -1026,15 +1135,15 @@ export class MassionSubscriptionRuntimeResolver implements ConnectorRuntimeResol
       };
       abortSignal?.addEventListener("abort", cancel, { once: true });
       try {
-        const result = await operation();
+        const result = normalizeNativeResult(await operation());
         if (cancellation) {
           try {
             await cancellation;
           } catch {
-            throw new Error("구독 Agent 실행 취소를 완료하지 못했습니다");
+            return nativeCancellationFailure(result);
           }
         }
-        return normalizeNativeResult(result);
+        return result;
       } finally {
         abortSignal?.removeEventListener("abort", cancel);
       }

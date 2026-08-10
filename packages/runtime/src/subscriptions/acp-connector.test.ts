@@ -15,6 +15,7 @@ import {
   NodeAcpClientFactory,
   type AcpClient,
   type AcpClientFactory,
+  type AcpPromptResult,
   type AcpSession,
 } from "./acp-connector.js";
 
@@ -395,11 +396,59 @@ describe("GitHub Copilot ACP Connector", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it("ACP output 상한은 실패 신호로 분류해 Router가 재시도 가능한 정상 응답으로 오인하지 않는다", async () => {
+  it.each([
+    {
+      label: "output 상한",
+      response: {
+        text: "부분 출력",
+        stopReason: "end_turn",
+        outputLimit: true,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      } satisfies AcpPromptResult,
+      expected: {
+        outcome: "failed",
+        category: "acp-output-limit",
+        retryable: false,
+        signal: { kind: "input" },
+        emittedTokens: 1,
+        sideEffectsStarted: true,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      },
+    },
+    {
+      label: "비정상 종료",
+      response: {
+        text: "부분 출력",
+        stopReason: "max_tokens",
+        usage: { inputTokens: 8, outputTokens: 37 },
+      } satisfies AcpPromptResult,
+      expected: {
+        outcome: "failed",
+        category: "acp-max_tokens",
+        retryable: false,
+        emittedTokens: 1,
+        sideEffectsStarted: true,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      },
+    },
+    {
+      label: "취소",
+      response: {
+        text: "부분 출력",
+        stopReason: "cancelled",
+        usage: { inputTokens: 8, outputTokens: 37 },
+      } satisfies AcpPromptResult,
+      expected: {
+        outcome: "cancelled",
+        emittedTokens: 1,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      },
+    },
+  ])("ACP $label terminal은 출력 조각과 확정 usage를 보존한다", async ({ label, response, expected }) => {
     const create = vi.fn().mockResolvedValue({
       openSession: vi.fn().mockResolvedValue({
-        sessionId: "session-output-limit",
-        prompt: vi.fn().mockResolvedValue({ text: "제한된 출력", stopReason: "end_turn", outputLimit: true }),
+        sessionId: `session-${label}`,
+        prompt: vi.fn().mockResolvedValue(response),
         cancel: vi.fn(),
       }),
       close: vi.fn(),
@@ -408,19 +457,54 @@ describe("GitHub Copilot ACP Connector", () => {
       create,
     } satisfies AcpClientFactory);
 
+    const result = await connector.execute(context, {
+      executionId: `execution-${label}`,
+      workId: `work-${label}`,
+      agentHandle: "software-engineering.backend-specialist",
+      prompt: "terminal 근거 검증",
+      workspaceRoot: `/tmp/work-${label}`,
+      profileRoot: `/tmp/copilot-profile-${label}`,
+      environment: { PATH: "/usr/bin" },
+      allowedTools: [],
+      disallowedTools: [],
+    });
+
+    expect(result).toMatchObject(expected);
+    expect(JSON.stringify(result)).not.toContain("부분 출력");
+  });
+
+  it("terminal 결과 뒤 client 정리 실패는 결과를 덮지 않고 원문 없는 운영 경고로 분리한다", async () => {
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
+    const create = vi.fn().mockResolvedValue({
+      openSession: vi.fn().mockResolvedValue({
+        sessionId: "session-cleanup-failure",
+        prompt: vi.fn().mockResolvedValue({ text: "완료", stopReason: "end_turn" }),
+        cancel: vi.fn(),
+      }),
+      close: vi.fn().mockRejectedValue(new Error("secret cleanup failure")),
+    });
+    const connector = new CopilotAcpConnector({ executable: "/opt/massion/connectors/copilot" }, {
+      create,
+    } satisfies AcpClientFactory);
+
     await expect(
       connector.execute(context, {
-        executionId: "execution-output-limit",
-        workId: "work-output-limit",
+        executionId: "execution-cleanup-failure",
+        workId: "work-cleanup-failure",
         agentHandle: "software-engineering.backend-specialist",
-        prompt: "출력 상한 검증",
-        workspaceRoot: "/tmp/work-output-limit",
-        profileRoot: "/tmp/copilot-profile-output-limit",
+        prompt: "정리 실패 검증",
+        workspaceRoot: "/tmp/work-cleanup-failure",
+        profileRoot: "/tmp/copilot-profile-cleanup-failure",
         environment: { PATH: "/usr/bin" },
         allowedTools: [],
         disallowedTools: [],
       }),
-    ).resolves.toMatchObject({ outcome: "failed", category: "acp-output-limit", retryable: false });
+    ).resolves.toMatchObject({ outcome: "completed", value: "완료" });
+    expect(warning).toHaveBeenCalledWith("ACP client 정리에 실패했습니다", {
+      code: "MASSION_ACP_CLEANUP_FAILED",
+    });
+    expect(JSON.stringify(warning.mock.calls)).not.toContain("secret cleanup failure");
+    warning.mockRestore();
   });
 
   it("실행 파일 절대 경로를 명시하지 않으면 process를 만들지 않는다", async () => {

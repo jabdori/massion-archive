@@ -21,19 +21,25 @@ Bun 1.3.14에서 `@opentui/solid@0.4.3`(현행 `@opentui/core@0.4.3`과 동일 �
 
 ## 판정 ② Runtime 델타 관측 지점 — 확정
 
+> **후속 정정 2026-08-10:** 아래 관찰자 결정은 유지되지만 raw stream 영속에 관한 당시 구현 설명과
+> 「이번 범위에서 변경하지 않는다」는 제한은 [ADR-008](../../architecture/ADR-008-volatile-model-stream-boundary.md)이
+> 대체합니다. 현재 Runner는 지원 semantic delta만 observer로 전달하고 raw part를 Runtime Event로 저장하지
+> 않습니다.
+
 ### 현재 코드 사실
 
 | 사실 | 위치 |
 |---|---|
 | `AgentRunner.stream()` 계약이 이미 존재, `AgentExecutionEvent { executionId, sequence, type, payload, createdAt }`를 yield | `packages/runtime/src/contracts.ts` |
-| `stream()` 구현은 AI SDK `streamText`의 `fullStream`을 순회하며 매 part를 `model_text_delta` 등으로 변환 | `packages/runtime/src/voltagent-runner.ts` |
-| 단, `stream()`은 **매 델타를 execution store에 영속**(`appendEvent`, 토큰당 DB write) | 같은 파일 |
+| `stream()` 구현은 AI SDK `streamText`의 `fullStream` 중 non-empty text·reasoning, tool call·result, error, finish만 휘발성 `ExecutionDelta`로 관찰하고 start·end raw part는 버림 | `packages/runtime/src/voltagent-runner.ts` |
+| Runtime 정본은 queued·running·route·terminal이며 raw `model_*` part와 chunk별 outbox는 생성하지 않음 | 같은 파일, ADR-008 |
 | 일반 Work 전달 경로는 비스트리밍 `execute()` → `generateWithFallback`(generateText)를 사용 — **전달 중 델타가 아예 발생하지 않음** | `packages/application/src/core-delivery-stage.ts` |
 | 현재 `stream()` 소비자는 Assurance 단계와 server product 조립뿐 | `packages/application/src/core-assurance-stage.ts`, `apps/server/src/product.ts` |
 
 ### 결정 — ExecutionDeltaPort (휘발성 관찰자)
 
-전달 경로를 `stream()` 소비로 바꾸면 토큰당 DB write가 발생하므로 채택하지 않습니다. 대신 **관찰자 port를 runner에 주입**하고, 제공자 스트리밍 루프에서 영속과 무관하게 호출합니다.
+**관찰자 port를 Runner에 주입**하고 제공자 스트리밍 루프에서 영속과 무관하게 호출합니다. 당시 존재한
+토큰당 DB write는 ADR-008에서 제거했습니다.
 
 ```ts
 // packages/runtime — 신규 계약 (UX-2에서 구현)
@@ -57,9 +63,9 @@ export interface ExecutionDeltaObserver {
 
 적용 원칙:
 
-1. `execute()` 내부 모델 호출을 스트리밍 기반으로 통일하되, **영속은 기존 확정 경로 그대로**(결과·상태 전이만 기록)이고 델타는 observer로만 흘립니다. 기존 `stream()`의 토큰당 `appendEvent` 동작은 이번 범위에서 변경하지 않습니다.
+1. `execute()` 내부 모델 호출을 스트리밍 기반으로 통일하되, **영속은 확정 경로**(상태·route·결과 전이)만 기록하고 델타는 observer로만 흘립니다. `stream()`의 과거 토큰당 `appendEvent` 동작은 ADR-008에서 제거했습니다.
 2. Application은 `ExecutionStreamRegistry`로 observer를 구현해 tenant 검증을 통과한 SSE 구독자에게 fan-out합니다 (재연결 replay 없음 — `work.timeline` 재조회로 복구).
-3. blocked·취소·lease 회수 시 `lifecycle` 델타로 스트림 종료 의미를 전달하며, 종료 판정은 기존 상태 기계가 소유합니다.
+3. 현재 `lifecycle` delta는 Provider `finish`만 전달합니다. blocked·취소·lease terminal의 observer delta는 아직 구현되지 않았고 종료 판정은 durable event와 `work.timeline` 재조회가 소유합니다. 해당 terminal delta 추가는 후속 목표입니다.
 
 ## 다음 단계
 

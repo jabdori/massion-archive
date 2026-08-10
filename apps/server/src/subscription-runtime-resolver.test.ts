@@ -9,7 +9,7 @@ import type {
   SubscriptionAgentInput,
   SubscriptionAgentResult,
 } from "@massion/runtime";
-import { normalizeCodexExecutionEvidence } from "@massion/runtime";
+import { normalizeCodexExecutionEvidence, SubscriptionStructuredOutputError } from "@massion/runtime";
 import type {
   ConnectorEvent,
   ConnectorSessionLease,
@@ -747,9 +747,10 @@ describe("구독 실행 해석기", () => {
     const configured = await options({
       currentConnector: edgeAgentConnector(),
       events: [
+        { kind: "usage", sequence: 0, payload: { inputTokens: 8, outputTokens: 2 } },
         {
           kind: "error",
-          sequence: 0,
+          sequence: 1,
           payload: {
             category: "invalid category secret@example.com token-raw",
             message: "profile=/Users/private/.config token=raw-token",
@@ -757,6 +758,7 @@ describe("구독 실행 해석기", () => {
             signal: { kind: "http", statusCode: 429, retryAfter: "raw-token secret@example.com" },
             emittedTokens: 0,
             sideEffectsStarted: false,
+            usage: { inputTokens: 8, outputTokens: 2 },
           },
         },
       ],
@@ -773,8 +775,327 @@ describe("구독 실행 해석기", () => {
       signal: { kind: "http", statusCode: 429 },
       emittedTokens: 0,
       sideEffectsStarted: false,
+      usage: { inputTokens: 8, outputTokens: 2 },
     });
     expect(JSON.stringify(result)).not.toMatch(/secret@example\.com|raw-token|Users\/private/u);
+  });
+
+  it("원격 실패의 usage frame과 error usage가 정확히 같을 때만 하나의 confirmed usage로 보존한다", async () => {
+    const configured = await options({
+      currentConnector: edgeAgentConnector(),
+      events: [
+        { kind: "data", sequence: 0, payload: { type: "text-delta", delta: "일부" } },
+        { kind: "data", sequence: 1, payload: { type: "text-delta", delta: "출력" } },
+        { kind: "usage", sequence: 2, payload: { inputTokens: 8, outputTokens: 37 } },
+        {
+          kind: "error",
+          sequence: 3,
+          payload: {
+            category: "provider",
+            retryable: true,
+            signal: { kind: "network" },
+            emittedTokens: 2,
+            sideEffectsStarted: false,
+            usage: { inputTokens: 8, outputTokens: 37 },
+          },
+        },
+      ],
+    });
+    const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+
+    await expect(binding.executor.execute({ executionId: "execution-1", prompt: "실패" })).resolves.toMatchObject({
+      outcome: "failed",
+      usage: { inputTokens: 8, outputTokens: 37 },
+      emittedTokens: 2,
+      sideEffectsStarted: false,
+    });
+  });
+
+  it("원격 Agent가 출력·usage 뒤 취소되면 확인된 사실을 cancelled 결과에 보존한다", async () => {
+    let streaming!: () => void;
+    const reachedUsage = new Promise<void>((resolve) => {
+      streaming = resolve;
+    });
+    const configured = await options({ currentConnector: edgeAgentConnector() });
+    const broker: SubscriptionRuntimeBroker = {
+      getLease: async () => await configured.broker.getLease(),
+      invoke: async function* (_context, _request, signal) {
+        yield { kind: "data", sequence: 0, payload: { type: "text-delta", delta: "일부" } };
+        yield { kind: "data", sequence: 1, payload: { type: "text-delta", delta: "출력" } };
+        yield { kind: "usage", sequence: 2, payload: { inputTokens: 8, outputTokens: 37 } };
+        streaming();
+        await new Promise<never>((_resolve, reject) => {
+          const abort = () => reject(signal?.reason ?? new Error("aborted"));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      },
+    };
+    const binding = await new MassionSubscriptionRuntimeResolver({ ...configured, broker }).resolve(
+      context,
+      resolution(),
+    );
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+    const controller = new AbortController();
+    const execution = binding.executor.execute({
+      executionId: "execution-1",
+      prompt: "취소",
+      abortSignal: controller.signal,
+    });
+
+    await reachedUsage;
+    controller.abort("사용자 취소");
+
+    await expect(execution).resolves.toMatchObject({
+      outcome: "cancelled",
+      usage: { inputTokens: 8, outputTokens: 37 },
+      emittedTokens: 2,
+    });
+  });
+
+  it("원격 구조화 출력 검증 오류가 출력·usage 관측 사실을 보존한다", async () => {
+    const configured = await options({
+      currentConnector: edgeAgentConnector(),
+      events: [
+        { kind: "data", sequence: 0, payload: { type: "text-delta", delta: "{" } },
+        { kind: "data", sequence: 1, payload: { type: "text-delta", delta: "}" } },
+        { kind: "usage", sequence: 2, payload: { inputTokens: 8, outputTokens: 37 } },
+        {
+          kind: "done",
+          sequence: 3,
+          payload: { outcome: "completed", sessionId: "remote-session-structured", value: {} },
+        },
+      ],
+    });
+    const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+    if (binding.kind !== "agent-runtime" || !binding.executor.executeStructured) {
+      throw new Error("구조화 Agent runtime binding이 필요합니다");
+    }
+
+    const error = await binding.executor
+      .executeStructured(
+        { executionId: "execution-1", prompt: "구조화" },
+        {
+          name: "result",
+          jsonSchema: { type: "object" },
+          validate: () => ({ success: false, error: new Error("schema mismatch") }),
+        },
+      )
+      .catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(SubscriptionStructuredOutputError);
+    expect(error).toMatchObject({
+      emittedTokens: 2,
+      sideEffectsStarted: true,
+      usage: { inputTokens: 8, outputTokens: 37 },
+    });
+  });
+
+  it.each([
+    {
+      name: "실행 근거 오류",
+      events: [
+        { kind: "data" as const, sequence: 0, payload: { type: "text-delta", delta: "일부" } },
+        { kind: "data" as const, sequence: 1, payload: { type: "text-delta", delta: "출력" } },
+        { kind: "usage" as const, sequence: 2, payload: { inputTokens: 8, outputTokens: 37 } },
+        {
+          kind: "done" as const,
+          sequence: 3,
+          payload: {
+            outcome: "completed",
+            sessionId: "remote-session-evidence",
+            executionEvidence: { schemaVersion: "forged" },
+          },
+        },
+      ],
+    },
+    {
+      name: "terminal 누락",
+      events: [
+        { kind: "data" as const, sequence: 0, payload: { type: "text-delta", delta: "일부" } },
+        { kind: "data" as const, sequence: 1, payload: { type: "text-delta", delta: "출력" } },
+        { kind: "usage" as const, sequence: 2, payload: { inputTokens: 8, outputTokens: 37 } },
+      ],
+    },
+  ])("원격 $name 뒤에도 출력·usage를 fail-closed 결과에 보존한다", async ({ events }) => {
+    const configured = await options({ currentConnector: edgeAgentConnector(), events });
+    const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+
+    await expect(binding.executor.execute({ executionId: "execution-1", prompt: "실패" })).resolves.toMatchObject({
+      outcome: "failed",
+      category: "remote-connector-error",
+      retryable: false,
+      signal: { kind: "unknown" },
+      emittedTokens: 2,
+      sideEffectsStarted: true,
+      usage: { inputTokens: 8, outputTokens: 37 },
+    });
+  });
+
+  it("원격 transport가 출력·usage 뒤 끊겨도 관측 사실을 network 실패에 보존한다", async () => {
+    const configured = await options({ currentConnector: edgeAgentConnector() });
+    const broker: SubscriptionRuntimeBroker = {
+      getLease: async () => await configured.broker.getLease(),
+      invoke: async function* () {
+        yield { kind: "data", sequence: 0, payload: { type: "text-delta", delta: "일부" } };
+        yield { kind: "data", sequence: 1, payload: { type: "text-delta", delta: "출력" } };
+        yield { kind: "usage", sequence: 2, payload: { inputTokens: 8, outputTokens: 37 } };
+        throw new TypeError("socket secret@example.com");
+      },
+    };
+    const binding = await new MassionSubscriptionRuntimeResolver({ ...configured, broker }).resolve(
+      context,
+      resolution(),
+    );
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+
+    const result = await binding.executor.execute({ executionId: "execution-1", prompt: "실패" });
+    expect(result).toMatchObject({
+      outcome: "failed",
+      category: "remote-connector-error",
+      retryable: false,
+      signal: { kind: "network" },
+      emittedTokens: 2,
+      sideEffectsStarted: true,
+      usage: { inputTokens: 8, outputTokens: 37 },
+    });
+    expect(JSON.stringify(result)).not.toContain("secret@example.com");
+  });
+
+  it("원격 실패의 usage 계보 충돌·부분·음수 값은 모두 fail-closed한다", async () => {
+    const cases = [
+      {
+        name: "계보 충돌",
+        events: [
+          { kind: "usage" as const, sequence: 0, payload: { inputTokens: 8, outputTokens: 37 } },
+          {
+            kind: "error" as const,
+            sequence: 1,
+            payload: { signal: { kind: "network" }, usage: { inputTokens: 8, outputTokens: 2 } },
+          },
+        ],
+      },
+      {
+        name: "payload-only usage",
+        events: [
+          {
+            kind: "error" as const,
+            sequence: 0,
+            payload: { signal: { kind: "network" }, usage: { inputTokens: 8, outputTokens: 37 } },
+          },
+        ],
+      },
+      {
+        name: "frame-only usage",
+        events: [
+          { kind: "usage" as const, sequence: 0, payload: { inputTokens: 8, outputTokens: 37 } },
+          { kind: "error" as const, sequence: 1, payload: { signal: { kind: "network" } } },
+        ],
+      },
+      {
+        name: "부분 usage",
+        events: [
+          {
+            kind: "error" as const,
+            sequence: 0,
+            payload: { signal: { kind: "network" }, usage: { inputTokens: 8 } },
+          },
+        ],
+      },
+      {
+        name: "음수 usage",
+        events: [
+          {
+            kind: "error" as const,
+            sequence: 0,
+            payload: { signal: { kind: "network" }, usage: { inputTokens: 8, outputTokens: -1 } },
+          },
+        ],
+      },
+    ];
+
+    for (const value of cases) {
+      const configured = await options({ currentConnector: edgeAgentConnector(), events: value.events });
+      const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+      if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+      await expect(
+        binding.executor.execute({ executionId: "execution-1", prompt: value.name }),
+        value.name,
+      ).rejects.toThrow(/usage|token/u);
+    }
+  });
+
+  it.each([
+    ["소수", 1.5],
+    ["안전 정수 범위 초과", Number.MAX_SAFE_INTEGER + 1],
+  ])("원격 실패의 %s emittedTokens를 거부한다", async (_name, emittedTokens) => {
+    const configured = await options({
+      currentConnector: edgeAgentConnector(),
+      events: [
+        {
+          kind: "error",
+          sequence: 0,
+          payload: { signal: { kind: "network" }, emittedTokens, sideEffectsStarted: false },
+        },
+      ],
+    });
+    const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+
+    await expect(binding.executor.execute({ executionId: "execution-1", prompt: "실패" })).rejects.toThrow(
+      /출력 token/u,
+    );
+  });
+
+  it("원격 실패가 emittedTokens를 생략한 채 부작용 없음을 주장하면 fail-closed한다", async () => {
+    const configured = await options({
+      currentConnector: edgeAgentConnector(),
+      events: [
+        {
+          kind: "error",
+          sequence: 0,
+          payload: { category: "provider", retryable: true, signal: { kind: "network" }, sideEffectsStarted: false },
+        },
+      ],
+    });
+    const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+
+    await expect(binding.executor.execute({ executionId: "execution-1", prompt: "실패" })).resolves.toMatchObject({
+      outcome: "failed",
+      emittedTokens: 0,
+      sideEffectsStarted: true,
+    });
+  });
+
+  it("원격 취소 terminal도 confirmed usage와 관찰된 fragment 수를 분리해 보존한다", async () => {
+    const configured = await options({
+      currentConnector: edgeAgentConnector(),
+      events: [
+        { kind: "data", sequence: 0, payload: { type: "text-delta", delta: "일부" } },
+        { kind: "usage", sequence: 1, payload: { inputTokens: 8, outputTokens: 37 } },
+        {
+          kind: "error",
+          sequence: 2,
+          payload: {
+            category: "cancelled",
+            signal: { kind: "cancelled" },
+            emittedTokens: 2,
+            usage: { inputTokens: 8, outputTokens: 37 },
+          },
+        },
+      ],
+    });
+    const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+
+    await expect(binding.executor.execute({ executionId: "execution-1", prompt: "취소" })).resolves.toMatchObject({
+      outcome: "cancelled",
+      usage: { inputTokens: 8, outputTokens: 37 },
+      emittedTokens: 2,
+    });
   });
 
   it("native adapter가 증명한 실패 신호·출력·부작용을 보존하고 누락 값은 fail-closed한다", async () => {
@@ -787,6 +1108,7 @@ describe("구독 실행 해석기", () => {
         signal: { kind: "http", statusCode: 401 },
         emittedTokens: 0,
         sideEffectsStarted: false,
+        usage: { inputTokens: 8, outputTokens: 2 },
       }),
       resume: vi.fn(),
       cancel: vi.fn(),
@@ -803,6 +1125,7 @@ describe("구독 실행 해석기", () => {
       signal: { kind: "http", statusCode: 401 },
       emittedTokens: 0,
       sideEffectsStarted: false,
+      usage: { inputTokens: 8, outputTokens: 2 },
     });
 
     const unknownAdapter: SubscriptionAgentAdapter = {
@@ -827,6 +1150,51 @@ describe("구독 실행 해석기", () => {
       signal: { kind: "unknown" },
       emittedTokens: 0,
       sideEffectsStarted: true,
+    });
+  });
+
+  it("native 취소 정리가 실패해도 이미 확인된 결과 사실을 typed 실패에 보존한다", async () => {
+    let finish: ((result: SubscriptionAgentResult) => void) | undefined;
+    const cancel = vi.fn().mockImplementation(() => {
+      finish?.({
+        outcome: "cancelled",
+        executionId: "execution-1",
+        sessionId: "provider-session-cancel",
+        emittedTokens: 2,
+        usage: { inputTokens: 8, outputTokens: 37 },
+      });
+      return Promise.reject(new Error("cancel cleanup failed"));
+    });
+    const adapter: SubscriptionAgentAdapter = {
+      execute: vi.fn().mockImplementation(
+        () =>
+          new Promise<SubscriptionAgentResult>((resolveExecution) => {
+            finish = resolveExecution;
+          }),
+      ),
+      resume: vi.fn(),
+      cancel,
+    };
+    const configured = await options({ nativeFactory: { create: () => adapter } });
+    const binding = await new MassionSubscriptionRuntimeResolver(configured).resolve(context, resolution());
+    if (binding.kind !== "agent-runtime") throw new Error("Agent runtime binding이 필요합니다");
+    const controller = new AbortController();
+    const execution = binding.executor.execute({
+      executionId: "execution-1",
+      prompt: "취소",
+      abortSignal: controller.signal,
+    });
+
+    controller.abort("사용자 취소");
+
+    await expect(execution).resolves.toMatchObject({
+      outcome: "failed",
+      category: "subscription-cancel",
+      retryable: false,
+      signal: { kind: "cancelled" },
+      emittedTokens: 2,
+      sideEffectsStarted: true,
+      usage: { inputTokens: 8, outputTokens: 37 },
     });
   });
 

@@ -56,6 +56,7 @@ describe("Codex app-server 구독 실행 adapter", () => {
     beforeFailure: readonly { readonly method: string; readonly params: unknown }[] = [],
     outputTokens = 0,
     notificationError: unknown = error,
+    inputTokens = 0,
   ): CodexAppServerSubscriptionConnector {
     let options: CodexAppServerOptions | undefined;
     const connection: CodexAppServerConnection = {
@@ -83,7 +84,12 @@ describe("Codex app-server 구독 실행 adapter", () => {
                   threadId: "thread-auth-failed",
                   turnId: "turn-auth-failed",
                   tokenUsage: {
-                    last: { totalTokens: outputTokens, inputTokens: 0, cachedInputTokens: 0, outputTokens },
+                    last: {
+                      totalTokens: inputTokens + outputTokens,
+                      inputTokens,
+                      cachedInputTokens: 0,
+                      outputTokens,
+                    },
                   },
                 },
               });
@@ -501,6 +507,90 @@ describe("Codex app-server 구독 실행 adapter", () => {
     const result = await connector.execute(context, input);
 
     expect(result).toMatchObject({ outcome: "failed", retryable: false, sideEffectsStarted: true });
+  });
+
+  it("실패 turn에서도 app-server가 확정한 8/2 usage를 normalized 값으로 보존한다", async () => {
+    const failure = {
+      message: "요청이 제한됐습니다",
+      codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 429 } },
+      additionalDetails: null,
+    };
+    const connector = failedTurnConnector(failure, [], 2, failure, 8);
+
+    await expect(connector.execute(context, input)).resolves.toMatchObject({
+      outcome: "failed",
+      usage: { inputTokens: 8, outputTokens: 2 },
+      emittedTokens: 1,
+      sideEffectsStarted: true,
+    });
+  });
+
+  it("delta와 8/37 usage 뒤 transport·close가 실패해도 관측 근거를 terminal 실패로 보존한다", async () => {
+    let options: CodexAppServerOptions | undefined;
+    const connection: CodexAppServerConnection = {
+      get closed() {
+        return false;
+      },
+      close: vi.fn().mockRejectedValue(new Error("close failed")),
+      notify: vi.fn(),
+      request: vi.fn(async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-transport" } };
+        if (method === "turn/start") {
+          queueMicrotask(() => {
+            void (async () => {
+              await options?.onNotification?.({
+                method: "turn/started",
+                params: { threadId: "thread-transport", turn: { id: "turn-transport" } },
+              });
+              await options?.onNotification?.({
+                method: "item/agentMessage/delta",
+                params: {
+                  threadId: "thread-transport",
+                  turnId: "turn-transport",
+                  itemId: "message-transport",
+                  delta: "일부 출력",
+                },
+              });
+              await options?.onNotification?.({
+                method: "thread/tokenUsage/updated",
+                params: {
+                  threadId: "thread-transport",
+                  turnId: "turn-transport",
+                  tokenUsage: {
+                    last: { totalTokens: 45, inputTokens: 8, cachedInputTokens: 0, outputTokens: 37 },
+                  },
+                },
+              });
+              await options?.onFailure?.(new Error("transport failed"));
+            })();
+          });
+          return { turn: { id: "turn-transport" } };
+        }
+        throw new Error(`예상하지 않은 method: ${method}`);
+      }),
+    };
+    const connector = new CodexAppServerSubscriptionConnector(
+      { request: vi.fn() },
+      {
+        model: "gpt-5.6-codex",
+        policy: { sandboxMode: "workspace-write", approvalPolicy: "on-request", networkAccessEnabled: false },
+        runtime: async () => ({ command: "/usr/bin/node", commandArguments: ["/runtime/codex.js"] }),
+      },
+      vi.fn(async (_command, _arguments, _environment, configuredOptions) => {
+        options = configuredOptions;
+        return connection;
+      }),
+    );
+
+    await expect(connector.execute(context, input)).resolves.toMatchObject({
+      outcome: "failed",
+      category: "codex-app-server-transport",
+      retryable: false,
+      signal: { kind: "network" },
+      emittedTokens: 1,
+      sideEffectsStarted: true,
+      usage: { inputTokens: 8, outputTokens: 37 },
+    });
   });
 
   it.each([

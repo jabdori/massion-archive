@@ -14,12 +14,14 @@ import {
 import type { TenantContext } from "@massion/identity";
 
 import type { StructuredOutputSpec } from "../contracts.js";
-import type {
-  SubscriptionAgentAdapter,
-  SubscriptionAgentInput,
-  SubscriptionAgentResult,
-  SubscriptionAgentResumeInput,
-  SubscriptionAgentFailureSignal,
+import {
+  normalizeConfirmedAgentUsage,
+  SubscriptionStructuredOutputError,
+  type SubscriptionAgentAdapter,
+  type SubscriptionAgentFailureSignal,
+  type SubscriptionAgentInput,
+  type SubscriptionAgentResult,
+  type SubscriptionAgentResumeInput,
 } from "./agent-runtime.js";
 
 export interface SubscriptionPermissionBridge {
@@ -454,6 +456,43 @@ export class ClaudeSubscriptionConnector implements SubscriptionAgentAdapter {
     let emittedTokens = 0;
     let sideEffectsStarted = false;
     let observedFailure: SubscriptionAgentFailureSignal | undefined;
+    const cancelledResult = (usage?: {
+      readonly inputTokens: number;
+      readonly outputTokens: number;
+    }): SubscriptionAgentResult => ({
+      outcome: "cancelled",
+      executionId: input.executionId,
+      ...(sessionId ? { sessionId } : {}),
+      emittedTokens: Math.max(emittedTokens, (usage?.outputTokens ?? 0) > 0 ? 1 : 0),
+      ...(usage ? { usage } : {}),
+    });
+    const failedResult = (
+      category: string,
+      error?: unknown,
+      usage?: { readonly inputTokens: number; readonly outputTokens: number },
+    ): SubscriptionAgentResult => {
+      const signal: SubscriptionAgentFailureSignal | undefined =
+        observedFailure ?? (error instanceof TypeError ? { kind: "network" } : undefined);
+      const knownBeforeSideEffects = signal !== undefined && emittedTokens === 0 && !sideEffectsStarted;
+      return {
+        outcome: "failed",
+        executionId: input.executionId,
+        ...(sessionId ? { sessionId } : {}),
+        category,
+        retryable:
+          signal?.kind === "network" ||
+          signal?.kind === "timeout" ||
+          (signal?.kind === "http" &&
+            (signal.statusCode === 401 ||
+              signal.statusCode === 408 ||
+              signal.statusCode === 429 ||
+              signal.statusCode >= 500)),
+        ...(signal ? { signal } : {}),
+        emittedTokens,
+        sideEffectsStarted: knownBeforeSideEffects ? false : true,
+        ...(usage ? { usage } : {}),
+      };
+    };
     try {
       for await (const message of handle) {
         if (typeof message.session_id === "string") sessionId = message.session_id;
@@ -476,108 +515,102 @@ export class ClaudeSubscriptionConnector implements SubscriptionAgentAdapter {
       }
     } catch (error) {
       if (this.cancelled.delete(input.executionId)) {
-        await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission);
-        return {
-          outcome: "cancelled",
-          executionId: input.executionId,
-          ...(sessionId ? { sessionId } : {}),
-        };
+        await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission).catch(
+          () => undefined,
+        );
+        return cancelledResult();
       }
-      await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission);
+      await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission).catch(() => undefined);
+      if (emittedTokens > 0 || sideEffectsStarted || observedFailure) {
+        return failedResult("error_during_execution", error);
+      }
       throw error;
     } finally {
       this.active.delete(input.executionId);
     }
+    const confirmedUsage = normalizeConfirmedAgentUsage(result?.usage);
     if (this.cancelled.delete(input.executionId)) {
       await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission);
-      return {
-        outcome: "cancelled",
-        executionId: input.executionId,
-        ...(sessionId ? { sessionId } : {}),
-      };
+      return cancelledResult(confirmedUsage);
     }
-    if (approvalState.approvedHookReplay) {
-      throw new Error("승인된 원래 Claude 도구 호출이 두 번 평가되었습니다");
-    }
-    if (approvalState.providerPermissionReplay) {
-      throw new Error("같은 Claude provider 권한 요청이 두 번 전달되었습니다");
-    }
-    if (approvedPermission && !approvalState.approvedConsumed) {
-      throw new Error(
-        approvalState.approvedMismatch
-          ? "승인된 원래 도구 호출과 일치하지 않습니다"
-          : "Claude --resume에서 원래 PreToolUse 도구 호출이 다시 평가되지 않았습니다",
-      );
-    }
-    const hasDeferredResult =
-      result?.subtype === "success" &&
-      (result.stop_reason === "tool_deferred" ||
-        result.terminal_reason === "tool_deferred" ||
-        result.deferred_tool_use !== undefined);
-    if (approvalState.deferredPermission || hasDeferredResult) {
-      if (approvalState.deferredConflict) {
-        await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission);
-        throw new Error("Claude defer는 한 turn의 단일 도구 호출만 지원합니다");
+    try {
+      if (approvalState.approvedHookReplay) {
+        throw new Error("승인된 원래 Claude 도구 호출이 두 번 평가되었습니다");
       }
-      const deferredResultMatches = (() => {
-        try {
-          return (
-            approvalState.deferredPermission !== undefined &&
-            result?.subtype === "success" &&
-            result.stop_reason === "tool_deferred" &&
-            (result.terminal_reason === undefined || result.terminal_reason === "tool_deferred") &&
-            result.deferred_tool_use !== undefined &&
-            result.session_id === approvalState.deferredPermission.sessionId &&
-            result.deferred_tool_use.id === approvalState.deferredPermission.toolUseId &&
-            result.deferred_tool_use.name === approvalState.deferredPermission.toolName &&
-            plainRecord(result.deferred_tool_use.input) &&
-            toolInputDigest(result.deferred_tool_use.input) === approvalState.deferredPermission.inputDigest
-          );
-        } catch {
-          return false;
+      if (approvalState.providerPermissionReplay) {
+        throw new Error("같은 Claude provider 권한 요청이 두 번 전달되었습니다");
+      }
+      if (approvedPermission && !approvalState.approvedConsumed) {
+        throw new Error(
+          approvalState.approvedMismatch
+            ? "승인된 원래 도구 호출과 일치하지 않습니다"
+            : "Claude --resume에서 원래 PreToolUse 도구 호출이 다시 평가되지 않았습니다",
+        );
+      }
+      const hasDeferredResult =
+        result?.subtype === "success" &&
+        (result.stop_reason === "tool_deferred" ||
+          result.terminal_reason === "tool_deferred" ||
+          result.deferred_tool_use !== undefined);
+      if (approvalState.deferredPermission || hasDeferredResult) {
+        if (approvalState.deferredConflict) {
+          await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission);
+          throw new Error("Claude defer는 한 turn의 단일 도구 호출만 지원합니다");
         }
-      })();
-      if (!deferredResultMatches || !approvalState.deferredPermission) {
-        await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission);
-        throw new Error("Claude deferred_tool_use가 원래 PreToolUse 도구 호출과 일치하지 않습니다");
+        const deferredResultMatches = (() => {
+          try {
+            return (
+              approvalState.deferredPermission !== undefined &&
+              result?.subtype === "success" &&
+              result.stop_reason === "tool_deferred" &&
+              (result.terminal_reason === undefined || result.terminal_reason === "tool_deferred") &&
+              result.deferred_tool_use !== undefined &&
+              result.session_id === approvalState.deferredPermission.sessionId &&
+              result.deferred_tool_use.id === approvalState.deferredPermission.toolUseId &&
+              result.deferred_tool_use.name === approvalState.deferredPermission.toolName &&
+              plainRecord(result.deferred_tool_use.input) &&
+              toolInputDigest(result.deferred_tool_use.input) === approvalState.deferredPermission.inputDigest
+            );
+          } catch {
+            return false;
+          }
+        })();
+        if (!deferredResultMatches || !approvalState.deferredPermission) {
+          await this.interruptDeferred(context, input.executionId, approvalState.deferredPermission);
+          throw new Error("Claude deferred_tool_use가 원래 PreToolUse 도구 호출과 일치하지 않습니다");
+        }
+        this.pending.set(input.executionId, approvalState.deferredPermission);
+        return {
+          outcome: "suspended",
+          executionId: input.executionId,
+          sessionId: approvalState.deferredPermission.sessionId,
+          approvalId: approvalState.deferredPermission.approvalId,
+        };
       }
-      this.pending.set(input.executionId, approvalState.deferredPermission);
-      return {
-        outcome: "suspended",
-        executionId: input.executionId,
-        sessionId: approvalState.deferredPermission.sessionId,
-        approvalId: approvalState.deferredPermission.approvalId,
-      };
+      if (!result || !sessionId) throw new Error("Claude Agent SDK terminal result가 없습니다");
+    } catch (error) {
+      if (confirmedUsage || emittedTokens > 0 || sideEffectsStarted) {
+        return failedResult("error_during_execution", error, confirmedUsage);
+      }
+      throw error;
     }
-    if (!result || !sessionId) throw new Error("Claude Agent SDK terminal result가 없습니다");
     if (result.subtype !== "success") {
-      const knownBeforeSideEffects = observedFailure !== undefined && emittedTokens === 0 && !sideEffectsStarted;
-      return {
-        outcome: abortController.signal.aborted ? "cancelled" : "failed",
-        executionId: input.executionId,
-        sessionId,
-        ...(abortController.signal.aborted
-          ? {}
-          : {
-              category: result.subtype,
-              retryable:
-                observedFailure?.kind === "network" ||
-                observedFailure?.kind === "timeout" ||
-                (observedFailure?.kind === "http" &&
-                  (observedFailure.statusCode === 401 ||
-                    observedFailure.statusCode === 408 ||
-                    observedFailure.statusCode === 429 ||
-                    observedFailure.statusCode >= 500)),
-              ...(observedFailure ? { signal: observedFailure } : {}),
-              emittedTokens,
-              sideEffectsStarted: knownBeforeSideEffects ? false : true,
-            }),
-      } as SubscriptionAgentResult;
+      if (abortController.signal.aborted) {
+        return cancelledResult(confirmedUsage);
+      }
+      return failedResult(result.subtype, undefined, confirmedUsage);
     }
     let value = output ? result.structured_output : result.result;
     if (output?.validate) {
       const validation = output.validate(value);
-      if (!validation.success) throw validation.error;
+      if (!validation.success) {
+        throw new SubscriptionStructuredOutputError("Claude 구조화 출력 검증에 실패했습니다", {
+          cause: validation.error,
+          sideEffectsStarted,
+          emittedTokens: Math.max(emittedTokens, (confirmedUsage?.outputTokens ?? 0) > 0 ? 1 : 0),
+          ...(confirmedUsage ? { usage: confirmedUsage } : {}),
+        });
+      }
       value = validation.value;
     }
     return {

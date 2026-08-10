@@ -7,6 +7,28 @@ export type SubscriptionAgentFailureSignal =
   | { readonly kind: "http"; readonly statusCode: number; readonly retryAfter?: string }
   | { readonly kind: "timeout" | "network" | "input" | "policy" | "cancelled" | "unknown" };
 
+export interface SubscriptionAgentUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
+/** Provider가 두 token 수를 모두 확정한 경우에만 normalized usage를 반환합니다. */
+export function normalizeConfirmedAgentUsage(value: unknown): SubscriptionAgentUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Readonly<Record<string, unknown>>;
+  const inputTokens = source.inputTokens ?? source.input_tokens;
+  const outputTokens = source.outputTokens ?? source.output_tokens;
+  if (
+    !Number.isSafeInteger(inputTokens) ||
+    Number(inputTokens) < 0 ||
+    !Number.isSafeInteger(outputTokens) ||
+    Number(outputTokens) < 0
+  ) {
+    return undefined;
+  }
+  return { inputTokens: Number(inputTokens), outputTokens: Number(outputTokens) };
+}
+
 /**
  * Provider가 turn을 끝냈지만 구조화 출력만 사용할 수 없을 때 adapter가 던집니다.
  * 호출자가 부작용 관측 사실을 잃지 않고 fallback 여부를 판단할 수 있도록
@@ -15,15 +37,22 @@ export type SubscriptionAgentFailureSignal =
 export class SubscriptionStructuredOutputError extends Error {
   public readonly sideEffectsStarted: boolean;
   public readonly emittedTokens: number;
+  public readonly usage?: SubscriptionAgentUsage;
 
   public constructor(
     message: string,
-    options: { readonly cause?: unknown; readonly sideEffectsStarted: boolean; readonly emittedTokens: number },
+    options: {
+      readonly cause?: unknown;
+      readonly sideEffectsStarted: boolean;
+      readonly emittedTokens: number;
+      readonly usage?: SubscriptionAgentUsage;
+    },
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "SubscriptionStructuredOutputError";
     this.sideEffectsStarted = options.sideEffectsStarted;
     this.emittedTokens = options.emittedTokens;
+    if (options.usage) this.usage = options.usage;
   }
 }
 
@@ -60,6 +89,10 @@ export type SubscriptionAgentResult =
       readonly outcome: "cancelled";
       readonly executionId: string;
       readonly sessionId?: string;
+      /** Provider가 취소 terminal 전에 외부로 내보낸 출력 조각 수입니다. */
+      readonly emittedTokens?: number;
+      /** Provider가 취소 terminal에서도 두 token 수를 모두 확정한 경우에만 포함합니다. */
+      readonly usage?: SubscriptionAgentUsage;
     }
   | {
       readonly outcome: "failed";
@@ -73,6 +106,8 @@ export type SubscriptionAgentResult =
       readonly emittedTokens?: number;
       /** false는 Provider 호출 전 또는 부작용 없음이 증명된 경우에만 사용합니다. */
       readonly sideEffectsStarted?: boolean;
+      /** Provider가 실패 terminal에서도 두 token 수를 모두 확정한 경우에만 포함합니다. */
+      readonly usage?: SubscriptionAgentUsage;
     };
 
 export interface SubscriptionAgentResumeInput {

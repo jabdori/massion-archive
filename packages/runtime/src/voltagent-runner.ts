@@ -214,6 +214,51 @@ function observedSideEffects(error: unknown, fallbackAssumption: boolean): boole
   return error instanceof SubscriptionStructuredOutputError ? error.sideEffectsStarted : fallbackAssumption;
 }
 
+function agentRuntimeFailureObservation(
+  result: RoutedAgentRuntimeResult | undefined,
+  error?: unknown,
+): {
+  readonly sessionId?: string;
+  readonly usage?: { readonly inputTokens: number; readonly outputTokens: number };
+  readonly emittedTokens: number;
+  readonly sideEffectsStarted: boolean;
+} {
+  if (error instanceof SubscriptionStructuredOutputError) {
+    return {
+      ...(error.usage ? { usage: error.usage } : {}),
+      emittedTokens: error.emittedTokens,
+      sideEffectsStarted: error.sideEffectsStarted,
+    };
+  }
+  if (!result) return { emittedTokens: 0, sideEffectsStarted: true };
+  const sessionId = "sessionId" in result ? result.sessionId : undefined;
+  if (result.outcome === "failed") {
+    return {
+      ...(sessionId ? { sessionId } : {}),
+      ...(result.usage ? { usage: result.usage } : {}),
+      emittedTokens: result.emittedTokens,
+      sideEffectsStarted: result.sideEffectsStarted,
+    };
+  }
+  if (result.outcome === "cancelled") {
+    return {
+      ...(sessionId ? { sessionId } : {}),
+      ...(result.usage ? { usage: result.usage } : {}),
+      emittedTokens: result.emittedTokens ?? 0,
+      sideEffectsStarted: true,
+    };
+  }
+  if (result.outcome === "completed") {
+    return {
+      sessionId: result.sessionId,
+      ...(result.usage ? { usage: result.usage } : {}),
+      emittedTokens: (result.usage?.outputTokens ?? 0) > 0 ? 1 : 0,
+      sideEffectsStarted: true,
+    };
+  }
+  return { sessionId: result.sessionId, emittedTokens: 0, sideEffectsStarted: true };
+}
+
 export function failureSignal(error: unknown): FailureSignal {
   if (error instanceof SubscriptionStructuredOutputError) return { kind: "output" };
   if (
@@ -256,16 +301,6 @@ function isRuntimeExecutionVersionConflict(error: unknown): boolean {
 /** 모든 모델 호출은 상위 취소를 보존하면서도 외부 응답 대기를 유한하게 제한합니다. */
 function modelAbortSignal(parent: AbortSignal, timeoutMs = MODEL_TOTAL_TIMEOUT_MS): AbortSignal {
   return AbortSignal.any([parent, AbortSignal.timeout(timeoutMs)]);
-}
-
-export function normalizeVoltAgentStreamPart(
-  part: { readonly type: string } & Record<string, unknown>,
-): Record<string, unknown> {
-  const safe: Record<string, unknown> = { type: part.type };
-  for (const key of ["id", "text", "delta", "toolName", "toolCallId", "finishReason", "usage"] as const) {
-    if (part[key] !== undefined) safe[key] = part[key];
-  }
-  return safe;
 }
 
 export class RoutedModelRegistry {
@@ -527,14 +562,6 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
               if (part.type === "text-delta" && typeof text === "string" && text.length > 0) {
                 emittedTokens += 1;
               }
-              state = await this.store.appendEvent(context, {
-                commandId: `${executionId}:stream:${String(state.execution.event_sequence + 1)}`,
-                executionId,
-                expectedVersion: state.execution.version,
-                eventType: `model_${part.type.replaceAll("-", "_")}`,
-                payload: normalizeVoltAgentStreamPart(part),
-              });
-              yield eventView(state.event);
               if (part.type === "error") {
                 throw part.error instanceof Error
                   ? part.error
@@ -583,7 +610,7 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
                 emittedTokens,
                 sideEffectsStarted: observedSideEffects(error, lease.kind === "agent-runtime") || emittedTokens > 0,
                 inputTokens: 0,
-                outputTokens: emittedTokens,
+                outputTokens: 0,
               });
               if (failed.fallbackAllowed && emittedTokens === 0) {
                 fallbackFromAttemptId = lease.attemptId;
@@ -1062,38 +1089,60 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
     const boundedSignal = AbortSignal.any([renewal.signal, timeoutSignal]);
     const timeoutWon = () => timeoutSignal.aborted && boundedSignal.reason === timeoutSignal.reason;
     // ponytail: timeout 실패는 공통 Provider 정산 경로가 요구하는 최소 구조만 만듭니다.
-    const timeoutResult = (sessionId?: string): RoutedAgentRuntimeResult => ({
-      outcome: "failed",
-      executionId,
-      ...(sessionId === undefined ? {} : { sessionId }),
-      category: "timeout",
-      retryable: true,
-      signal: { kind: "timeout" },
-      emittedTokens: 0,
-      sideEffectsStarted: true,
-    });
+    const timeoutResult = (result?: RoutedAgentRuntimeResult, error?: unknown): RoutedAgentRuntimeResult => {
+      const observation = agentRuntimeFailureObservation(result, error);
+      return {
+        outcome: "failed",
+        executionId,
+        ...(observation.sessionId ? { sessionId: observation.sessionId } : {}),
+        category: "timeout",
+        retryable: true,
+        signal: { kind: "timeout" },
+        emittedTokens: observation.emittedTokens,
+        sideEffectsStarted: true,
+        ...(observation.usage ? { usage: observation.usage } : {}),
+      };
+    };
+    let observedResult: RoutedAgentRuntimeResult | undefined;
     try {
-      let result: RoutedAgentRuntimeResult;
       if (output) {
         if (!lease.executor.executeStructured) {
           throw new Error("선택한 Agent runtime은 구조화 출력을 지원하지 않습니다");
         }
-        result = await lease.executor.executeStructured(
+        observedResult = await lease.executor.executeStructured(
           { executionId, prompt: inputPrompt, abortSignal: boundedSignal },
           output,
         );
       } else {
-        result = await lease.executor.execute({ executionId, prompt: inputPrompt, abortSignal: boundedSignal });
+        observedResult = await lease.executor.execute({ executionId, prompt: inputPrompt, abortSignal: boundedSignal });
       }
       const lateRenewalError = renewal.error();
       if (lateRenewalError) throw lateRenewalError;
-      if (result.outcome === "cancelled" && timeoutWon()) return timeoutResult(result.sessionId);
-      return result;
+      if (timeoutWon()) return timeoutResult(observedResult);
+      return observedResult;
     } catch (error) {
       const renewalError = renewal.error();
-      if (renewalError) throw renewalError;
-      if (timeoutWon()) return timeoutResult();
-      throw error;
+      if (!renewalError && timeoutWon()) return timeoutResult(observedResult, error);
+      const structuredFailure = error instanceof SubscriptionStructuredOutputError ? error : undefined;
+      const failure = renewalError ?? error;
+      const signal = failureSignal(failure);
+      const observation = agentRuntimeFailureObservation(observedResult, structuredFailure);
+      const runtimeError = renewalError
+        ? ({ category: "runtime", retryable: false } as const)
+        : structuredFailure
+          ? ({ category: "output", retryable: false } as const)
+          : runtimeErrorFromFailureSignal(signal);
+      return {
+        outcome: "failed",
+        executionId,
+        ...(observation.sessionId ? { sessionId: observation.sessionId } : {}),
+        category: runtimeError.category,
+        retryable: runtimeError.retryable,
+        signal: structuredFailure ? { kind: "output" } : signal,
+        emittedTokens: observation.emittedTokens,
+        sideEffectsStarted: renewalError ? true : observation.sideEffectsStarted,
+        ...(observation.usage ? { usage: observation.usage } : {}),
+      };
     } finally {
       renewal.stop();
     }
@@ -1256,22 +1305,24 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
     }
     if (result.outcome === "cancelled") {
       this.suspendedSubscriptions.delete(executionId);
+      const confirmedUsage = result.usage ?? { inputTokens: 0, outputTokens: 0 };
+      const emittedTokens = result.emittedTokens ?? 0;
       await this.recordSubscriptionTerminal(context, executionId, lease, {
         outcome: "cancelled",
         providerExecutionId: executionId,
         ...(result.sessionId ? { providerSessionId: result.sessionId } : {}),
-        usage: { inputTokens: 0, outputTokens: 0 },
-        emittedTokens: 0,
+        usage: confirmedUsage,
+        emittedTokens,
         sideEffectsStarted: true,
         signal: { kind: "cancelled" },
       });
       await lease.fail({
         commandId: settlementCommand,
         signal: { kind: "cancelled" },
-        emittedTokens: 0,
+        emittedTokens,
         sideEffectsStarted: true,
-        inputTokens: 0,
-        outputTokens: 0,
+        inputTokens: confirmedUsage.inputTokens,
+        outputTokens: confirmedUsage.outputTokens,
       });
       await this.recordSubscriptionSettled(context, executionId, lease);
       const cancelled = await this.toTerminalIfRunning(context, executionId, "cancelled", {
@@ -1281,11 +1332,12 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
       });
       return { kind: "terminal", result: this.resultFromExecution(cancelled.execution) };
     }
+    const confirmedUsage = result.usage ?? { inputTokens: 0, outputTokens: 0 };
     await this.recordSubscriptionTerminal(context, executionId, lease, {
       outcome: "failed",
       providerExecutionId: executionId,
       ...(result.sessionId ? { providerSessionId: result.sessionId } : {}),
-      usage: { inputTokens: 0, outputTokens: result.emittedTokens },
+      usage: confirmedUsage,
       emittedTokens: result.emittedTokens,
       sideEffectsStarted: result.sideEffectsStarted,
       category: result.category,
@@ -1297,8 +1349,8 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
       signal: result.signal,
       emittedTokens: result.emittedTokens,
       sideEffectsStarted: result.sideEffectsStarted,
-      inputTokens: 0,
-      outputTokens: result.emittedTokens,
+      inputTokens: confirmedUsage.inputTokens,
+      outputTokens: confirmedUsage.outputTokens,
     });
     await this.recordSubscriptionSettled(context, executionId, lease);
     this.suspendedSubscriptions.delete(executionId);
@@ -1901,7 +1953,7 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
     releaseIntake();
     const renewal = this.startSessionRenewal(executionId, suspended.lease, active.controller.signal);
     try {
-      let result: RoutedAgentRuntimeResult;
+      let result: RoutedAgentRuntimeResult | undefined;
       try {
         result = await resume({
           executionId,
@@ -1913,15 +1965,20 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
         const renewalError = renewal.error();
         if (renewalError) throw renewalError;
       } catch (error) {
+        const renewalError = renewal.error();
+        const structuredFailure = error instanceof SubscriptionStructuredOutputError ? error : undefined;
+        const observation = agentRuntimeFailureObservation(result, structuredFailure);
+        const failure = renewalError ?? error;
         result = {
           outcome: "failed",
           executionId,
-          sessionId: suspended.sessionId,
-          category: error instanceof SessionLeaseRenewalError ? "session-renewal" : "resume",
+          sessionId: observation.sessionId ?? suspended.sessionId,
+          category: renewalError ? "runtime" : structuredFailure ? "output" : "resume",
           retryable: false,
-          signal: failureSignal(error),
-          emittedTokens: 0,
-          sideEffectsStarted: true,
+          signal: structuredFailure && !renewalError ? { kind: "output" } : failureSignal(failure),
+          emittedTokens: observation.emittedTokens,
+          sideEffectsStarted: renewalError ? true : observation.sideEffectsStarted,
+          ...(observation.usage ? { usage: observation.usage } : {}),
         };
       }
       const outcome = await this.settleAgentRuntimeResult(

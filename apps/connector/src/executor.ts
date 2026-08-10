@@ -9,6 +9,8 @@ import {
   GeminiCliAcpConnector,
   GrokBuildAcpConnector,
   executionEvidenceIsSafe,
+  normalizeConfirmedAgentUsage,
+  SubscriptionStructuredOutputError,
   type AcpClientFactory,
   type AcpPermissionBridge,
   type ClaudeSubscriptionConnectorOptions,
@@ -555,14 +557,18 @@ export class EdgeRequestExecutor {
         return;
       }
       this.log("Edge Connector 요청을 안전하게 종료했습니다");
+      const structuredOutputFailure = error instanceof SubscriptionStructuredOutputError ? error : undefined;
+      const confirmedUsage = normalizeConfirmedAgentUsage(structuredOutputFailure?.usage);
+      if (confirmedUsage) await send("usage", confirmedUsage).catch(() => undefined);
       await send(
         "error",
         this.failure(
           sideEffectsStarted ? "provider-runtime-error" : "invalid-request",
           { kind: sideEffectsStarted ? "unknown" : "input" },
           false,
-          sideEffectsStarted,
-          emittedParts,
+          structuredOutputFailure?.sideEffectsStarted ?? sideEffectsStarted,
+          structuredOutputFailure?.emittedTokens ?? emittedParts,
+          confirmedUsage,
         ),
       ).catch(() => undefined);
     } finally {
@@ -639,7 +645,13 @@ export class EdgeRequestExecutor {
       return;
     }
     if (result.outcome === "cancelled") {
-      await send("error", this.failure("cancelled", { kind: "cancelled" }, false, true, 0));
+      const confirmedUsage = normalizeConfirmedAgentUsage(result.usage);
+      const emittedTokens =
+        Number.isSafeInteger(result.emittedTokens) && Number(result.emittedTokens) >= 0
+          ? Number(result.emittedTokens)
+          : 0;
+      if (confirmedUsage) await send("usage", confirmedUsage);
+      await send("error", this.failure("cancelled", { kind: "cancelled" }, false, true, emittedTokens, confirmedUsage));
       return;
     }
     if (result.outcome === "failed") {
@@ -655,6 +667,8 @@ export class EdgeRequestExecutor {
         typeof result.sideEffectsStarted === "boolean"
           ? result.sideEffectsStarted
           : true;
+      const confirmedUsage = normalizeConfirmedAgentUsage(result.usage);
+      if (confirmedUsage) await send("usage", confirmedUsage);
       await send(
         "error",
         this.failure(
@@ -663,6 +677,7 @@ export class EdgeRequestExecutor {
           result.retryable,
           sideEffectsStarted,
           emittedTokens,
+          confirmedUsage,
         ),
       );
       return;
@@ -687,6 +702,7 @@ export class EdgeRequestExecutor {
     retryable: boolean,
     sideEffectsStarted: boolean,
     emittedTokens: number,
+    confirmedUsage?: { readonly inputTokens: number; readonly outputTokens: number },
   ): Record<string, unknown> {
     return {
       category,
@@ -694,6 +710,7 @@ export class EdgeRequestExecutor {
       signal,
       emittedTokens,
       sideEffectsStarted,
+      ...(confirmedUsage ? { usage: confirmedUsage } : {}),
     };
   }
 }

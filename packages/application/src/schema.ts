@@ -416,6 +416,39 @@ DEFINE FIELD OVERWRITE correlation_id ON application_event TYPE option<string> A
 `,
 );
 
+/**
+ * 과거 VoltAgent fullStream part는 `model_*` Runtime Event와 Application outbox를 chunk마다 만들었습니다.
+ * 공개 sequence와 Runtime recovery cursor는 유지하면서 raw JSON만 정확한 tombstone으로 바꿉니다. 이미
+ * 공개된 source의 outbox는 보존·정합화하고, 공개 event가 없는 pending outbox만 제거합니다.
+ */
+export const APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION = defineMigration(
+  "0121-application-runtime-stream-retirement",
+  `
+LET $raw_runtime_event_ids = SELECT VALUE event_id
+  FROM runtime_event
+  WHERE string::starts_with(event_type, 'model_');
+LET $projected_raw_runtime_sources = SELECT organization_id, source_id, event_id
+  FROM application_event
+  WHERE source_kind = 'runtime-event'
+    AND source_id IN $raw_runtime_event_ids;
+FOR $projection IN $projected_raw_runtime_sources {
+  UPDATE application_outbox
+    SET state = 'projected', public_event_id = $projection.event_id, updated_at = time::now()
+    WHERE organization_id = $projection.organization_id
+      AND source_kind = 'runtime-event'
+      AND source_id = $projection.source_id
+      AND state = 'pending';
+};
+DELETE application_outbox
+  WHERE source_kind = 'runtime-event'
+    AND source_id IN $raw_runtime_event_ids
+    AND state = 'pending';
+UPDATE runtime_event
+  SET request_json = '{}', payload_json = '{}', result_json = '{}'
+  WHERE event_id IN $raw_runtime_event_ids;
+`,
+);
+
 export const APPLICATION_MIGRATIONS = [
   APPLICATION_AUTH_MIGRATION,
   APPLICATION_COMMAND_MIGRATION,
@@ -432,4 +465,5 @@ export const APPLICATION_MIGRATIONS = [
   APPLICATION_DYNAMIC_STAFFING_MIGRATION,
   APPLICATION_RUN_EVENT_WORK_MIGRATION,
   APPLICATION_EVENT_LINEAGE_MIGRATION,
+  APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
 ] as const;

@@ -16,11 +16,13 @@ import type { TenantContext } from "@massion/identity";
 import type { StructuredOutputSpec } from "../contracts.js";
 import { managedCodexCredentialState } from "./codex-profile.js";
 import { normalizeCodexExecutionEvidence } from "./execution-evidence.js";
-import type {
-  SubscriptionAgentAdapter,
-  SubscriptionAgentInput,
-  SubscriptionAgentResult,
-  SubscriptionAgentResumeInput,
+import {
+  normalizeConfirmedAgentUsage,
+  SubscriptionStructuredOutputError,
+  type SubscriptionAgentAdapter,
+  type SubscriptionAgentInput,
+  type SubscriptionAgentResult,
+  type SubscriptionAgentResumeInput,
 } from "./agent-runtime.js";
 
 export interface CodexSdkThread {
@@ -57,6 +59,16 @@ const OFFICIAL_CODEX_FACTORY: CodexSdkFactory = {
 function requirePath(value: string, label: string): string {
   if (!isAbsolute(value)) throw new Error(`${label}는 절대 경로여야 합니다`);
   return value;
+}
+
+function turnItemsStartedSideEffects(items: readonly unknown[]): boolean {
+  return items.some((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const type = (value as { readonly type?: unknown }).type;
+    return (
+      type === "command_execution" || type === "commandExecution" || type === "file_change" || type === "fileChange"
+    );
+  });
 }
 
 export class CodexSubscriptionConnector implements SubscriptionAgentAdapter {
@@ -164,18 +176,36 @@ export class CodexSubscriptionConnector implements SubscriptionAgentAdapter {
       const turn = await thread.run(prompt, { signal: abortController.signal });
       const sessionId = thread.id;
       if (!sessionId) throw new Error("Codex thread ID가 생성되지 않았습니다");
+      const confirmedUsage = normalizeConfirmedAgentUsage(turn.usage);
+      const outputFailure = (message: string, cause: unknown): SubscriptionStructuredOutputError =>
+        new SubscriptionStructuredOutputError(message, {
+          cause,
+          sideEffectsStarted:
+            Boolean(turn.finalResponse) ||
+            (confirmedUsage?.outputTokens ?? 0) > 0 ||
+            turnItemsStartedSideEffects(turn.items),
+          emittedTokens: Math.max(turn.finalResponse ? 1 : 0, (confirmedUsage?.outputTokens ?? 0) > 0 ? 1 : 0),
+          ...(confirmedUsage ? { usage: confirmedUsage } : {}),
+        });
+      let executionEvidence;
+      try {
+        executionEvidence = normalizeCodexExecutionEvidence(turn.items, workspaceRoot);
+      } catch (error) {
+        throw outputFailure("Codex 실행 근거 검증에 실패했습니다", error);
+      }
       let value: unknown = turn.finalResponse;
       if (output) {
         try {
           value = JSON.parse(turn.finalResponse) as unknown;
         } catch (error) {
-          throw new Error("Codex 구조화 출력 JSON이 유효하지 않습니다", { cause: error });
+          throw outputFailure("Codex 구조화 출력 JSON이 유효하지 않습니다", error);
         }
         const validation = output.validate?.(value);
-        if (validation && !validation.success) throw validation.error;
+        if (validation && !validation.success) {
+          throw outputFailure("Codex 구조화 출력 검증에 실패했습니다", validation.error);
+        }
         if (validation?.success) value = validation.value;
       }
-      const executionEvidence = normalizeCodexExecutionEvidence(turn.items, workspaceRoot);
       return {
         outcome: "completed",
         executionId: input.executionId,

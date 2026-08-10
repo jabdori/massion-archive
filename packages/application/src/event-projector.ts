@@ -7,6 +7,7 @@ import {
   APPLICATION_EVENT_LINEAGE_MIGRATION,
   APPLICATION_EVENT_MIGRATION,
   APPLICATION_OUTBOX_MIGRATION,
+  APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
 } from "./schema.js";
 
 interface OutboxRecord {
@@ -95,6 +96,7 @@ export class ApplicationEventProjector {
       APPLICATION_OUTBOX_MIGRATION,
       APPLICATION_EVENT_MIGRATION,
       APPLICATION_EVENT_LINEAGE_MIGRATION,
+      APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
     ]);
     return new ApplicationEventProjector(database, organizations, hooks);
   }

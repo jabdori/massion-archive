@@ -4,6 +4,7 @@ import type { TenantContext } from "@massion/identity";
 
 import {
   ClaudeSubscriptionConnector,
+  type ClaudeQueryHandle,
   type ClaudeAgentQuery,
   type SubscriptionPermissionBridge,
 } from "./claude-connector.js";
@@ -741,12 +742,17 @@ describe("공식 Claude Agent SDK 구독 Connector", () => {
         );
       }
       yield {
+        type: "assistant",
+        session_id: "session-provider-replay",
+        message: { content: [{ type: "text", text: "중복 전달 뒤 일부 출력" }] },
+      };
+      yield {
         type: "result",
         subtype: "success",
         stop_reason: "end_turn",
         session_id: "session-provider-replay",
         result: "중복 권한 전달 뒤 결과",
-        usage: {},
+        usage: { input_tokens: 8, output_tokens: 37 },
       };
     });
     const connector = new ClaudeSubscriptionConnector(query, { request });
@@ -763,10 +769,102 @@ describe("공식 Claude Agent SDK 구독 Connector", () => {
         allowedTools: [],
         disallowedTools: [],
       }),
-    ).rejects.toThrow(/provider 권한 요청이 두 번/u);
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      emittedTokens: 1,
+      sideEffectsStarted: true,
+      usage: { inputTokens: 8, outputTokens: 37 },
+    });
     expect(decisions[0]).toMatchObject({ behavior: "allow" });
     expect(decisions[1]).toMatchObject({ behavior: "deny" });
     expect(request).toHaveBeenCalledOnce();
+  });
+
+  it("text·tool을 관측한 뒤 SDK transport가 throw해도 typed 실패 근거를 보존한다", async () => {
+    const query: ClaudeAgentQuery = vi.fn().mockImplementation(async function* () {
+      yield {
+        type: "assistant",
+        session_id: "session-transport",
+        message: {
+          content: [
+            { type: "text", text: "일부 출력" },
+            { type: "tool_use", id: "tool-transport", name: "Read", input: { file_path: "/tmp/work/file" } },
+          ],
+        },
+      };
+      throw new TypeError("socket disconnected");
+    });
+    const connector = new ClaudeSubscriptionConnector(query);
+
+    await expect(
+      connector.execute(context, {
+        executionId: "execution-transport",
+        workId: "work-transport",
+        agentHandle: "representative",
+        prompt: "전송 실패를 확인하세요",
+        workspaceRoot: "/tmp/work-transport",
+        profileRoot: "/tmp/profile-transport",
+        environment: {},
+        allowedTools: [],
+        disallowedTools: [],
+      }),
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      signal: { kind: "network" },
+      emittedTokens: 1,
+      sideEffectsStarted: true,
+    });
+  });
+
+  it("text·tool을 관측한 실행을 취소해도 emitted fragment를 보존한다", async () => {
+    let release: (() => void) | undefined;
+    let observed = false;
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const interrupt = vi.fn(async () => release?.());
+    const handle: ClaudeQueryHandle = {
+      async *[Symbol.asyncIterator]() {
+        observed = true;
+        yield {
+          type: "assistant",
+          session_id: "session-cancel-observed",
+          message: {
+            content: [
+              { type: "text", text: "일부 출력" },
+              { type: "tool_use", id: "tool-cancel", name: "Read", input: { file_path: "/tmp/work/file" } },
+            ],
+          },
+        };
+        await wait;
+        throw new Error("cancelled");
+      },
+      interrupt,
+      close: vi.fn(),
+    };
+    const query: ClaudeAgentQuery = vi.fn(() => handle);
+    const connector = new ClaudeSubscriptionConnector(query);
+    const execution = connector.execute(context, {
+      executionId: "execution-cancel-observed",
+      workId: "work-cancel-observed",
+      agentHandle: "representative",
+      prompt: "실행을 취소하세요",
+      workspaceRoot: "/tmp/work-cancel-observed",
+      profileRoot: "/tmp/profile-cancel-observed",
+      environment: {},
+      allowedTools: [],
+      disallowedTools: [],
+    });
+    await vi.waitFor(() => expect(observed).toBe(true));
+
+    await connector.cancel(context, "execution-cancel-observed");
+
+    await expect(execution).resolves.toMatchObject({
+      outcome: "cancelled",
+      sessionId: "session-cancel-observed",
+      emittedTokens: 1,
+    });
+    expect(interrupt).toHaveBeenCalledOnce();
   });
 
   it("승인 ID나 session ID가 다르면 --resume 전에 거부한다", async () => {
@@ -861,7 +959,12 @@ describe("공식 Claude Agent SDK 구독 Connector", () => {
         session_id: "session-auth-failed",
         message: { content: [] },
       };
-      yield { type: "result", subtype: "error_during_execution", session_id: "session-auth-failed" };
+      yield {
+        type: "result",
+        subtype: "error_during_execution",
+        session_id: "session-auth-failed",
+        usage: { input_tokens: 8, output_tokens: 2 },
+      };
     });
     const connector = new ClaudeSubscriptionConnector(query);
 
@@ -882,6 +985,7 @@ describe("공식 Claude Agent SDK 구독 Connector", () => {
       signal: { kind: "http", statusCode: 401 },
       emittedTokens: 0,
       sideEffectsStarted: false,
+      usage: { inputTokens: 8, outputTokens: 2 },
     });
   });
 
@@ -891,22 +995,22 @@ describe("공식 Claude Agent SDK 구독 Connector", () => {
     });
     const connector = new ClaudeSubscriptionConnector(query);
 
-    await expect(
-      connector.execute(context, {
-        executionId: "execution-unknown-failed",
-        workId: "work-unknown-failed",
-        agentHandle: "representative",
-        prompt: "알 수 없는 실패를 확인하세요",
-        workspaceRoot: "/tmp/work-unknown-failed",
-        profileRoot: "/tmp/profile-unknown-failed",
-        environment: {},
-        allowedTools: [],
-        disallowedTools: [],
-      }),
-    ).resolves.toMatchObject({
+    const result = await connector.execute(context, {
+      executionId: "execution-unknown-failed",
+      workId: "work-unknown-failed",
+      agentHandle: "representative",
+      prompt: "알 수 없는 실패를 확인하세요",
+      workspaceRoot: "/tmp/work-unknown-failed",
+      profileRoot: "/tmp/profile-unknown-failed",
+      environment: {},
+      allowedTools: [],
+      disallowedTools: [],
+    });
+    expect(result).toMatchObject({
       outcome: "failed",
       emittedTokens: 0,
       sideEffectsStarted: true,
     });
+    expect(result).not.toHaveProperty("usage");
   });
 });

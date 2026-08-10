@@ -23,7 +23,7 @@ import type {
 
 import type { ExecutionKind, StructuredOutputSpec, WorkspaceAccess } from "./contracts.js";
 import type { RuntimeExecutionStore } from "./execution-store.js";
-import type { SubscriptionAgentResult } from "./subscriptions/agent-runtime.js";
+import type { SubscriptionAgentResult, SubscriptionAgentUsage } from "./subscriptions/agent-runtime.js";
 import { SubscriptionExecutionReceiptCoordinator } from "./subscriptions/execution-receipt.js";
 
 const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
@@ -114,11 +114,12 @@ export type RoutedAgentRuntimeResult =
   | Extract<SubscriptionAgentResult, { readonly outcome: "cancelled" }>
   | (Omit<
       Extract<SubscriptionAgentResult, { readonly outcome: "failed" }>,
-      "signal" | "emittedTokens" | "sideEffectsStarted"
+      "signal" | "emittedTokens" | "sideEffectsStarted" | "usage"
     > & {
       readonly signal: FailureSignal;
       readonly emittedTokens: number;
       readonly sideEffectsStarted: boolean;
+      readonly usage?: SubscriptionAgentUsage;
     });
 
 export interface RoutedAgentRuntimeExecutor {

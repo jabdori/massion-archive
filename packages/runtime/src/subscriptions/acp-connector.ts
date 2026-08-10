@@ -23,11 +23,12 @@ import {
 
 import type { TenantContext } from "@massion/identity";
 
-import type {
-  SubscriptionAgentAdapter,
-  SubscriptionAgentInput,
-  SubscriptionAgentResult,
-  SubscriptionAgentResumeInput,
+import {
+  normalizeConfirmedAgentUsage,
+  type SubscriptionAgentAdapter,
+  type SubscriptionAgentInput,
+  type SubscriptionAgentResult,
+  type SubscriptionAgentResumeInput,
 } from "./agent-runtime.js";
 
 export interface AcpPromptResult {
@@ -51,6 +52,14 @@ export interface AcpClient {
     readonly signal?: AbortSignal;
   }): Promise<AcpSession>;
   close(): Promise<void> | void;
+}
+
+async function closeAcpClient(client: AcpClient): Promise<void> {
+  try {
+    await client.close();
+  } catch {
+    process.emitWarning("ACP client 정리에 실패했습니다", { code: "MASSION_ACP_CLEANUP_FAILED" });
+  }
 }
 
 export type AcpPermissionRequest = (request: RequestPermissionRequest) => Promise<RequestPermissionResponse>;
@@ -469,7 +478,7 @@ export class NodeAcpClientFactory implements AcpClientFactory {
       await client.initialize(input.authenticationMethod, input.signal);
       return client;
     } catch (error) {
-      await client.close();
+      await closeAcpClient(client);
       throw error;
     } finally {
       input.signal?.removeEventListener("abort", abort);
@@ -593,7 +602,7 @@ export class AcpProcessConnector implements SubscriptionAgentAdapter {
         signal: initializing.controller.signal,
       });
       if (initializing.cancelled) {
-        await client.close();
+        await closeAcpClient(client);
         return { outcome: "cancelled", executionId: input.executionId };
       }
       const session = await client.openSession({
@@ -603,15 +612,23 @@ export class AcpProcessConnector implements SubscriptionAgentAdapter {
         signal: initializing.controller.signal,
       });
       if (initializing.controller.signal.aborted) {
-        await client.close();
+        await closeAcpClient(client);
         return { outcome: "cancelled", executionId: input.executionId, sessionId: session.sessionId };
       }
       const active: ActiveAcpExecution = { client, session, cancelled: false };
       this.active.set(input.executionId, active);
       try {
         const response = await session.prompt(input.prompt);
+        const confirmedUsage = normalizeConfirmedAgentUsage(response.usage);
+        const emittedTokens = Math.max(response.text ? 1 : 0, (confirmedUsage?.outputTokens ?? 0) > 0 ? 1 : 0);
         if (active.cancelled || response.stopReason === "cancelled") {
-          return { outcome: "cancelled", executionId: input.executionId, sessionId: session.sessionId };
+          return {
+            outcome: "cancelled",
+            executionId: input.executionId,
+            sessionId: session.sessionId,
+            emittedTokens,
+            ...(confirmedUsage ? { usage: confirmedUsage } : {}),
+          };
         }
         if (response.outputLimit) {
           return {
@@ -621,8 +638,9 @@ export class AcpProcessConnector implements SubscriptionAgentAdapter {
             category: "acp-output-limit",
             retryable: false,
             signal: { kind: "input" },
-            emittedTokens: 0,
+            emittedTokens,
             sideEffectsStarted: true,
+            ...(confirmedUsage ? { usage: confirmedUsage } : {}),
           };
         }
         if (response.stopReason !== "end_turn") {
@@ -632,6 +650,9 @@ export class AcpProcessConnector implements SubscriptionAgentAdapter {
             sessionId: session.sessionId,
             category: `acp-${response.stopReason}`,
             retryable: false,
+            emittedTokens,
+            sideEffectsStarted: true,
+            ...(confirmedUsage ? { usage: confirmedUsage } : {}),
           };
         }
         return {
@@ -687,7 +708,7 @@ export class AcpProcessConnector implements SubscriptionAgentAdapter {
   }
 
   private close(active: ActiveAcpExecution): Promise<void> {
-    active.closePromise ??= Promise.resolve(active.client.close());
+    active.closePromise ??= closeAcpClient(active.client);
     return active.closePromise;
   }
 }

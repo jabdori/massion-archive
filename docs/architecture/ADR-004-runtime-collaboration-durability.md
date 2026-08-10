@@ -11,6 +11,12 @@
 > 실제 delta가 발생했을 때의 기록 내구성을 결정하며, recorder의 존재 자체는 생산 Agent 협업 완료 증거가
 > 아닙니다.
 
+> **2026-08-10 stream 정정:** [ADR-008](ADR-008-volatile-model-stream-boundary.md)에 따라 모델
+> `fullStream` 중 지원 semantic delta(non-empty text·reasoning, tool call·result, error, finish)만
+> `ExecutionDeltaObserver`로 전달하고 raw `model_*` Runtime Event로 저장하지 않습니다. stream/text/reasoning
+> start·end 같은 raw 경계 part는 버립니다. 이 ADR의 협업 기록기는 실제 tool delta에서 명시적 인계·답변을
+> 도메인 메시지로 승격하는 별도 경계입니다.
+
 헌법 §4.4는 **대화가 아니라 Work와 버전된 사건이 실행·복구의 정본**이며 "모델의 transcript만으로 조직 상태나 완료를 복원하지 않는다"고 정합니다.
 
 협업방 도메인은 그 요구를 이미 충족합니다 — 메시지 10종, `reply`·`caused-by` 인과, 동시 커밋의 고유 sequence, 라운드·token·비용 한계가 계약과 테스트로 존재합니다. `voltagent-topology.ts`에는 supervisor·subAgent adapter가 남아 있지만, ADR-006 이후 생산 Embedded Runtime은 이를 직접 위임 도구로 노출하지 않습니다.
@@ -38,7 +44,10 @@ ExecutionDeltaObserver  contracts.ts  — "동기 fire-and-forget: 예외·배�
 
 `CollaborationRuntimeRecorder`가 `ExecutionDeltaObserver`를 구현하고 `packages/application`에 삽니다. Runner(`packages/runtime`)는 works 도메인을 몰라야 하고, 반대로 works는 VoltAgent를 몰라야 합니다. 두 계약을 모두 아는 유일한 층이 Application입니다.
 
-`voltagent-runner`는 고치지 않습니다. `apps/server`의 composition root가 기존 `executionStream`과 새 기록기를 하나의 관찰자로 합쳐 주입합니다.
+`apps/server`의 composition root가 기존 `executionStream`과 새 기록기를 하나의 관찰자로 합쳐 Runner에
+주입합니다. Runner는 지원 semantic observer 호출만 담당하며 raw SDK stream part를 Runtime 정본으로 만들지
+않습니다. Provider `finish` 외 blocked·cancel·lease terminal lifecycle delta는 아직 observer에 보내지 않으며,
+현재 Surface의 terminal 판정은 durable event와 timeline 재조회가 소유합니다.
 
 ### 3. 내구성 경계는 «관찰 시점 큐 + 명시적 drain»입니다
 
