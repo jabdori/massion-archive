@@ -329,7 +329,7 @@ describe("공용 local daemon 제어", () => {
     expect((await stat(resolveLocalPaths({ HOME: root }).pidFile)).mode & 0o777).toBe(0o600);
   });
 
-  it("기존 30초 polling 경계를 넘긴 소유 server의 migration 완료를 기다린다", async () => {
+  it("기존 60초 polling 경계를 넘긴 소유 server의 migration 완료를 기다린다", async () => {
     const root = await mkdtemp(join(tmpdir(), "massion-local-control-slow-start-"));
     roots.push(root);
     const nodeExecutable = join(root, "node");
@@ -341,7 +341,7 @@ describe("공용 local daemon 제어", () => {
       environment: { HOME: root },
       nodeExecutable,
       serverScript,
-      fetcher: async () => Response.json({ status: (readinessChecks += 1) === 121 ? "ready" : "starting" }),
+      fetcher: async () => Response.json({ status: (readinessChecks += 1) === 241 ? "ready" : "starting" }),
       processExists: () => true,
       processCommand: async () => `${nodeExecutable} ${serverScript}`,
       signal,
@@ -354,7 +354,7 @@ describe("공용 local daemon 제어", () => {
     });
 
     await expect(manager.start()).resolves.toMatchObject({ status: "started", pid: 42 });
-    expect(readinessChecks).toBe(121);
+    expect(readinessChecks).toBe(241);
     expect(signal).not.toHaveBeenCalled();
   });
 
@@ -905,7 +905,7 @@ describe("공용 local daemon 제어", () => {
     expect(signal).not.toHaveBeenCalled();
   });
 
-  it("기존 30초 polling 경계를 넘겨 부팅 중인 현재 v3 process를 재사용한다", async () => {
+  it("기존 60초 polling 경계를 넘겨 부팅 중인 현재 v3 process를 재사용한다", async () => {
     const root = await mkdtemp(join(tmpdir(), "massion-local-control-slow-reuse-"));
     roots.push(root);
     const nodeExecutable = join(root, "node");
@@ -918,7 +918,7 @@ describe("공용 local daemon 제어", () => {
       nodeExecutable,
       serverScript,
       runtimeVersion: "2.4.0",
-      fetcher: async () => Response.json({ status: (readinessChecks += 1) === 121 ? "ready" : "starting" }),
+      fetcher: async () => Response.json({ status: (readinessChecks += 1) === 241 ? "ready" : "starting" }),
       processExists: () => true,
       processCommand: async () => `${nodeExecutable} ${serverScript}`,
       signal,
@@ -936,7 +936,7 @@ describe("공용 local daemon 제어", () => {
       pid: 41,
       endpoint: "http://127.0.0.1:7331",
     });
-    expect(readinessChecks).toBe(121);
+    expect(readinessChecks).toBe(241);
     expect(spawnProcess).not.toHaveBeenCalled();
     expect(signal).not.toHaveBeenCalled();
   });
