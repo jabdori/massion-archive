@@ -143,6 +143,27 @@ describe("RuntimeStreamRetirementService", () => {
     await service.close();
   });
 
+  it("pending runtime outbox가 없으면 projected 이력을 다시 훑지 않고 repair를 완료한다", async () => {
+    await createEvent("event-projected-history", "execution_succeeded");
+    expect(await pendingRawOutboxSourceIds()).toEqual(["event-projected-history"]);
+    await database.query(
+      "UPDATE application_outbox SET state = 'projected' WHERE organization_id = 'organization-1' AND source_kind = 'runtime-event' AND source_id = 'event-projected-history';",
+    );
+    await database.query(
+      `UPSERT application_runtime_stream_retirement_state:volatile_model_stream_v1 SET
+        raw_cursor = '', phase = 'repair', repair_organization_after = '', repair_organization_id = 'organization-1',
+        repair_source_after = 'event-previous', completed_at = NONE RETURN NONE;`,
+    );
+
+    const service = new RuntimeStreamRetirementService(database, { batchSize: 1 });
+    await expect(service.retireNextBatch()).resolves.toBe(0);
+    const [states] = await database.query<[{ readonly completed_at?: unknown }[]]>(
+      "SELECT completed_at FROM application_runtime_stream_retirement_state:volatile_model_stream_v1;",
+    );
+    expect(states[0]?.completed_at).toBeDefined();
+    await service.close();
+  });
+
   it("완료 checkpoint가 있으면 legacy scan을 다시 시작하지 않는다", async () => {
     await database.query(
       `UPSERT application_runtime_stream_retirement_state:volatile_model_stream_v1 SET
@@ -301,9 +322,10 @@ describe("RuntimeStreamRetirementService", () => {
     await service.close();
   });
 
-  it("repair는 indexed source page를 읽고 pending raw만 local filtering으로 정리한다", async () => {
+  it("repair는 pending 존재를 한 번 확인한 뒤 indexed source page에서 tombstone raw를 정리한다", async () => {
     const query = vi.fn(async (statement: string, _bindings?: Record<string, unknown>) => {
       void _bindings;
+      if (statement.includes("SELECT id FROM application_outbox\nWHERE source_kind")) return [[{ id: "outbox-raw" }]];
       if (statement.includes("FROM organization")) return [[{ organization_id: "organization-1" }]];
       if (statement.includes("AND source_id > $source_after"))
         return [
@@ -355,13 +377,99 @@ describe("RuntimeStreamRetirementService", () => {
 
     await expect(service.retireNextBatch()).resolves.toBe(1);
 
+    const preflight = query.mock.calls.find(([statement]) =>
+      statement.includes("SELECT id FROM application_outbox\nWHERE source_kind"),
+    );
+    if (!preflight) throw new Error("repair pending preflight가 필요합니다");
+    expect(preflight[0]).not.toContain("WITH INDEX application_outbox_source");
+    expect(preflight[0]).toContain("source_kind = 'runtime-event'");
+    expect(preflight[0]).toContain("state = 'pending'");
+    expect(preflight[0]).toContain("LIMIT 1");
     const page = query.mock.calls.find(([statement]) => statement.includes("AND source_id > $source_after"));
     if (!page) throw new Error("repair outbox page query가 필요합니다");
     expect(page[0]).toContain("WITH INDEX application_outbox_source");
     expect(page[0]).not.toContain("AND state = 'pending'");
+    expect(page[1]).toMatchObject({ organization_id: "organization-1", source_after: "", limit: 2 });
     const reconciliation = query.mock.calls.find(([statement]) => statement.includes("LET $pending"));
     if (!reconciliation) throw new Error("repair raw reconciliation query가 필요합니다");
     expect(reconciliation[1]).toMatchObject({ organization_0: "organization-1", source_id_0: "event-raw" });
+    await service.close();
+  });
+
+  it("repair preflight는 retry commit 뒤에만 완료되어 다음 batch에서 재검사하지 않는다", async () => {
+    let organizationCalls = 0;
+    let pageCalls = 0;
+    const query = vi.fn(async (statement: string, _bindings?: Record<string, unknown>) => {
+      void _bindings;
+      if (statement.includes("SELECT id FROM application_outbox\nWHERE source_kind")) return [[{ id: "outbox-raw" }]];
+      if (statement.includes("FROM organization")) {
+        organizationCalls += 1;
+        return organizationCalls <= 2 ? [[{ organization_id: "organization-1" }]] : [[]];
+      }
+      if (statement.includes("AND source_id > $source_after")) {
+        pageCalls += 1;
+        return pageCalls <= 2
+          ? [[{ organization_id: "organization-1", source_id: "event-raw", state: "pending" }]]
+          : [[]];
+      }
+      if (statement.includes("FROM runtime_event")) {
+        return [
+          [
+            {
+              organization_id: "organization-1",
+              event_id: "event-raw",
+              event_type: "model_text_delta",
+              request_json: "{}",
+              payload_json: "{}",
+              result_json: "{}",
+            },
+          ],
+        ];
+      }
+      if (
+        statement.includes("LET $pending") ||
+        statement.includes("UPSERT application_runtime_stream_retirement_state")
+      )
+        return [[]];
+      throw new Error("예상하지 않은 repair retry query입니다");
+    });
+    const transaction = vi
+      .fn<MassionDatabase["transaction"]>()
+      .mockImplementationOnce(async (operation) => {
+        await operation({ query } as never);
+        return await operation({ query } as never);
+      })
+      .mockImplementation(async (operation) => await operation({ query } as never));
+    const service = new RuntimeStreamRetirementService(
+      {
+        query: vi.fn().mockResolvedValue([
+          [
+            {
+              raw_cursor: "",
+              phase: "repair",
+              repair_organization_after: "",
+              repair_organization_id: undefined,
+              repair_source_after: "",
+            },
+          ],
+        ]),
+        transaction,
+      } as unknown as MassionDatabase,
+      { batchSize: 1 },
+    );
+
+    await expect(service.retireNextBatch()).resolves.toBe(1);
+    expect(
+      query.mock.calls.filter(([statement]) =>
+        statement.includes("SELECT id FROM application_outbox\nWHERE source_kind"),
+      ),
+    ).toHaveLength(2);
+    await expect(service.retireNextBatch()).resolves.toBe(0);
+    expect(
+      query.mock.calls.filter(([statement]) =>
+        statement.includes("SELECT id FROM application_outbox\nWHERE source_kind"),
+      ),
+    ).toHaveLength(2);
     await service.close();
   });
 

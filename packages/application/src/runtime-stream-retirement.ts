@@ -48,6 +48,7 @@ interface RetirementBatch {
   readonly more: boolean;
   readonly cursor?: string;
   readonly rawPhaseCompleted?: true;
+  readonly repairPreflightCompleted?: true;
   readonly repairCursor?: RepairCursor;
 }
 
@@ -57,6 +58,13 @@ FROM runtime_event WITH INDEX runtime_event_id
 WHERE event_id > $cursor
 ORDER BY event_id ASC
 LIMIT $limit;
+`;
+
+const PENDING_RUNTIME_OUTBOX_EXISTS_QUERY = `
+SELECT id FROM application_outbox
+WHERE source_kind = 'runtime-event'
+  AND state = 'pending'
+LIMIT 1;
 `;
 
 const NEXT_ORGANIZATION_QUERY = `
@@ -196,6 +204,7 @@ export class RuntimeStreamRetirementService {
   private cursor = "";
   private repairCursor: RepairCursor = { organizationAfter: "", sourceAfter: "" };
   private rawPhaseComplete = false;
+  private repairPreflightComplete = false;
   private stateLoaded = false;
 
   public constructor(
@@ -274,6 +283,7 @@ export class RuntimeStreamRetirementService {
     if (batch.cursor !== undefined) this.cursor = batch.cursor;
     if (batch.repairCursor !== undefined) this.repairCursor = batch.repairCursor;
     if (batch.rawPhaseCompleted) this.rawPhaseComplete = true;
+    if (batch.repairPreflightCompleted) this.repairPreflightComplete = true;
     if (!batch.more) await this.complete();
     else this.retired += batch.retired;
     return batch;
@@ -303,6 +313,14 @@ export class RuntimeStreamRetirementService {
         more: true,
         ...(cursor === undefined ? {} : { cursor }),
         ...(events.length < this.batchSize ? { rawPhaseCompleted: true as const } : {}),
+      };
+    }
+    if (!this.repairPreflightComplete) {
+      const [pending] = await transaction.query<[unknown[]]>(PENDING_RUNTIME_OUTBOX_EXISTS_QUERY);
+      if (pending.length === 0) return { processed: 0, retired: 0, more: false };
+      return {
+        ...(await this.reconcileTombstonedPendingOutboxes(transaction, this.repairCursor)),
+        repairPreflightCompleted: true,
       };
     }
     return await this.reconcileTombstonedPendingOutboxes(transaction, this.repairCursor);

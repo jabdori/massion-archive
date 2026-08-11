@@ -69,7 +69,8 @@ HTTP listener가 열린 뒤 `RuntimeStreamRetirementService`가 `runtime_event_i
 record를 먼저 읽고, 그 page 안에서 non-empty `model_` Runtime Event만 판별합니다. cursor는 마지막으로
 **검사한** record까지 전진합니다. 같은 transaction에서 해당 raw batch의 pending outbox만
 `application_outbox_source` 고유 인덱스로 찾습니다. 이미 tombstone된 pending raw outbox의 repair도 조직별
-source page를 최대 25개씩 읽은 뒤 local state filtering으로 판별합니다. 공개 event가 있는 pending outbox는
+source page를 최대 25개씩 읽은 뒤 local state filtering으로 판별합니다. repair 시작 전 pending Runtime outbox가
+없으면 같은 transaction에서 완료 checkpoint를 기록해 projected 이력을 다시 훑지 않습니다. 공개 event가 있는 pending outbox는
 그 event ID로 `projected` 상태를 정합화하고, 공개 event가 없는 pending raw outbox만 삭제한 뒤
 `request_json`·`payload_json`·`result_json`을 정확히 `{}`로 바꿉니다. 이미 `projected`인 과거 outbox에는
 row별 reconciliation을 반복하지 않습니다. batch cursor는 commit 뒤에만 전진하고, 다음 batch 전에는 2초
