@@ -70,6 +70,10 @@ stream을 다시 정리합니다. 두 migration은 각각 하나의 transaction�
 - 기존 projected outbox, immutable `application_event`, 공개 sequence·cursor, `runtime_execution`의 version과
   `event_sequence`는 변경하지 않습니다.
 
+대량 이력을 가진 DB의 시작을 막지 않도록 pending raw 후보는 조직과 source를 함께 대조하고, 일반 pending 삭제와
+JSON tombstone은 대상 ID 하위 쿼리와 `RETURN NONE`을 사용하는 bulk mutation으로 처리합니다. 행별 갱신은 이미
+공개 event가 있는데 pending으로 남은 예외 교집합에만 제한합니다.
+
 Runtime Event 자체를 삭제하거나 sequence를 다시 매기지 않는 이유는 recovery cursor와 감사 계보를 유지하기
 위해서입니다. 이미 공개된 event를 삭제·수정하지 않는 이유도 동일합니다. Tombstone된 과거 stream command를
 직접 replay하면 기존 request hash 역할을 하는 JSON과 일치하지 않아 명시적으로 fail-closed합니다. 생산 재시작은

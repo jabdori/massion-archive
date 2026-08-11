@@ -422,53 +422,58 @@ DEFINE FIELD OVERWRITE correlation_id ON application_event TYPE option<string> A
  * 공개된 source의 outbox는 보존·정합화하고, 공개 event가 없는 pending outbox만 제거합니다.
  */
 const APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL = `
-LET $pending_runtime_sources = SELECT organization_id, source_id
+LET $pending_raw_sources = SELECT organization_id, source_id
   FROM application_outbox
   WHERE source_kind = 'runtime-event'
-    AND state = 'pending';
-FOR $pending IN $pending_runtime_sources {
-  LET $raw_events = SELECT event_id
-    FROM runtime_event
-    WHERE event_id = $pending.source_id
-      AND string::starts_with(event_type, 'model_')
-    LIMIT 1;
-  IF array::len($raw_events) = 1 {
-    LET $projections = SELECT event_id
-      FROM application_event
-      WHERE organization_id = $pending.organization_id
-        AND source_kind = 'runtime-event'
-        AND source_id = $pending.source_id
-      LIMIT 1;
-    IF array::len($projections) = 1 {
-      UPDATE application_outbox
-        SET state = 'projected', public_event_id = $projections[0].event_id, updated_at = time::now()
-        WHERE organization_id = $pending.organization_id
-          AND source_kind = 'runtime-event'
-          AND source_id = $pending.source_id
-          AND state = 'pending';
-    } ELSE {
-      DELETE application_outbox
-        WHERE organization_id = $pending.organization_id
-          AND source_kind = 'runtime-event'
-          AND source_id = $pending.source_id
-          AND state = 'pending';
-    };
-  };
+    AND state = 'pending'
+    AND array::len((SELECT VALUE id
+      FROM runtime_event
+      WHERE event_id = $parent.source_id
+        AND organization_id = $parent.organization_id
+        AND string::starts_with(event_type, 'model_')
+      LIMIT 1)) = 1;
+LET $pending_raw_source_keys = $pending_raw_sources.map(|$source| [$source.organization_id, $source.source_id]);
+LET $projected_pending_raw_sources = SELECT organization_id, source_id, event_id
+  FROM application_event
+  WHERE source_kind = 'runtime-event'
+    AND [organization_id, source_id] IN $pending_raw_source_keys;
+FOR $projection IN $projected_pending_raw_sources {
+  UPDATE (SELECT id FROM application_outbox
+    WHERE organization_id = $projection.organization_id
+      AND source_kind = 'runtime-event'
+      AND source_id = $projection.source_id
+      AND state = 'pending'
+    LIMIT 1)
+    SET state = 'projected', public_event_id = $projection.event_id, updated_at = time::now()
+    RETURN NONE;
 };
-UPDATE runtime_event
+DELETE (SELECT id FROM application_outbox
+  WHERE source_kind = 'runtime-event'
+    AND state = 'pending'
+    AND [organization_id, source_id] IN $pending_raw_source_keys)
+  RETURN NONE;
+UPDATE (SELECT id FROM runtime_event
+  WHERE string::starts_with(event_type, 'model_')
+    AND (request_json != '{}' OR payload_json != '{}' OR result_json != '{}'))
   SET request_json = '{}', payload_json = '{}', result_json = '{}'
-  WHERE string::starts_with(event_type, 'model_');
+  RETURN NONE;
 `;
 
 export const APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION = defineMigration(
   "0121-application-runtime-stream-retirement",
   APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL,
-  { compatibleChecksums: ["07199ea58b87cc9a0a1c199dcc9f3e4d2d01b11895a9907b34bb988f4ec91866"] },
+  {
+    compatibleChecksums: [
+      "07199ea58b87cc9a0a1c199dcc9f3e4d2d01b11895a9907b34bb988f4ec91866",
+      "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109",
+    ],
+  },
 );
 
 export const APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION = defineMigration(
   "0122-application-runtime-stream-reconciliation",
   APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL,
+  { compatibleChecksums: ["9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109"] },
 );
 
 export const APPLICATION_MIGRATIONS = [

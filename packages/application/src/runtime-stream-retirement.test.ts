@@ -43,13 +43,14 @@ function sha256(value: string): string {
 
 describe("과거 Runtime stream part retirement", () => {
   let database: MassionDatabase;
+  let identities: IdentityService;
   let organizations: OrganizationService;
   let context: TenantContext;
   let runtime: RuntimeExecutionStore;
 
   beforeEach(async () => {
     database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
-    const identities = await IdentityService.create(database);
+    identities = await IdentityService.create(database);
     organizations = await OrganizationService.create(database);
     const owner = await identities.registerPersonalUser({
       email: `runtime-retirement-${crypto.randomUUID()}@example.com`,
@@ -82,16 +83,34 @@ describe("과거 Runtime stream part retirement", () => {
     expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.compatibleChecksums).toContain(
       LEGACY_RUNTIME_STREAM_RETIREMENT_CHECKSUM,
     );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.compatibleChecksums).toContain(
+      "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.compatibleChecksums).toContain(
+      "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109",
+    );
     expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.surql).toBe(
       APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql,
     );
     expect(APPLICATION_MIGRATIONS).toContain(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION);
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("LET $pending_runtime_sources");
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("FOR $pending IN $pending_runtime_sources");
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain(
-      "FOR $projection IN $projected_raw_runtime_sources",
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("LET $pending_raw_sources");
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
+      "FOR $projection IN $projected_pending_raw_sources",
     );
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain("LET $raw_runtime_event_ids");
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain(
+      "FOR $pending IN $pending_runtime_sources",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
+      "organization_id = $parent.organization_id",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
+      "DELETE (SELECT id FROM application_outbox",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
+      "UPDATE (SELECT id FROM application_outbox",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("UPDATE (SELECT id FROM runtime_event");
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql.match(/RETURN NONE/gu)).toHaveLength(3);
   });
 
   it("Application Event Projector가 기존 0121 DB에 0122 reconciliation을 적용한다", async () => {
@@ -102,6 +121,21 @@ describe("과거 Runtime stream part retirement", () => {
     expect((await listAppliedMigrations(database)).map((migration) => migration.migration_id)).toContain(
       "0122-application-runtime-stream-reconciliation",
     );
+  });
+
+  it("직전 공개 0121·0122 checksum을 적용한 DB도 그대로 기동한다", async () => {
+    await database.query(
+      `CREATE system_migration CONTENT { migration_id: '0121-application-runtime-stream-retirement', checksum: $checksum, applied_at: time::now() };
+       CREATE system_migration CONTENT { migration_id: '0122-application-runtime-stream-reconciliation', checksum: $checksum, applied_at: time::now() };`,
+      { checksum: "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109" },
+    );
+
+    await expect(
+      applyMigrations(database, [
+        APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+        APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+      ]),
+    ).resolves.toEqual([]);
   });
 
   async function running(suffix: string) {
@@ -125,7 +159,12 @@ describe("과거 Runtime stream part retirement", () => {
     });
   }
 
-  async function publicEvent(event: RuntimeEvent, sequence: number, eventId: string): Promise<void> {
+  async function publicEvent(
+    event: RuntimeEvent,
+    sequence: number,
+    eventId: string,
+    organizationId = context.organizationId,
+  ): Promise<void> {
     const payloadJson = JSON.stringify({ domainSequence: event.sequence });
     await database.query(
       `CREATE application_event CONTENT {
@@ -148,7 +187,7 @@ describe("과거 Runtime stream part retirement", () => {
       };`,
       {
         event_id: eventId,
-        organization_id: context.organizationId,
+        organization_id: organizationId,
         sequence,
         source_id: event.event_id,
         execution_id: event.execution_id,
@@ -159,10 +198,10 @@ describe("과거 Runtime stream part retirement", () => {
     );
   }
 
-  async function outbox(sourceId: string): Promise<OutboxRecord | undefined> {
+  async function outbox(sourceId: string, organizationId = context.organizationId): Promise<OutboxRecord | undefined> {
     const [records] = await database.query<[OutboxRecord[]]>(
       "SELECT * OMIT id FROM application_outbox WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND source_id = $source_id LIMIT 1;",
-      { organization_id: context.organizationId, source_id: sourceId },
+      { organization_id: organizationId, source_id: sourceId },
     );
     return records[0];
   }
@@ -178,6 +217,57 @@ describe("과거 Runtime stream part retirement", () => {
     expect((await listAppliedMigrations(database)).map((migration) => migration.migration_id)).toContain(
       "0121-application-runtime-stream-retirement",
     );
+  });
+
+  it("다른 조직의 동일 source 식별자는 변경하지 않는다", async () => {
+    let primary = await running("tenant-boundary");
+    primary = await runtime.appendEvent(context, {
+      commandId: "retirement-tenant-boundary-raw",
+      executionId: primary.execution.execution_id,
+      expectedVersion: primary.execution.version,
+      eventType: "model_text_delta",
+      payload: { type: "text-delta", text: "private-primary" },
+    });
+    const raw = primary.event;
+    const shadowOwner = await identities.registerPersonalUser({
+      email: `runtime-retirement-shadow-${crypto.randomUUID()}@example.com`,
+      displayName: "Runtime retirement shadow",
+    });
+    const shadowContext = await organizations.resolveTenantContext(
+      shadowOwner.user.user_id,
+      shadowOwner.organization.organization_id,
+    );
+    await database.query(
+      `CREATE application_outbox CONTENT {
+        outbox_id: $outbox_id,
+        organization_id: $organization_id,
+        source_kind: 'runtime-event',
+        source_id: $source_id,
+        aggregate_id: $aggregate_id,
+        correlation_id: NONE,
+        causation_id: NONE,
+        occurred_at: time::now(),
+        state: 'pending',
+        public_event_id: NONE,
+        created_at: time::now(),
+        updated_at: time::now()
+      };`,
+      {
+        outbox_id: `shadow:${raw.event_id}`,
+        organization_id: shadowContext.organizationId,
+        source_id: raw.event_id,
+        aggregate_id: raw.execution_id,
+      },
+    );
+    await publicEvent(raw, 1, "public-runtime-shadow", shadowContext.organizationId);
+    const shadowBefore = await outbox(raw.event_id, shadowContext.organizationId);
+    await applyMigrations(database, [
+      APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+      APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+    ]);
+
+    expect(await outbox(raw.event_id)).toBeUndefined();
+    expect(await outbox(raw.event_id, shadowContext.organizationId)).toEqual(shadowBefore);
   });
 
   it("기존 old-checksum DB의 0122는 혼합 projection을 보존·정합화하고 raw JSON만 tombstone한 뒤 recovery와 replay를 fail-closed로 유지한다", async () => {
