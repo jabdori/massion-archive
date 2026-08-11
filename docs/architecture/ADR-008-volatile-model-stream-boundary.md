@@ -58,20 +58,21 @@ Artifact가 아니므로 복원하지 않습니다. 정상 성공의 확정 text
 
 ### 4. 과거 raw event는 cursor를 보존한 tombstone으로 retire합니다
 
-Application migration은 같은 빠른 정합화 SQL을 두 역할로 적용합니다.
-`0121-application-runtime-stream-retirement`는 아직 0121을 적용하지 않은 DB를 정리하고 이전 0121 checksum을
-호환합니다. `0122-application-runtime-stream-reconciliation`은 이전 checksum의 0121이 이미 적용된 DB에 이후
-남은 raw stream의 public projection을 다시 정리합니다. 두 migration은 각각 하나의 transaction에서 다음만 수행합니다.
+`0121-application-runtime-stream-retirement`와
+`0122-application-runtime-stream-reconciliation`은 이전 공개 checksum을 호환하고 즉시 migration record만
+남깁니다. 시작 migration은 과거 이력을 순회하지 않습니다.
 
-- 이미 공개 event가 있는 pending outbox는 그 공개 event ID로 `projected` 상태를 정합화합니다.
-- 공개 event가 없는 pending raw outbox만 삭제합니다.
-- 기존 projected outbox, immutable `application_event`, 공개 sequence·cursor, `runtime_execution`의 version과
-  `event_sequence`는 변경하지 않습니다.
+HTTP listener가 열린 뒤 `RuntimeStreamRetirementService`가 `runtime_event_id` 고유 인덱스 순서로 `model_` raw
+Runtime Event를 작은 단일 batch로 읽습니다. 같은 transaction에서 공개 event가 있는 pending outbox는 그 event
+ID로 `projected` 상태를 정합화하고, 공개 event가 없는 pending raw outbox만 삭제한 뒤
+`request_json`·`payload_json`·`result_json`을 정확히 `{}`로 바꿉니다. batch cursor는 commit 뒤에만 전진하고,
+다음 batch 전에는 짧게 yield합니다. 따라서 대량 이력이 daemon readiness를 막지 않고, 종료·재시작·일시 오류 뒤에도
+이미 처리된 행을 다시 변경하지 않고 이어서 처리합니다.
 
-HTTP listener가 열린 뒤 `RuntimeStreamRetirementService`가 `model_` raw Runtime Event를 작은 단일 batch로
-계속 찾아 `request_json`·`payload_json`·`result_json`을 정확히 `{}`로 바꿉니다. 각 batch는 target subquery로
-대상을 고르고 event ID만 반환하며, 다음 batch 전에는 짧게 yield합니다. 따라서 대량 이력이 daemon readiness를
-막지 않고, 종료·재시작·일시 오류 뒤에도 아직 tombstone되지 않은 행만 idempotent하게 이어서 처리합니다.
+worker가 정리하기 전에도 Application projector는 `model_` Runtime Event를 공개 projection으로 만들지 않습니다.
+이미 공개된 source는 기존 event ID로 정합화하고, 아직 공개되지 않은 raw pending outbox만 같은
+transaction에서 폐기해 뒤의 durable event가 멈추지 않게 합니다. immutable `application_event`, 공개
+sequence·cursor, `runtime_execution`의 version과 `event_sequence`는 worker와 projector 모두 변경하지 않습니다.
 
 worker가 물리 tombstone을 마칠 때까지도 raw payload는 공개 query·timeline·SSE에 투영되지 않습니다. 또한
 `model_` Runtime Event의 command replay는 즉시 fail-closed하므로, 원문이 로컬 저장소에 남아 있는 제한된 창에

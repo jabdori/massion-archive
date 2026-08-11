@@ -1,4 +1,4 @@
-import type { MassionDatabase } from "@massion/storage";
+import type { MassionDatabase, QueryExecutor } from "@massion/storage";
 
 const DEFAULT_BATCH_SIZE = 100;
 const DEFAULT_PAUSE_MS = 50;
@@ -6,13 +6,56 @@ const MAX_BATCH_SIZE = 1_000;
 const MAX_PAUSE_MS = 60_000;
 const MINIMUM_FAILURE_PAUSE_MS = 1_000;
 
-const RETIREMENT_QUERY = `
+interface RawRuntimeEvent {
+  readonly organization_id: string;
+  readonly event_id: string;
+}
+
+interface RetirementBatch {
+  readonly count: number;
+  readonly cursor?: string;
+}
+
+const RAW_EVENT_BATCH_QUERY = `
+SELECT organization_id, event_id FROM runtime_event WITH INDEX runtime_event_id
+WHERE event_id > $cursor
+  AND string::starts_with(event_type, 'model_')
+  AND (request_json != '{}' OR payload_json != '{}' OR result_json != '{}')
+ORDER BY event_id ASC
+LIMIT $limit;
+`;
+
+const RECONCILE_AND_TOMBSTONE_BATCH_QUERY = `
+FOR $raw IN $events {
+  LET $public_events = SELECT event_id FROM application_event
+    WHERE organization_id = $raw.organization_id
+      AND source_kind = 'runtime-event'
+      AND source_id = $raw.event_id
+    LIMIT 1;
+  IF array::len($public_events) = 1 {
+    UPDATE (SELECT id FROM application_outbox
+      WHERE organization_id = $raw.organization_id
+        AND source_kind = 'runtime-event'
+        AND source_id = $raw.event_id
+        AND state = 'pending'
+      LIMIT 1)
+    SET state = 'projected', public_event_id = $public_events[0].event_id, updated_at = time::now()
+    RETURN NONE;
+  } ELSE {
+    DELETE (SELECT id FROM application_outbox
+      WHERE organization_id = $raw.organization_id
+        AND source_kind = 'runtime-event'
+        AND source_id = $raw.event_id
+        AND state = 'pending'
+      LIMIT 1)
+    RETURN NONE;
+  };
+};
 UPDATE (SELECT id FROM runtime_event
-  WHERE string::starts_with(event_type, 'model_')
-    AND (request_json != '{}' OR payload_json != '{}' OR result_json != '{}')
-  LIMIT $limit)
+  WHERE event_id IN $event_ids
+    AND (request_json != '{}' OR payload_json != '{}' OR result_json != '{}'))
 SET request_json = '{}', payload_json = '{}', result_json = '{}'
-RETURN VALUE event_id;
+RETURN NONE;
 `;
 
 export interface RuntimeStreamRetirementServiceOptions {
@@ -29,7 +72,7 @@ function validateInteger(value: number, minimum: number, maximum: number, label:
   return value;
 }
 
-/** 과거 raw model event의 JSON만 작은 batch로 tombstone하는 수명주기 worker입니다. */
+/** 과거 raw model event의 pending outbox와 JSON을 작은 batch로 retire하는 수명주기 worker입니다. */
 export class RuntimeStreamRetirementService {
   private readonly batchSize: number;
   private readonly pauseMs: number;
@@ -43,6 +86,7 @@ export class RuntimeStreamRetirementService {
   private completed = false;
   private retired = 0;
   private failurePauseMs = 0;
+  private cursor = "";
 
   public constructor(
     private readonly database: MassionDatabase,
@@ -90,11 +134,25 @@ export class RuntimeStreamRetirementService {
   }
 
   private async runBatch(): Promise<number> {
-    const [eventIds] = await this.database.query<[unknown[]]>(RETIREMENT_QUERY, { limit: this.batchSize });
-    const count = Array.isArray(eventIds) ? eventIds.length : 0;
-    if (count === 0) await this.complete();
-    else this.retired += count;
-    return count;
+    const batch = await this.database.transaction(async (transaction) => await this.retireBatch(transaction));
+    if (batch.cursor !== undefined) this.cursor = batch.cursor;
+    if (batch.count === 0) await this.complete();
+    else this.retired += batch.count;
+    return batch.count;
+  }
+
+  private async retireBatch(transaction: QueryExecutor): Promise<RetirementBatch> {
+    const [events] = await transaction.query<[RawRuntimeEvent[]]>(RAW_EVENT_BATCH_QUERY, {
+      cursor: this.cursor,
+      limit: this.batchSize,
+    });
+    if (events.length === 0) return { count: 0 };
+    await transaction.query(RECONCILE_AND_TOMBSTONE_BATCH_QUERY, {
+      events,
+      event_ids: events.map((event) => event.event_id),
+    });
+    const cursor = events.at(-1)?.event_id;
+    return { count: events.length, ...(cursor === undefined ? {} : { cursor }) };
   }
 
   private schedule(delayMs: number): void {

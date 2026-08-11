@@ -180,6 +180,13 @@ export class ApplicationEventProjector {
         return true;
       }
       const projection = await this.map(transaction, outbox);
+      if (projection === undefined) {
+        await transaction.query(
+          "DELETE (SELECT id FROM application_outbox WHERE organization_id = $organization_id AND outbox_id = $outbox_id AND state = 'pending' LIMIT 1) RETURN NONE;",
+          { organization_id: context.organizationId, outbox_id: outbox.outbox_id },
+        );
+        return true;
+      }
       const current = await first<StreamRecord>(
         transaction,
         "SELECT current_sequence FROM application_event_stream WHERE organization_id = $organization_id LIMIT 1;",
@@ -237,7 +244,7 @@ export class ApplicationEventProjector {
     });
   }
 
-  private async map(executor: QueryExecutor, outbox: OutboxRecord): Promise<PublicProjection> {
+  private async map(executor: QueryExecutor, outbox: OutboxRecord): Promise<PublicProjection | undefined> {
     const common = {
       ...(outbox.correlation_id === undefined ? {} : { correlationId: outbox.correlation_id }),
       ...(outbox.causation_id === undefined ? {} : { causationId: outbox.causation_id }),
@@ -308,6 +315,7 @@ export class ApplicationEventProjector {
           "event_id",
           outbox,
         );
+        if (source.event_type.startsWith("model_")) return undefined;
         return {
           ...common,
           type: eventType("runtime", source.event_type),

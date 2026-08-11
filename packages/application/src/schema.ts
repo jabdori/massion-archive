@@ -418,41 +418,11 @@ DEFINE FIELD OVERWRITE correlation_id ON application_event TYPE option<string> A
 
 /**
  * 과거 VoltAgent fullStream part는 `model_*` Runtime Event와 Application outbox를 chunk마다 만들었습니다.
- * 시작 transaction은 공개 투영만 즉시 정합화합니다. 물리 JSON tombstone은 listener 뒤의 bounded worker가
- * 이어서 수행하므로 대량 이력이 local daemon readiness를 막지 않습니다.
+ * 이 migration은 이미 설치된 checksum 경계를 기록할 뿐 이력을 순회하지 않습니다. raw outbox 정합화와
+ * 물리 JSON tombstone은 listener 뒤의 bounded worker가 함께 수행하므로 대량 이력이 local daemon
+ * readiness를 막지 않습니다.
  */
-const APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL = `
-LET $pending_raw_sources = SELECT organization_id, source_id
-  FROM application_outbox
-  WHERE source_kind = 'runtime-event'
-    AND state = 'pending'
-    AND array::len((SELECT VALUE id
-      FROM runtime_event
-      WHERE event_id = $parent.source_id
-        AND organization_id = $parent.organization_id
-        AND string::starts_with(event_type, 'model_')
-      LIMIT 1)) = 1;
-LET $pending_raw_source_keys = $pending_raw_sources.map(|$source| [$source.organization_id, $source.source_id]);
-LET $projected_pending_raw_sources = SELECT organization_id, source_id, event_id
-  FROM application_event
-  WHERE source_kind = 'runtime-event'
-    AND [organization_id, source_id] IN $pending_raw_source_keys;
-FOR $projection IN $projected_pending_raw_sources {
-  UPDATE (SELECT id FROM application_outbox
-    WHERE organization_id = $projection.organization_id
-      AND source_kind = 'runtime-event'
-      AND source_id = $projection.source_id
-      AND state = 'pending'
-    LIMIT 1)
-    SET state = 'projected', public_event_id = $projection.event_id, updated_at = time::now()
-    RETURN NONE;
-};
-DELETE (SELECT id FROM application_outbox
-  WHERE source_kind = 'runtime-event'
-    AND state = 'pending'
-    AND [organization_id, source_id] IN $pending_raw_source_keys)
-  RETURN NONE;
-`;
+const APPLICATION_RUNTIME_STREAM_RETIREMENT_SURQL = `RETURN NONE;`;
 
 export const APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION = defineMigration(
   "0121-application-runtime-stream-retirement",
@@ -462,6 +432,7 @@ export const APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION = defineMigration(
       "07199ea58b87cc9a0a1c199dcc9f3e4d2d01b11895a9907b34bb988f4ec91866",
       "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109",
       "8df5ff8b291967c01b682477304d2824c737f76173ef7f0d0b2cd32f09b06026",
+      "fa4436e9fc2570e0f2c0caf3dccec52796f2353fb32ca859ba5f9736a22b81e9",
     ],
   },
 );
@@ -473,6 +444,7 @@ export const APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION = defineMigrati
     compatibleChecksums: [
       "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109",
       "8df5ff8b291967c01b682477304d2824c737f76173ef7f0d0b2cd32f09b06026",
+      "fa4436e9fc2570e0f2c0caf3dccec52796f2353fb32ca859ba5f9736a22b81e9",
     ],
   },
 );

@@ -77,7 +77,7 @@ describe("과거 Runtime stream part retirement", () => {
     );
   }
 
-  it("pending raw source만 정합화하고 이전 0121 checksum을 호환한다", async () => {
+  it("startup migration은 이력을 순회하지 않고 이전 0121 checksum을 호환한다", async () => {
     await markLegacyRetirementApplied();
 
     await expect(applyMigrations(database, [APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION])).resolves.toEqual([]);
@@ -96,28 +96,17 @@ describe("과거 Runtime stream part retirement", () => {
     expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.compatibleChecksums).toContain(
       "8df5ff8b291967c01b682477304d2824c737f76173ef7f0d0b2cd32f09b06026",
     );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.compatibleChecksums).toContain(
+      "fa4436e9fc2570e0f2c0caf3dccec52796f2353fb32ca859ba5f9736a22b81e9",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.compatibleChecksums).toContain(
+      "fa4436e9fc2570e0f2c0caf3dccec52796f2353fb32ca859ba5f9736a22b81e9",
+    );
     expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.surql).toBe(
       APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql,
     );
     expect(APPLICATION_MIGRATIONS).toContain(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION);
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("LET $pending_raw_sources");
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
-      "FOR $projection IN $projected_pending_raw_sources",
-    );
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain(
-      "FOR $pending IN $pending_runtime_sources",
-    );
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
-      "organization_id = $parent.organization_id",
-    );
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
-      "DELETE (SELECT id FROM application_outbox",
-    );
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
-      "UPDATE (SELECT id FROM application_outbox",
-    );
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain("UPDATE (SELECT id FROM runtime_event");
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql.match(/RETURN NONE/gu)).toHaveLength(2);
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql.trim()).toBe("RETURN NONE;");
   });
 
   it("Application Event Projector가 기존 0121 DB에 0122 reconciliation을 적용한다", async () => {
@@ -150,6 +139,21 @@ describe("과거 Runtime stream part retirement", () => {
       `CREATE system_migration CONTENT { migration_id: '0121-application-runtime-stream-retirement', checksum: $checksum, applied_at: time::now() };
        CREATE system_migration CONTENT { migration_id: '0122-application-runtime-stream-reconciliation', checksum: $checksum, applied_at: time::now() };`,
       { checksum: "8df5ff8b291967c01b682477304d2824c737f76173ef7f0d0b2cd32f09b06026" },
+    );
+
+    await expect(
+      applyMigrations(database, [
+        APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+        APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+      ]),
+    ).resolves.toEqual([]);
+  });
+
+  it("직전 fast reconciliation checksum을 적용한 DB도 그대로 기동한다", async () => {
+    await database.query(
+      `CREATE system_migration CONTENT { migration_id: '0121-application-runtime-stream-retirement', checksum: $checksum, applied_at: time::now() };
+       CREATE system_migration CONTENT { migration_id: '0122-application-runtime-stream-reconciliation', checksum: $checksum, applied_at: time::now() };`,
+      { checksum: "fa4436e9fc2570e0f2c0caf3dccec52796f2353fb32ca859ba5f9736a22b81e9" },
     );
 
     await expect(
@@ -283,10 +287,9 @@ describe("과거 Runtime stream part retirement", () => {
     );
     await publicEvent(raw, 1, "public-runtime-shadow", shadowContext.organizationId);
     const shadowBefore = await outbox(raw.event_id, shadowContext.organizationId);
-    await applyMigrations(database, [
-      APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
-      APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
-    ]);
+    const retirement = new RuntimeStreamRetirementService(database, { batchSize: 100 });
+    await expect(retirement.retireNextBatch()).resolves.toBe(1);
+    await retirement.close();
 
     expect(await outbox(raw.event_id)).toBeUndefined();
     expect(await outbox(raw.event_id, shadowContext.organizationId)).toEqual(shadowBefore);

@@ -1,5 +1,6 @@
 import { IdentityService, OrganizationService, type TenantContext } from "@massion/identity";
 import { OrganizationGraphService } from "@massion/organization";
+import { RuntimeExecutionStore } from "@massion/runtime";
 import { createDatabase, type MassionDatabase, type QueryExecutor } from "@massion/storage";
 import { WorkService } from "@massion/work";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +15,7 @@ describe("ApplicationEventProjector", () => {
   let context: TenantContext;
   let graph: OrganizationGraphService;
   let works: WorkService;
+  let runtime: RuntimeExecutionStore;
   let projector: ApplicationEventProjector;
   let events: ApplicationEventStore;
 
@@ -25,6 +27,7 @@ describe("ApplicationEventProjector", () => {
     context = await organizations.resolveTenantContext(owner.user.user_id, owner.organization.organization_id);
     graph = await OrganizationGraphService.create(database, organizations);
     works = await WorkService.create(database, organizations, graph);
+    runtime = await RuntimeExecutionStore.create(database, organizations);
     projector = await ApplicationEventProjector.create(database, organizations);
     events = await ApplicationEventStore.create(database, organizations);
   });
@@ -54,6 +57,70 @@ describe("ApplicationEventProjector", () => {
     ]);
     expect(JSON.stringify(projected)).not.toContain("request_json");
     expect(JSON.stringify(projected)).not.toContain("공개 event projection");
+  });
+
+  it.each([
+    { label: "원문이 남은", tombstoned: false },
+    { label: "이미 tombstone된", tombstoned: true },
+  ])("$label raw model outbox는 폐기하고 뒤의 durable event를 투영한다", async ({ tombstoned }) => {
+    const created = await runtime.createExecution(context, {
+      commandId: "projector-raw-stream-queued-0001",
+      workId: "projector-raw-stream-work",
+      agentHandle: "representative",
+      modelRoute: "orchestration-balanced",
+      correlationId: "projector-raw-stream-correlation-0001",
+      estimatedTokens: 1,
+      estimatedCostMicros: 0,
+      input: { prompt: "private" },
+    });
+    const running = await runtime.transition(context, {
+      commandId: "projector-raw-stream-running-0001",
+      executionId: created.execution.execution_id,
+      expectedVersion: created.execution.version,
+      target: "running",
+      payload: {},
+    });
+    await projector.projectPending(context, 10);
+    const before = await events.read(context, { after: 0, limit: 10 });
+    const raw = await runtime.appendEvent(context, {
+      commandId: "projector-raw-stream-delta-0001",
+      executionId: running.execution.execution_id,
+      expectedVersion: running.execution.version,
+      eventType: "model_text_delta",
+      payload: { text: "private stream text" },
+    });
+    if (tombstoned) {
+      await database.query(
+        "UPDATE runtime_event SET request_json = '{}', payload_json = '{}', result_json = '{}' WHERE organization_id = $organization_id AND event_id = $event_id;",
+        { organization_id: context.organizationId, event_id: raw.event.event_id },
+      );
+    }
+    await database.query(
+      "UPDATE application_outbox SET occurred_at = d'2000-01-01T00:00:00Z' WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND source_id = $source_id;",
+      { organization_id: context.organizationId, source_id: raw.event.event_id },
+    );
+    const durable = await runtime.appendEvent(context, {
+      commandId: "projector-raw-stream-route-0001",
+      executionId: raw.execution.execution_id,
+      expectedVersion: raw.execution.version,
+      eventType: "model.route.selected",
+      payload: { modelProfileId: "profile-safe" },
+    });
+
+    await expect(projector.projectPending(context, 10)).resolves.toBe(2);
+    const projected = await events.read(context, { after: before.cursor, limit: 10 });
+    expect(projected.events).toEqual([
+      expect.objectContaining({
+        type: "runtime.model-route-selected",
+        resource: { type: "Execution", id: durable.execution.execution_id, revision: durable.event.sequence },
+      }),
+    ]);
+    expect(projected.events.map((event) => event.type)).not.toContain("runtime.model-text-delta");
+    const [outbox] = await database.query<[[]]>(
+      "SELECT state FROM application_outbox WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND source_id = $source_id LIMIT 1;",
+      { organization_id: context.organizationId, source_id: raw.event.event_id },
+    );
+    expect(outbox).toEqual([]);
   });
 
   it("event create 뒤 오류는 outbox와 sequence까지 rollback하고 다음 실행이 같은 source를 복구한다", async () => {
