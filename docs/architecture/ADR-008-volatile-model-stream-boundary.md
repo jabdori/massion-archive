@@ -58,21 +58,24 @@ Artifact가 아니므로 복원하지 않습니다. 정상 성공의 확정 text
 
 ### 4. 과거 raw event는 cursor를 보존한 tombstone으로 retire합니다
 
-Application migration은 같은 정합화 SQL을 두 역할로 적용합니다. `0121-application-runtime-stream-retirement`는
-아직 0121을 적용하지 않은 DB를 정리하고 이전 0121 checksum을 호환합니다.
-`0122-application-runtime-stream-reconciliation`은 이전 checksum의 0121이 이미 적용된 DB에 이후 남은 raw
-stream을 다시 정리합니다. 두 migration은 각각 하나의 transaction에서 다음만 수행합니다.
+Application migration은 같은 빠른 정합화 SQL을 두 역할로 적용합니다.
+`0121-application-runtime-stream-retirement`는 아직 0121을 적용하지 않은 DB를 정리하고 이전 0121 checksum을
+호환합니다. `0122-application-runtime-stream-reconciliation`은 이전 checksum의 0121이 이미 적용된 DB에 이후
+남은 raw stream의 public projection을 다시 정리합니다. 두 migration은 각각 하나의 transaction에서 다음만 수행합니다.
 
-- event type이 `model_`로 시작하는 과거 raw Runtime Event의 ID·실행 ID·command ID·sequence·시각은 보존합니다.
-- `request_json`·`payload_json`·`result_json`을 정확히 `{}`로 바꿉니다.
 - 이미 공개 event가 있는 pending outbox는 그 공개 event ID로 `projected` 상태를 정합화합니다.
 - 공개 event가 없는 pending raw outbox만 삭제합니다.
 - 기존 projected outbox, immutable `application_event`, 공개 sequence·cursor, `runtime_execution`의 version과
   `event_sequence`는 변경하지 않습니다.
 
-대량 이력을 가진 DB의 시작을 막지 않도록 pending raw 후보는 조직과 source를 함께 대조하고, 일반 pending 삭제와
-JSON tombstone은 대상 ID 하위 쿼리와 `RETURN NONE`을 사용하는 bulk mutation으로 처리합니다. 행별 갱신은 이미
-공개 event가 있는데 pending으로 남은 예외 교집합에만 제한합니다.
+HTTP listener가 열린 뒤 `RuntimeStreamRetirementService`가 `model_` raw Runtime Event를 작은 단일 batch로
+계속 찾아 `request_json`·`payload_json`·`result_json`을 정확히 `{}`로 바꿉니다. 각 batch는 target subquery로
+대상을 고르고 event ID만 반환하며, 다음 batch 전에는 짧게 yield합니다. 따라서 대량 이력이 daemon readiness를
+막지 않고, 종료·재시작·일시 오류 뒤에도 아직 tombstone되지 않은 행만 idempotent하게 이어서 처리합니다.
+
+worker가 물리 tombstone을 마칠 때까지도 raw payload는 공개 query·timeline·SSE에 투영되지 않습니다. 또한
+`model_` Runtime Event의 command replay는 즉시 fail-closed하므로, 원문이 로컬 저장소에 남아 있는 제한된 창에
+과거 stream을 재생하거나 새로운 outbox를 만들 수 없습니다.
 
 Runtime Event 자체를 삭제하거나 sequence를 다시 매기지 않는 이유는 recovery cursor와 감사 계보를 유지하기
 위해서입니다. 이미 공개된 event를 삭제·수정하지 않는 이유도 동일합니다. Tombstone된 과거 stream command를

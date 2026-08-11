@@ -39,6 +39,7 @@ export * from "./run-recovery.js";
 export * from "./run-commands.js";
 export * from "./run-store.js";
 export * from "./runtime-subscription-lineage.js";
+export * from "./runtime-stream-retirement.js";
 export * from "./schema.js";
 export * from "./sse.js";
 export * from "./snapshot.js";

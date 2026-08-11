@@ -14,6 +14,7 @@ import {
   APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
 } from "./schema.js";
+import { RuntimeStreamRetirementService } from "./runtime-stream-retirement.js";
 
 const LEGACY_RUNTIME_STREAM_RETIREMENT_CHECKSUM = "07199ea58b87cc9a0a1c199dcc9f3e4d2d01b11895a9907b34bb988f4ec91866";
 
@@ -86,8 +87,14 @@ describe("과거 Runtime stream part retirement", () => {
     expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.compatibleChecksums).toContain(
       "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109",
     );
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.compatibleChecksums).toContain(
+      "8df5ff8b291967c01b682477304d2824c737f76173ef7f0d0b2cd32f09b06026",
+    );
     expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.compatibleChecksums).toContain(
       "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109",
+    );
+    expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.compatibleChecksums).toContain(
+      "8df5ff8b291967c01b682477304d2824c737f76173ef7f0d0b2cd32f09b06026",
     );
     expect(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION.surql).toBe(
       APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql,
@@ -109,8 +116,8 @@ describe("과거 Runtime stream part retirement", () => {
     expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain(
       "UPDATE (SELECT id FROM application_outbox",
     );
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).toContain("UPDATE (SELECT id FROM runtime_event");
-    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql.match(/RETURN NONE/gu)).toHaveLength(3);
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql).not.toContain("UPDATE (SELECT id FROM runtime_event");
+    expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql.match(/RETURN NONE/gu)).toHaveLength(2);
   });
 
   it("Application Event Projector가 기존 0121 DB에 0122 reconciliation을 적용한다", async () => {
@@ -128,6 +135,21 @@ describe("과거 Runtime stream part retirement", () => {
       `CREATE system_migration CONTENT { migration_id: '0121-application-runtime-stream-retirement', checksum: $checksum, applied_at: time::now() };
        CREATE system_migration CONTENT { migration_id: '0122-application-runtime-stream-reconciliation', checksum: $checksum, applied_at: time::now() };`,
       { checksum: "9e73a3f323a6bd86d7597355ce24f20743d82167de79f4e270b494023c453109" },
+    );
+
+    await expect(
+      applyMigrations(database, [
+        APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+        APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+      ]),
+    ).resolves.toEqual([]);
+  });
+
+  it("직전 batch tombstone checksum을 적용한 DB도 그대로 기동한다", async () => {
+    await database.query(
+      `CREATE system_migration CONTENT { migration_id: '0121-application-runtime-stream-retirement', checksum: $checksum, applied_at: time::now() };
+       CREATE system_migration CONTENT { migration_id: '0122-application-runtime-stream-reconciliation', checksum: $checksum, applied_at: time::now() };`,
+      { checksum: "8df5ff8b291967c01b682477304d2824c737f76173ef7f0d0b2cd32f09b06026" },
     );
 
     await expect(
@@ -270,7 +292,7 @@ describe("과거 Runtime stream part retirement", () => {
     expect(await outbox(raw.event_id, shadowContext.organizationId)).toEqual(shadowBefore);
   });
 
-  it("기존 old-checksum DB의 0122는 혼합 projection을 보존·정합화하고 raw JSON만 tombstone한 뒤 recovery와 replay를 fail-closed로 유지한다", async () => {
+  it("기존 old-checksum DB의 0122와 bounded worker는 혼합 projection을 보존·정합화하고 recovery와 replay를 fail-closed로 유지한다", async () => {
     await markLegacyRetirementApplied();
     const migrations = [
       APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
@@ -363,6 +385,10 @@ describe("과거 Runtime stream part retirement", () => {
     await expect(applyMigrations(database, migrations)).resolves.toEqual([
       "0122-application-runtime-stream-reconciliation",
     ]);
+    const retirement = new RuntimeStreamRetirementService(database, { batchSize: 100 });
+    await expect(retirement.retireNextBatch()).resolves.toBe(4);
+    await expect(retirement.retireNextBatch()).resolves.toBe(0);
+    await retirement.close();
 
     const [rawAfter] = await database.query<
       [
@@ -422,7 +448,7 @@ describe("과거 Runtime stream part retirement", () => {
 
     const eventCountBeforeReplay = (await runtime.listEvents(context, recoverable.execution.execution_id)).length;
     await expect(runtime.appendEvent(context, historicalReplayInput)).rejects.toThrow(
-      "같은 commandId에 다른 Runtime 요청을 사용할 수 없습니다",
+      "retired raw Runtime Event는 replay할 수 없습니다",
     );
     expect(await runtime.listEvents(context, recoverable.execution.execution_id)).toHaveLength(eventCountBeforeReplay);
 

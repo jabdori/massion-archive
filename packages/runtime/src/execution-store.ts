@@ -800,6 +800,8 @@ export class RuntimeExecutionStore {
     );
     if (events[0] && !(await this.findExecution(executor, context, events[0].execution_id)))
       throw new Error("Runtime command의 행위자 계보가 일치하지 않습니다");
+    // 물리 tombstone이 background batch를 기다리는 동안에도 과거 raw stream command는 재생하면 안 됩니다.
+    if (events[0]?.event_type.startsWith("model_")) throw new Error("retired raw Runtime Event는 replay할 수 없습니다");
     if (events[0] && events[0].request_json !== requestJson)
       throw new Error("같은 commandId에 다른 Runtime 요청을 사용할 수 없습니다");
     return events[0];

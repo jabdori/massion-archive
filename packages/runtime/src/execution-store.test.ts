@@ -664,6 +664,28 @@ describe("Runtime Execution Store", () => {
     expect(JSON.parse(appended.event.payload_json)).toEqual({ delta: "hello" });
   });
 
+  it("retired raw stream event는 물리 tombstone 전에도 replay를 거부한다", async () => {
+    const created = await createExecution();
+    const running = await store.transition(context, {
+      commandId: crypto.randomUUID(),
+      executionId: created.execution.execution_id,
+      expectedVersion: 1,
+      target: "running",
+      payload: {},
+    });
+    const input = {
+      commandId: crypto.randomUUID(),
+      executionId: created.execution.execution_id,
+      expectedVersion: running.execution.version,
+      eventType: "model_text_delta",
+      payload: { delta: "private" },
+    } as const;
+    await store.appendEvent(context, input);
+
+    await expect(store.appendEvent(context, input)).rejects.toThrow("retired raw Runtime Event");
+    expect(await store.listEvents(context, created.execution.execution_id)).toHaveLength(3);
+  });
+
   it("영속 저널 명령을 version 없이 동시 재생해도 사건 하나만 기록한다", async () => {
     const created = await createExecution();
     await store.transition(context, {

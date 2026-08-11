@@ -17,6 +17,7 @@ import {
   DatabaseCoreAssuranceCheckOrchestrator,
   DeterministicRecordsDocumentPlanner,
   DynamicStaffingCoordinator,
+  RuntimeStreamRetirementService,
   SubscriptionConnectionService,
   createCoreWorkPipelineExecutors,
   type CoreWorkStage,
@@ -586,6 +587,14 @@ export async function createMassionDaemon(
         },
       },
     );
+    const runtimeStreamRetirement = new RuntimeStreamRetirementService(database, {
+      onFailure: () => {
+        operations.write("application.runtime_stream_retirement.failed");
+      },
+      onComplete: (retired) => {
+        operations.write("application.runtime_stream_retirement.completed", { retired });
+      },
+    });
     const builtinModelRoutes = new BuiltinModelRouteAssembler(router);
     const serverSubscriptionConnections = new ServerSubscriptionConnectionService(
       serverConnectors,
@@ -1472,6 +1481,15 @@ export async function createMassionDaemon(
         metricsServer,
         connectorMaintenance,
         subscriptionQuotaSynchronization,
+        {
+          start: () => {
+            runtimeStreamRetirement.start();
+            return Promise.resolve();
+          },
+          close: async () => {
+            await runtimeStreamRetirement.close();
+          },
+        },
         {
           start: () => Promise.resolve(),
           close: async () => {
