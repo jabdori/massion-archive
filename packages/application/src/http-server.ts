@@ -969,7 +969,8 @@ export class ApplicationHttpServer {
     try {
       let batch = await this.readEvents(context, { after: cursor, limit: 1000 });
       if (this.streamClosed(request, response)) return;
-      await this.dependencies.events.recover?.(context);
+      if (await this.dependencies.events.recover?.(context))
+        batch = await this.readEvents(context, { after: cursor, limit: 1000 });
       if (this.streamClosed(request, response)) return;
       response.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",

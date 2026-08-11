@@ -449,6 +449,22 @@ export const APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION = defineMigrati
   },
 );
 
+/**
+ * listener 뒤에서 수행하는 one-time raw stream 정리를 checkpoint합니다.
+ */
+export const APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION = defineMigration(
+  "0123-application-runtime-stream-retirement-state",
+  `
+DEFINE TABLE application_runtime_stream_retirement_state SCHEMAFULL PERMISSIONS NONE;
+DEFINE FIELD raw_cursor ON application_runtime_stream_retirement_state TYPE string;
+DEFINE FIELD phase ON application_runtime_stream_retirement_state TYPE string ASSERT $value IN ['raw', 'repair'];
+DEFINE FIELD repair_organization_after ON application_runtime_stream_retirement_state TYPE string;
+DEFINE FIELD repair_organization_id ON application_runtime_stream_retirement_state TYPE option<string>;
+DEFINE FIELD repair_source_after ON application_runtime_stream_retirement_state TYPE string;
+DEFINE FIELD completed_at ON application_runtime_stream_retirement_state TYPE option<datetime>;
+`,
+);
+
 export const APPLICATION_MIGRATIONS = [
   APPLICATION_AUTH_MIGRATION,
   APPLICATION_COMMAND_MIGRATION,
@@ -467,4 +483,5 @@ export const APPLICATION_MIGRATIONS = [
   APPLICATION_EVENT_LINEAGE_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+  APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION,
 ] as const;

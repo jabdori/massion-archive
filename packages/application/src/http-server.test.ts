@@ -577,6 +577,27 @@ describe("ApplicationHttpServer", () => {
     expect(eventRecoveries).toBe(1);
   });
 
+  it("SSE는 recovery가 만든 event를 첫 frame에 포함한다", async () => {
+    recoverEvents = () => {
+      events.push(event(1));
+      return true;
+    };
+    const abort = new AbortController();
+    const response = await fetch(`${baseUrl}/api/v1/events/stream`, {
+      headers: { authorization: "Bearer test-token", accept: "text/event-stream" },
+      signal: abort.signal,
+    });
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("SSE body가 없습니다");
+
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain("id: 1");
+    expect(eventReads).toBe(2);
+    expect(eventRecoveries).toBe(1);
+    abort.abort();
+    await reader.cancel().catch(() => undefined);
+  });
+
   it("일반 event GET의 만료 cursor는 recovery를 실행하지 않는다", async () => {
     const response = await fetch(`${baseUrl}/api/v1/events?after=99`, {
       headers: { authorization: "Bearer test-token", accept: "application/json" },

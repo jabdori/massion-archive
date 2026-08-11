@@ -9,6 +9,7 @@ import {
   APPLICATION_OUTBOX_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+  APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION,
 } from "./schema.js";
 
 interface OutboxRecord {
@@ -36,6 +37,80 @@ interface PublicProjection {
 interface StreamRecord {
   readonly current_sequence: number;
 }
+
+interface RuntimeEventTypeRecord {
+  readonly event_id: string;
+  readonly organization_id: string;
+  readonly event_type: string;
+}
+
+interface OutboxCursor {
+  readonly occurredAt: unknown;
+  readonly outboxId: string;
+}
+
+interface PublicOutboxSelection {
+  readonly outbox: OutboxRecord;
+  readonly cursor: OutboxCursor;
+}
+
+interface ProjectionStep {
+  readonly cursor: OutboxCursor;
+  readonly projected: boolean;
+}
+
+export interface ApplicationProjectionResult {
+  readonly projected: number;
+  /** raw legacy page 또는 호출 상한 뒤에 후속 pending outbox가 남을 수 있습니다. */
+  readonly more: boolean;
+}
+
+const OUTBOX_PAGE_SIZE = 100;
+
+const PENDING_OUTBOX_FIRST_PAGE_QUERY = `
+SELECT outbox_id, organization_id, source_kind, source_id, aggregate_id, correlation_id, causation_id, occurred_at
+FROM application_outbox
+WHERE organization_id = $organization_id
+  AND state = 'pending'
+ORDER BY occurred_at ASC, outbox_id ASC
+LIMIT $limit;
+`;
+
+const PENDING_OUTBOX_NEXT_PAGE_QUERY = `
+SELECT outbox_id, organization_id, source_kind, source_id, aggregate_id, correlation_id, causation_id, occurred_at
+FROM application_outbox
+WHERE organization_id = $organization_id
+  AND state = 'pending'
+  AND occurred_at >= $after_occurred_at
+  AND (
+    occurred_at > $after_occurred_at
+    OR (occurred_at = $after_occurred_at AND outbox_id > $after_outbox_id)
+  )
+ORDER BY occurred_at ASC, outbox_id ASC
+LIMIT $limit;
+`;
+
+const RUNTIME_EVENT_TYPES_QUERY = `
+SELECT event_id, organization_id, event_type FROM runtime_event WITH INDEX runtime_event_id
+WHERE event_id IN $event_ids;
+`;
+
+const PENDING_OUTBOX_BY_ID_QUERY = `
+SELECT outbox_id, organization_id, source_kind, source_id, aggregate_id, correlation_id, causation_id, occurred_at
+FROM application_outbox WITH INDEX application_outbox_id
+WHERE organization_id = $organization_id
+  AND outbox_id = $outbox_id
+  AND state = 'pending'
+LIMIT 1;
+`;
+
+const PENDING_OUTBOX_EXISTS_QUERY = `
+SELECT outbox_id, occurred_at FROM application_outbox
+WHERE organization_id = $organization_id
+  AND state = 'pending'
+ORDER BY occurred_at ASC, outbox_id ASC
+LIMIT 1;
+`;
 
 class ProjectionHookError extends Error {
   public constructor(public readonly original: unknown) {
@@ -75,12 +150,57 @@ function eventType(prefix: string, value: string): string {
   return `${prefix}.${suffix}`;
 }
 
+async function nextPublicOutboxPage(
+  executor: QueryExecutor,
+  organizationId: string,
+  after?: OutboxCursor,
+): Promise<PublicOutboxSelection | ProjectionStep | undefined> {
+  const [outboxes] = await executor.query<[OutboxRecord[]]>(
+    after === undefined ? PENDING_OUTBOX_FIRST_PAGE_QUERY : PENDING_OUTBOX_NEXT_PAGE_QUERY,
+    after === undefined
+      ? { organization_id: organizationId, limit: OUTBOX_PAGE_SIZE }
+      : {
+          organization_id: organizationId,
+          after_occurred_at: after.occurredAt,
+          after_outbox_id: after.outboxId,
+          limit: OUTBOX_PAGE_SIZE,
+        },
+  );
+  if (outboxes.length === 0) return undefined;
+  const runtimeEventIds = outboxes
+    .filter((outbox) => outbox.source_kind === "runtime-event")
+    .map((outbox) => outbox.source_id);
+  const runtimeEventIdSet = new Set(runtimeEventIds);
+  const rawRuntimeEventIds = new Set<string>();
+  if (runtimeEventIds.length > 0) {
+    const [runtimeEvents] = await executor.query<[RuntimeEventTypeRecord[]]>(RUNTIME_EVENT_TYPES_QUERY, {
+      event_ids: runtimeEventIds,
+    });
+    for (const runtimeEvent of runtimeEvents) {
+      if (
+        runtimeEvent.organization_id === organizationId &&
+        runtimeEventIdSet.has(runtimeEvent.event_id) &&
+        runtimeEvent.event_type.startsWith("model_")
+      )
+        rawRuntimeEventIds.add(runtimeEvent.event_id);
+    }
+  }
+  const outbox = outboxes.find(
+    (candidate) => candidate.source_kind !== "runtime-event" || !rawRuntimeEventIds.has(candidate.source_id),
+  );
+  if (outbox) return { outbox, cursor: { occurredAt: outbox.occurred_at, outboxId: outbox.outbox_id } };
+  const last = outboxes.at(-1);
+  if (last === undefined) return undefined;
+  return { cursor: { occurredAt: last.occurred_at, outboxId: last.outbox_id }, projected: false };
+}
+
 export interface ApplicationEventProjectorHooks {
   readonly afterEventCreated?: () => void | Promise<void>;
 }
 
 export class ApplicationEventProjector {
   private readonly organizationProjectionTails = new Map<string, Promise<void>>();
+  private readonly pendingOutboxCursors = new Map<string, OutboxCursor>();
 
   private constructor(
     private readonly database: MassionDatabase,
@@ -99,27 +219,46 @@ export class ApplicationEventProjector {
       APPLICATION_EVENT_LINEAGE_MIGRATION,
       APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
       APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+      APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION,
     ]);
     return new ApplicationEventProjector(database, organizations, hooks);
   }
 
   public async projectPending(context: TenantContext, limit: number): Promise<number> {
+    return (await this.projectPendingSlice(context, limit)).projected;
+  }
+
+  public async projectPendingSlice(context: TenantContext, limit: number): Promise<ApplicationProjectionResult> {
     await this.organizations.verifyTenantContext(context);
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000)
       throw new Error("Application projection limit이 유효하지 않습니다");
     return await this.projectForOrganization(context.organizationId, async () => {
-      if (!(await this.hasPending(context.organizationId))) return 0;
+      if (!(await this.hasPending(context.organizationId))) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (!(await this.hasPending(context.organizationId))) {
+          this.pendingOutboxCursors.delete(context.organizationId);
+          return { projected: 0, more: false };
+        }
+      }
       let projected = 0;
+      let cursor = this.pendingOutboxCursors.get(context.organizationId);
       while (projected < limit) {
         try {
-          if (!(await this.projectOne(context))) break;
-          projected += 1;
+          const step = await this.projectOne(context, cursor);
+          if (step === undefined) {
+            this.pendingOutboxCursors.delete(context.organizationId);
+            return { projected, more: false };
+          }
+          cursor = step.cursor;
+          this.pendingOutboxCursors.set(context.organizationId, cursor);
+          if (step.projected) projected += 1;
+          else return { projected, more: true };
         } catch (error) {
           if (error instanceof ProjectionHookError) throw error.original;
           throw error;
         }
       }
-      return projected;
+      return { projected, more: true };
     });
   }
 
@@ -127,8 +266,10 @@ export class ApplicationEventProjector {
     return Boolean(
       await first<{ readonly outbox_id: string; readonly occurred_at: unknown }>(
         this.database,
-        "SELECT outbox_id, occurred_at FROM application_outbox WHERE organization_id = $organization_id AND state = 'pending' ORDER BY occurred_at ASC, outbox_id ASC LIMIT 1;",
-        { organization_id: organizationId },
+        PENDING_OUTBOX_EXISTS_QUERY,
+        {
+          organization_id: organizationId,
+        },
       ),
     );
   }
@@ -154,15 +295,17 @@ export class ApplicationEventProjector {
     }
   }
 
-  private async projectOne(context: TenantContext): Promise<boolean> {
+  private async projectOne(context: TenantContext, after?: OutboxCursor): Promise<ProjectionStep | undefined> {
+    const selection = await nextPublicOutboxPage(this.database, context.organizationId, after);
+    if (!selection) return undefined;
+    if (!("outbox" in selection)) return selection;
     return await this.database.transaction(async (transaction) => {
       await this.organizations.verifyTenantContext(context, undefined, transaction);
-      const outbox = await first<OutboxRecord>(
-        transaction,
-        "SELECT * OMIT id FROM application_outbox WHERE organization_id = $organization_id AND state = 'pending' ORDER BY occurred_at ASC, outbox_id ASC LIMIT 1;",
-        { organization_id: context.organizationId },
-      );
-      if (!outbox) return false;
+      const outbox = await first<OutboxRecord>(transaction, PENDING_OUTBOX_BY_ID_QUERY, {
+        organization_id: context.organizationId,
+        outbox_id: selection.outbox.outbox_id,
+      });
+      if (outbox === undefined) return { cursor: selection.cursor, projected: false };
       const existing = await first<{ event_id: string }>(
         transaction,
         "SELECT event_id FROM application_event WHERE organization_id = $organization_id AND source_kind = $source_kind AND source_id = $source_id LIMIT 1;",
@@ -177,7 +320,7 @@ export class ApplicationEventProjector {
           "UPDATE application_outbox SET state = 'projected', public_event_id = $event_id, updated_at = time::now() WHERE organization_id = $organization_id AND outbox_id = $outbox_id;",
           { organization_id: context.organizationId, outbox_id: outbox.outbox_id, event_id: existing.event_id },
         );
-        return true;
+        return { cursor: selection.cursor, projected: true };
       }
       const projection = await this.map(transaction, outbox);
       if (projection === undefined) {
@@ -185,7 +328,7 @@ export class ApplicationEventProjector {
           "DELETE (SELECT id FROM application_outbox WHERE organization_id = $organization_id AND outbox_id = $outbox_id AND state = 'pending' LIMIT 1) RETURN NONE;",
           { organization_id: context.organizationId, outbox_id: outbox.outbox_id },
         );
-        return true;
+        return { cursor: selection.cursor, projected: true };
       }
       const current = await first<StreamRecord>(
         transaction,
@@ -240,7 +383,7 @@ export class ApplicationEventProjector {
         "UPDATE application_outbox SET state = 'projected', public_event_id = $event_id, updated_at = time::now() WHERE organization_id = $organization_id AND outbox_id = $outbox_id AND state = 'pending';",
         { organization_id: context.organizationId, outbox_id: outbox.outbox_id, event_id: eventId },
       );
-      return true;
+      return { cursor: selection.cursor, projected: true };
     });
   }
 

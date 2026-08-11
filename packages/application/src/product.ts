@@ -86,6 +86,7 @@ export class ApplicationProduct implements AsyncDisposable {
   private readonly failures: unknown[] = [];
   private readonly activeProjectionOrganizations = new Set<string>();
   private readonly pendingProjectionContexts = new Map<string, TenantContext>();
+  private readonly pendingProjectionContinuations = new Set<string>();
 
   private constructor(
     public readonly server: ApplicationHttpServer,
@@ -362,14 +363,20 @@ export class ApplicationProduct implements AsyncDisposable {
   }
 
   private async drainProjection(context: TenantContext): Promise<boolean> {
-    let projected = 0;
-    let batch: number;
-    do {
-      batch = await this.projector.projectPending(context, PROJECTION_BATCH);
-      projected += batch;
-      // 상한까지 찼으면 다음 명령이나 poll을 기다리지 않고 같은 wake-up에서 계속 비웁니다.
-    } while (batch === PROJECTION_BATCH);
-    return projected > 0;
+    const batch = await this.projector.projectPendingSlice(context, PROJECTION_BATCH);
+    if (batch.more) this.scheduleProjectionContinuation(context);
+    return batch.projected > 0;
+  }
+
+  private scheduleProjectionContinuation(context: TenantContext): void {
+    const organizationId = context.organizationId;
+    if (this.pendingProjectionContinuations.has(organizationId)) return;
+    this.pendingProjectionContinuations.add(organizationId);
+    this.track(async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      this.pendingProjectionContinuations.delete(organizationId);
+      this.scheduleProjection(context);
+    });
   }
 
   private track(operation: () => Promise<void>): void {

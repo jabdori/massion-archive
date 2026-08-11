@@ -13,6 +13,7 @@ import {
   APPLICATION_OUTBOX_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
   APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
+  APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION,
 } from "./schema.js";
 import { RuntimeStreamRetirementService } from "./runtime-stream-retirement.js";
 
@@ -106,6 +107,7 @@ describe("과거 Runtime stream part retirement", () => {
       APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql,
     );
     expect(APPLICATION_MIGRATIONS).toContain(APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION);
+    expect(APPLICATION_MIGRATIONS).toContain(APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION);
     expect(APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION.surql.trim()).toBe("RETURN NONE;");
   });
 
@@ -287,6 +289,7 @@ describe("과거 Runtime stream part retirement", () => {
     );
     await publicEvent(raw, 1, "public-runtime-shadow", shadowContext.organizationId);
     const shadowBefore = await outbox(raw.event_id, shadowContext.organizationId);
+    await applyMigrations(database, [APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION]);
     const retirement = new RuntimeStreamRetirementService(database, { batchSize: 100 });
     await expect(retirement.retireNextBatch()).resolves.toBe(1);
     await retirement.close();
@@ -300,6 +303,7 @@ describe("과거 Runtime stream part retirement", () => {
     const migrations = [
       APPLICATION_RUNTIME_STREAM_RETIREMENT_MIGRATION,
       APPLICATION_RUNTIME_STREAM_RECONCILIATION_MIGRATION,
+      APPLICATION_RUNTIME_STREAM_RETIREMENT_STATE_MIGRATION,
     ];
     let primary = await running("primary");
     primary = await runtime.appendEvent(context, {
@@ -387,10 +391,19 @@ describe("과거 Runtime stream part retirement", () => {
 
     await expect(applyMigrations(database, migrations)).resolves.toEqual([
       "0122-application-runtime-stream-reconciliation",
+      "0123-application-runtime-stream-retirement-state",
     ]);
     const retirement = new RuntimeStreamRetirementService(database, { batchSize: 100 });
-    await expect(retirement.retireNextBatch()).resolves.toBe(4);
-    await expect(retirement.retireNextBatch()).resolves.toBe(0);
+    let completed = false;
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      await retirement.retireNextBatch();
+      const [states] = await database.query<[{ readonly completed_at?: unknown }[]]>(
+        "SELECT completed_at FROM application_runtime_stream_retirement_state:volatile_model_stream_v1;",
+      );
+      completed = states[0]?.completed_at !== undefined && states[0]?.completed_at !== null;
+      if (completed) break;
+    }
+    expect(completed).toBe(true);
     await retirement.close();
 
     const [rawAfter] = await database.query<

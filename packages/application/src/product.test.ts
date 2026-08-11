@@ -146,7 +146,7 @@ describe("ApplicationProduct", () => {
       },
       queries: { status: async () => ({ status: "ready" }) },
     });
-    const projectPending = vi.spyOn(product.projector, "projectPending");
+    const projectPending = vi.spyOn(product.projector, "projectPendingSlice");
     const input = {
       schemaVersion: "massion.application.v1" as const,
       commandId: "approval-decide-product-command-0001",
@@ -245,7 +245,7 @@ describe("ApplicationProduct", () => {
     const claim = await product.runs.claim(context, started.runId);
     if (claim.outcome !== "claimed") throw new Error("제품 승인 대기 준비 lease를 얻지 못했습니다");
     await product.runs.suspend(context, started.runId, claim.leaseGeneration, approvalId);
-    const projectPending = vi.spyOn(product.projector, "projectPending");
+    const projectPending = vi.spyOn(product.projector, "projectPendingSlice");
     const input = {
       schemaVersion: "massion.application.v1" as const,
       commandId: "approval-run-product-decide-0001",
@@ -283,7 +283,7 @@ describe("ApplicationProduct", () => {
     expect(projectPending).toHaveBeenCalledTimes(1);
   });
 
-  it("한 번에 다 못 비운 outbox는 명령을 더 받지 않아도 계속 비운다", async () => {
+  it("raw page와 한 번에 다 못 비운 outbox는 명령을 더 받지 않아도 다음 turn에서 계속 비운다", async () => {
     await using database = await createDatabase({ url: "mem://", namespace: "massion", database: crypto.randomUUID() });
     const identities = await IdentityService.create(database);
     const organizations = await OrganizationService.create(database);
@@ -310,23 +310,25 @@ describe("ApplicationProduct", () => {
       executors,
       domain: {} as never,
     });
-    // 상한(1,000)까지 꽉 채운 두 번을 지나 세 번째에 남은 것이 없다고 답합니다. 예전에는 한 번만
-    // 투영하고 멈춰, 남은 것을 비우려면 사람이 명령을 다시 보내야 했습니다(관측: pending 27,032건).
-    const remaining = [1_000, 1_000, 7];
+    // 꽉 찬 public page와 raw page 모두 다음 background turn에서 계속 비워야 합니다.
+    const remaining = [
+      { projected: 1_000, more: true },
+      { projected: 0, more: true },
+      { projected: 1_000, more: true },
+      { projected: 7, more: false },
+    ];
     const projectPending = vi
-      .spyOn(product.projector, "projectPending")
-      .mockImplementation(async () => remaining.shift() ?? 0);
+      .spyOn(product.projector, "projectPendingSlice")
+      .mockImplementation(async () => remaining.shift() ?? { projected: 0, more: false });
 
-    await product.commands.dispatch(context, ["work:write"], {
-      schemaVersion: "massion.application.v1",
-      commandId: "projection-drain-start-0001",
-      correlationId: "projection-drain-correlation-0001",
-      operation: "run.start",
-      payload: { request: { text: "outbox 수렴 검증" } },
-    });
+    const drainProjection = Reflect.get(product, "drainProjection") as (
+      tenantContext: typeof context,
+    ) => Promise<boolean>;
+    await expect(drainProjection.call(product, context)).resolves.toBe(true);
+    expect(projectPending).toHaveBeenCalledOnce();
     await product.drain();
 
-    expect(projectPending.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(projectPending.mock.calls.length).toBeGreaterThanOrEqual(4);
     expect(remaining).toHaveLength(0);
     projectPending.mockRestore();
   });
@@ -379,12 +381,12 @@ describe("ApplicationProduct", () => {
     });
     let activeProjections = 0;
     let maximumActiveProjections = 0;
-    const projectPending = vi.spyOn(product.projector, "projectPending").mockImplementation(async () => {
+    const projectPending = vi.spyOn(product.projector, "projectPendingSlice").mockImplementation(async () => {
       activeProjections += 1;
       maximumActiveProjections = Math.max(maximumActiveProjections, activeProjections);
       try {
         await projectionGate;
-        return 0;
+        return { projected: 0, more: false };
       } finally {
         activeProjections -= 1;
       }
@@ -441,7 +443,7 @@ describe("ApplicationProduct", () => {
     await expect(product.metrics.aggregate(initialized.context, "application_run_total")).resolves.toEqual([
       { dimensions: { stage: "terminal", result: "completed" }, value: 1 },
     ]);
-    const streamProjection = vi.spyOn(product.projector, "projectPending");
+    const streamProjection = vi.spyOn(product.projector, "projectPendingSlice");
     const streamAbort = new AbortController();
     const stream = client.streamEvents(0, streamAbort.signal);
     await expect(stream.next()).resolves.toMatchObject({ done: false });

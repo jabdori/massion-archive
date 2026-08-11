@@ -36,6 +36,14 @@ describe("ApplicationEventProjector", () => {
     await database.close();
   });
 
+  async function pendingRawOutboxCount(): Promise<number> {
+    const [outboxes] = await database.query<[unknown[]]>(
+      "SELECT source_id FROM application_outbox WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND state = 'pending';",
+      { organization_id: context.organizationId },
+    );
+    return outboxes.length;
+  }
+
   it("public allowlist mapper로 조직별 연속 sequence를 만들고 replay는 중복하지 않는다", async () => {
     const bootstrapped = await graph.bootstrap(context);
     await works.createWork(context, {
@@ -45,10 +53,7 @@ describe("ApplicationEventProjector", () => {
       organizationVersionId: bootstrapped.version.version_id,
     });
 
-    const databaseQuery = vi.spyOn(database, "query");
     expect(await projector.projectPending(context, 10)).toBe(2);
-    expect(databaseQuery.mock.calls.filter(([query]) => query.includes("FROM application_outbox")).length).toBe(1);
-    databaseQuery.mockRestore();
     expect(await projector.projectPending(context, 10)).toBe(0);
     const projected = await events.read(context, { after: 0, limit: 10 });
     expect(projected.events.map((event) => [event.sequence, event.type])).toEqual([
@@ -62,7 +67,7 @@ describe("ApplicationEventProjector", () => {
   it.each([
     { label: "원문이 남은", tombstoned: false },
     { label: "이미 tombstone된", tombstoned: true },
-  ])("$label raw model outbox는 폐기하고 뒤의 durable event를 투영한다", async ({ tombstoned }) => {
+  ])("$label raw model outbox를 공개 후보에서 제외하고 뒤의 durable event를 투영한다", async ({ tombstoned }) => {
     const created = await runtime.createExecution(context, {
       commandId: "projector-raw-stream-queued-0001",
       workId: "projector-raw-stream-work",
@@ -106,8 +111,7 @@ describe("ApplicationEventProjector", () => {
       eventType: "model.route.selected",
       payload: { modelProfileId: "profile-safe" },
     });
-
-    await expect(projector.projectPending(context, 10)).resolves.toBe(2);
+    await expect(projector.projectPending(context, 10)).resolves.toBe(1);
     const projected = await events.read(context, { after: before.cursor, limit: 10 });
     expect(projected.events).toEqual([
       expect.objectContaining({
@@ -120,7 +124,166 @@ describe("ApplicationEventProjector", () => {
       "SELECT state FROM application_outbox WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND source_id = $source_id LIMIT 1;",
       { organization_id: context.organizationId, source_id: raw.event.event_id },
     );
-    expect(outbox).toEqual([]);
+    expect(outbox).toEqual([{ state: "pending" }]);
+  });
+
+  it("raw model outbox backlog 뒤의 durable runtime event를 먼저 투영한다", async () => {
+    const created = await runtime.createExecution(context, {
+      commandId: "projector-priority-queued-0001",
+      workId: "projector-priority-work",
+      agentHandle: "representative",
+      modelRoute: "orchestration-balanced",
+      correlationId: "projector-priority-correlation-0001",
+      estimatedTokens: 1,
+      estimatedCostMicros: 0,
+      input: { prompt: "private" },
+    });
+    const running = await runtime.transition(context, {
+      commandId: "projector-priority-running-0001",
+      executionId: created.execution.execution_id,
+      expectedVersion: created.execution.version,
+      target: "running",
+      payload: {},
+    });
+    await projector.projectPending(context, 10);
+    const before = await events.read(context, { after: 0, limit: 10 });
+    let execution = running.execution;
+    const rawSourceIds: string[] = [];
+    for (const index of [1, 2, 3]) {
+      const appended = await runtime.appendEvent(context, {
+        commandId: `projector-priority-delta-000${String(index)}`,
+        executionId: execution.execution_id,
+        expectedVersion: execution.version,
+        eventType: "model_text_delta",
+        payload: { text: `private-${String(index)}` },
+      });
+      execution = appended.execution;
+      rawSourceIds.push(appended.event.event_id);
+    }
+    const durable = await runtime.appendEvent(context, {
+      commandId: "projector-priority-route-0001",
+      executionId: execution.execution_id,
+      expectedVersion: execution.version,
+      eventType: "model.route.selected",
+      payload: { modelProfileId: "profile-safe" },
+    });
+    await database.query(
+      "UPDATE application_outbox SET occurred_at = d'2000-01-01T00:00:00Z' WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND source_id IN $source_ids;",
+      { organization_id: context.organizationId, source_ids: rawSourceIds },
+    );
+    const [orderedBeforeProjection] = await database.query<[{ readonly source_id: string }[]]>(
+      "SELECT source_id, occurred_at, outbox_id FROM application_outbox WHERE organization_id = $organization_id AND state = 'pending' ORDER BY occurred_at ASC, outbox_id ASC;",
+      { organization_id: context.organizationId },
+    );
+    expect(
+      orderedBeforeProjection
+        .slice(0, 3)
+        .map((outbox) => outbox.source_id)
+        .sort(),
+    ).toEqual([...rawSourceIds].sort());
+
+    await expect(projector.projectPending(context, 1)).resolves.toBe(1);
+    const projected = await events.read(context, { after: before.cursor, limit: 10 });
+    expect(projected.events).toEqual([
+      expect.objectContaining({
+        type: "runtime.model-route-selected",
+        resource: { type: "Execution", id: durable.execution.execution_id, revision: durable.event.sequence },
+      }),
+    ]);
+    const [pendingRaw] = await database.query<[{ readonly source_id: string }[]]>(
+      "SELECT source_id FROM application_outbox WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND state = 'pending' ORDER BY source_id ASC;",
+      { organization_id: context.organizationId },
+    );
+    expect(pendingRaw).toHaveLength(3);
+    const transaction = vi.spyOn(database, "transaction");
+    await expect(projector.projectPending(context, 1_000)).resolves.toBe(0);
+    expect(transaction).not.toHaveBeenCalled();
+    transaction.mockRestore();
+  });
+
+  it("raw model outbox page 경계를 넘어 durable runtime event를 투영한다", async () => {
+    const rawEvents = Array.from({ length: 101 }, (_, offset) => ({
+      event_id: `projector-page-raw-${String(offset).padStart(4, "0")}`,
+      organization_id: context.organizationId,
+      execution_id: "projector-page-execution",
+      command_id: `projector-page-command-${String(offset).padStart(4, "0")}`,
+      sequence: offset + 1,
+      event_type: "model_text_delta",
+      request_json: "{}",
+      payload_json: '{"text":"private"}',
+      result_json: "{}",
+      created_at: new Date("2000-01-01T00:00:00.000Z"),
+    }));
+    await database.query("FOR $event IN $events { CREATE runtime_event CONTENT $event RETURN NONE; };", {
+      events: rawEvents,
+    });
+    await database.query("CREATE runtime_event CONTENT $event RETURN NONE;", {
+      event: {
+        event_id: "projector-page-durable",
+        organization_id: context.organizationId,
+        execution_id: "projector-page-execution",
+        command_id: "projector-page-durable-command",
+        sequence: 102,
+        event_type: "model.route.selected",
+        request_json: "{}",
+        payload_json: "{}",
+        result_json: "{}",
+        created_at: new Date("2000-01-01T00:00:01.000Z"),
+      },
+    });
+    await database.query("CREATE runtime_event CONTENT $event RETURN NONE;", {
+      event: {
+        event_id: "projector-page-durable-next",
+        organization_id: context.organizationId,
+        execution_id: "projector-page-execution",
+        command_id: "projector-page-durable-next-command",
+        sequence: 103,
+        event_type: "execution_succeeded",
+        request_json: "{}",
+        payload_json: "{}",
+        result_json: "{}",
+        created_at: new Date("2000-01-01T00:00:02.000Z"),
+      },
+    });
+    await database.query(
+      "UPDATE application_outbox SET occurred_at = d'2000-01-01T00:00:00Z' WHERE organization_id = $organization_id AND source_kind = 'runtime-event' AND source_id IN $source_ids;",
+      { organization_id: context.organizationId, source_ids: rawEvents.map((event) => event.event_id) },
+    );
+    const [ordered] = await database.query<[{ readonly source_id: string }[]]>(
+      "SELECT source_id, occurred_at, outbox_id FROM application_outbox WHERE organization_id = $organization_id AND state = 'pending' ORDER BY occurred_at ASC, outbox_id ASC;",
+      { organization_id: context.organizationId },
+    );
+    expect(ordered.slice(0, 100).map((outbox) => outbox.source_id)).toEqual(
+      rawEvents.slice(0, 100).map((event) => event.event_id),
+    );
+    const [page] = await database.query<[{ readonly source_id: string }[]]>(
+      "SELECT source_id, occurred_at, outbox_id FROM application_outbox WHERE organization_id = $organization_id AND state = 'pending' ORDER BY occurred_at ASC, outbox_id ASC LIMIT $limit;",
+      { organization_id: context.organizationId, limit: 100 },
+    );
+    expect(page.map((outbox) => outbox.source_id)).toEqual(rawEvents.slice(0, 100).map((event) => event.event_id));
+    const [types] = await database.query<[{ readonly event_id: string; readonly event_type: string }[]]>(
+      "SELECT event_id, event_type FROM runtime_event WITH INDEX runtime_event_id WHERE event_id IN $event_ids;",
+      { event_ids: rawEvents.slice(0, 100).map((event) => event.event_id) },
+    );
+    expect(types).toHaveLength(100);
+    expect(types.every((event) => event.event_type === "model_text_delta")).toBe(true);
+
+    const transaction = vi.spyOn(database, "transaction");
+    await expect(projector.projectPendingSlice(context, 1_000)).resolves.toEqual({ projected: 0, more: true });
+    await expect(projector.projectPendingSlice(context, 1_000)).resolves.toEqual({ projected: 2, more: false });
+    expect(transaction).toHaveBeenCalledTimes(2);
+    transaction.mockRestore();
+    expect((await events.read(context, { after: 0, limit: 10 })).events).toEqual([
+      expect.objectContaining({
+        type: "runtime.model-route-selected",
+        resource: { type: "Execution", id: "projector-page-execution", revision: 102 },
+      }),
+      expect.objectContaining({
+        type: "runtime.execution-succeeded",
+        resource: { type: "Execution", id: "projector-page-execution", revision: 103 },
+      }),
+    ]);
+    expect(await pendingRawOutboxCount()).toBe(101);
   });
 
   it("event create 뒤 오류는 outbox와 sequence까지 rollback하고 다음 실행이 같은 source를 복구한다", async () => {
