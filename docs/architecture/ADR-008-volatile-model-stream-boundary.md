@@ -65,14 +65,14 @@ Artifact가 아니므로 복원하지 않습니다. 정상 성공의 확정 text
 중단된 concurrent index build가 partial index를 남길 수 있으므로, 이 릴리스에서는 pending outbox 시간순 index를
 추가하지 않습니다. 해당 index는 SurrealDB를 안전한 patch로 올린 뒤 별도 runtime 검증과 함께 도입합니다.
 
-HTTP listener가 열린 뒤 `RuntimeStreamRetirementService`가 `runtime_event_id` 고유 인덱스 순서의 최대 100개
+HTTP listener가 열린 뒤 `RuntimeStreamRetirementService`가 `runtime_event_id` 고유 인덱스 순서의 최대 25개
 record를 먼저 읽고, 그 page 안에서 non-empty `model_` Runtime Event만 판별합니다. cursor는 마지막으로
 **검사한** record까지 전진합니다. 같은 transaction에서 해당 raw batch의 pending outbox만
 `application_outbox_source` 고유 인덱스로 찾습니다. 이미 tombstone된 pending raw outbox의 repair도 조직별
-source page를 최대 100개씩 읽은 뒤 local state filtering으로 판별합니다. 공개 event가 있는 pending outbox는
+source page를 최대 25개씩 읽은 뒤 local state filtering으로 판별합니다. 공개 event가 있는 pending outbox는
 그 event ID로 `projected` 상태를 정합화하고, 공개 event가 없는 pending raw outbox만 삭제한 뒤
 `request_json`·`payload_json`·`result_json`을 정확히 `{}`로 바꿉니다. 이미 `projected`인 과거 outbox에는
-row별 reconciliation을 반복하지 않습니다. batch cursor는 commit 뒤에만 전진하고, 다음 batch 전에는 1초
+row별 reconciliation을 반복하지 않습니다. batch cursor는 commit 뒤에만 전진하고, 다음 batch 전에는 2초
 yield합니다. 따라서 대량 이력이 daemon readiness를 막지 않고, 종료·재시작·일시 오류 뒤에도 이미 처리된 행을
 다시 변경하지 않고 이어서 처리합니다. raw·repair cursor는 같은 transaction의 checkpoint에 함께 기록합니다.
 모든 pending raw outbox를 정리하면 완료 checkpoint를 기록하므로 이후 launch는 historical scan을 다시 시작하지

@@ -1,7 +1,7 @@
 import type { MassionDatabase, QueryExecutor } from "@massion/storage";
 
-const DEFAULT_BATCH_SIZE = 100;
-const DEFAULT_PAUSE_MS = 1_000;
+const DEFAULT_BATCH_SIZE = 25;
+const DEFAULT_PAUSE_MS = 2_000;
 const MAX_BATCH_SIZE = 1_000;
 const MAX_PAUSE_MS = 60_000;
 const MINIMUM_FAILURE_PAUSE_MS = 1_000;

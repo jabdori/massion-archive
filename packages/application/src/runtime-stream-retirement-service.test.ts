@@ -385,6 +385,50 @@ describe("RuntimeStreamRetirementService", () => {
     await service.close();
   });
 
+  it("기본 worker는 25개 page 뒤 2초를 쉬어 legacy write 부하를 제한한다", async () => {
+    vi.useFakeTimers();
+    const query = vi.fn(async (statement: string, _bindings?: Record<string, unknown>) => {
+      void _bindings;
+      if (statement.includes("ORDER BY event_id ASC"))
+        return [
+          [
+            {
+              organization_id: "organization-1",
+              event_id: "event-1",
+              event_type: "model_text_delta",
+              request_json: '{"secret":"request"}',
+              payload_json: '{"secret":"payload"}',
+              result_json: '{"secret":"result"}',
+            },
+          ],
+        ];
+      return [[]];
+    });
+    const transaction = vi
+      .fn<MassionDatabase["transaction"]>()
+      .mockImplementation(async (operation) => await operation({ query } as never));
+    const service = new RuntimeStreamRetirementService({
+      query: vi.fn().mockResolvedValue([[]]),
+      transaction,
+    } as unknown as MassionDatabase);
+
+    try {
+      service.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(transaction).toHaveBeenCalledOnce();
+      const rawPage = query.mock.calls.find(([statement]) => statement.includes("ORDER BY event_id ASC"));
+      expect(rawPage?.[1]).toMatchObject({ cursor: "", limit: 25 });
+
+      await vi.advanceTimersByTimeAsync(1_999);
+      expect(transaction).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(transaction).toHaveBeenCalledTimes(2);
+    } finally {
+      await service.close();
+      vi.useRealTimers();
+    }
+  });
+
   it("실패는 bounded backoff 뒤 retry하고 close 뒤에는 늦은 batch를 만들지 않는다", async () => {
     vi.useFakeTimers();
     let release!: () => void;
