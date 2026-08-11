@@ -106,16 +106,11 @@ export async function discoverModels(request: DiscoveryRequest, fetcher?: typeof
 
 function parseOllama(body: unknown): DiscoveryResult {
   if (!isRecord(body) || !Array.isArray(body.models)) throw new Error("invalid Ollama response");
-  return normalizeRows(
-    body.models,
-    (value) => {
-      if (!isRecord(value)) return undefined;
-      const id =
-        typeof value.model === "string" ? value.model : typeof value.name === "string" ? value.name : undefined;
-      return id ? { id: validateModelId(id), ownedBy: "local" } : undefined;
-    },
-    "Ollama",
-  );
+  return normalizeRows(body.models, (value) => {
+    if (!isRecord(value)) return undefined;
+    const id = typeof value.model === "string" ? value.model : typeof value.name === "string" ? value.name : undefined;
+    return id ? { id: validateModelId(id), ownedBy: "local" } : undefined;
+  });
 }
 
 function parseOpenAi(body: unknown): DiscoveryResult {
@@ -133,7 +128,7 @@ function parseOpenAi(body: unknown): DiscoveryResult {
   ) {
     return degraded("invalid-total-count");
   }
-  return normalizeRows(body.data, parseOpenAiModel, "OpenAI");
+  return normalizeRows(body.data, parseOpenAiModel);
 }
 
 function parseOpenAiModel(value: unknown): DiscoveredModel | undefined {
@@ -180,7 +175,6 @@ function parseOpenAiModel(value: unknown): DiscoveredModel | undefined {
 function normalizeRows(
   rows: readonly unknown[],
   parse: (value: unknown) => DiscoveredModel | undefined,
-  _source: string,
 ): DiscoveryResult {
   if (rows.length > MAX_MODELS) return degraded("model-count-exceeded");
   const models = new Map<string, DiscoveredModel>();
@@ -307,7 +301,8 @@ function optionalDisplayName(value: unknown): string | undefined {
 
 function stringArray(value: unknown): readonly string[] | undefined {
   if (value === undefined || value === null) return undefined;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error("invalid string array");
+  if (!Array.isArray(value) || !value.every((item): item is string => typeof item === "string"))
+    throw new Error("invalid string array");
   return value;
 }
 
@@ -387,6 +382,10 @@ async function cancelResponse(response: Response): Promise<void> {
   }
 }
 
+function throwIfProviderRequestAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new DOMException("Provider request aborted", "AbortError");
+}
+
 export function createSecureProviderFetch(local: boolean): typeof fetch {
   if (typeof local !== "boolean") throw new Error("invalid endpoint locality");
   return async (input, init) => await secureProviderFetch(input, init, local);
@@ -400,7 +399,7 @@ async function secureProviderFetch(
   const providerRequest = new Request(input, init);
   const url = validateProviderRequestUrl(providerRequest.url, local);
   const signal = providerRequest.signal;
-  if (signal.aborted) throw new DOMException("Provider request aborted", "AbortError");
+  throwIfProviderRequestAborted(signal);
   const hostname = normalizedHostname(url.hostname);
   const addresses = isIP(hostname)
     ? [{ address: hostname, family: isIP(hostname) as 4 | 6 }]
@@ -412,7 +411,6 @@ async function secureProviderFetch(
     addresses.length === 0 ||
     addresses.some(
       (address) =>
-        !address.family ||
         isIP(address.address) !== address.family ||
         (local ? !isLoopbackIp(address.address) : isBlockedIp(address.address)),
     )
@@ -420,7 +418,7 @@ async function secureProviderFetch(
     throw new Error("Provider endpoint address is not allowed");
   }
   const body = providerRequest.body ? Buffer.from(await abortable(providerRequest.arrayBuffer(), signal)) : undefined;
-  if (signal.aborted) throw new DOMException("Provider request aborted", "AbortError");
+  throwIfProviderRequestAborted(signal);
   const headers = Object.fromEntries(providerRequest.headers.entries());
   let lastError: unknown;
   const mayRetryAddress = ["GET", "HEAD", "OPTIONS"].includes(providerRequest.method);
@@ -428,7 +426,7 @@ async function secureProviderFetch(
     try {
       return await requestPinnedAddress(url, providerRequest.method, headers, body, hostname, address, signal);
     } catch (error) {
-      if (signal.aborted) throw new DOMException("Provider request aborted", "AbortError");
+      throwIfProviderRequestAborted(signal);
       lastError = error;
       if (!mayRetryAddress) break;
     }
@@ -437,11 +435,15 @@ async function secureProviderFetch(
 }
 
 async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) throw new DOMException("Provider request aborted", "AbortError");
+  throwIfProviderRequestAborted(signal);
   return await new Promise<T>((resolve, reject) => {
-    const aborted = () => reject(new DOMException("Provider request aborted", "AbortError"));
+    const aborted = () => {
+      reject(new DOMException("Provider request aborted", "AbortError"));
+    };
     signal.addEventListener("abort", aborted, { once: true });
-    void operation.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+    void operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", aborted);
+    });
   });
 }
 
@@ -485,7 +487,7 @@ async function requestPinnedAddress(
           );
         } catch (error) {
           incoming.destroy();
-          reject(error);
+          reject(error instanceof Error ? error : new Error("Provider response failed", { cause: error }));
         }
       },
     );

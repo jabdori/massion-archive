@@ -208,7 +208,7 @@ describe("스타일 의미 토큰", () => {
       ["nextNotice", /setNotice\(nextNotice\)/u],
       ["warning", /translate\(warning\)/u],
       ["empty", /translate\(empty\)/u],
-      ["labels", /labels\.map\(translate\)/u],
+      ["details", /details\.map\(translate\)/u],
     ] as const) {
       expect(surface).toMatch(sink);
       const assignments = new RegExp(String.raw`(?:\b(?:const|let)\s+${name}\s*=|\b${name}\s*=)[\s\S]*?;`, "gu");

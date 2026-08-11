@@ -5653,9 +5653,7 @@ export function projectProviderConnections(
         const modelEndpoint = providerEndpoints.find((endpoint) => str(endpoint, "endpointId") === endpointId);
         if (!modelEndpoint) continue;
         const optionalNumber = (key: string): number | undefined =>
-          typeof item[key] === "number" && Number.isSafeInteger(item[key]) && Number(item[key]) >= 0
-            ? Number(item[key])
-            : undefined;
+          typeof item[key] === "number" && Number.isSafeInteger(item[key]) && item[key] >= 0 ? item[key] : undefined;
         projectedModels.set(`${endpointId}\0${modelId}`, {
           ...(typeof item.catalogEntryId === "string" ? { catalogEntryId: item.catalogEntryId } : {}),
           endpointId,

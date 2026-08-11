@@ -621,7 +621,7 @@ export class ProviderService {
       url = validateDiscoveryBaseUrl(input.baseUrl, input.local);
     } catch (error) {
       const detail = error instanceof Error && error.message.includes("loopback") ? " loopback" : "";
-      throw new Error(`Provider endpoint URL이 유효하지 않습니다.${detail}`);
+      throw new Error(`Provider endpoint URL이 유효하지 않습니다.${detail}`, { cause: error });
     }
     if (input.gatewayKind && !GATEWAY_KINDS.has(input.gatewayKind)) throw new Error("지원하지 않는 Gateway입니다");
     return await this.command(
@@ -1161,14 +1161,14 @@ export class ProviderService {
       ),
     ]);
     const projected = models[0].map((row) => {
-      const parsed = JSON.parse(row.metadata_json) as unknown;
+      const { metadata_json: metadataJson, ...entry } = row;
+      const parsed = JSON.parse(metadataJson) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
         throw new Error("Provider 모델 카탈로그 metadata 형식이 유효하지 않습니다");
       const metadata = parsed as DiscoveredModel;
       const digest = createHash("sha256").update(canonicalJson(metadata)).digest("hex");
       if (metadata.id !== row.model_id || digest !== row.metadata_digest)
         throw new Error("Provider 모델 카탈로그 metadata 계보가 유효하지 않습니다");
-      const { metadata_json: _metadataJson, ...entry } = row;
       return { ...entry, metadata };
     });
     return {
