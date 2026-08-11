@@ -7077,6 +7077,8 @@ function blockedReasonText(reason: string | undefined): string {
       return "업무에 연결된 근거를 검증하지 못했습니다.";
     case "workspace-untrusted":
       return "이 폴더를 아직 신뢰하지 않았습니다.";
+    case "assurance-blocked":
+      return "검증 모델의 시도가 완료되지 않아 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.";
     case "assurance-verifier-rejected":
       return "산출물의 모순을 보완한 새 Work가 필요합니다.";
     default:
@@ -7106,6 +7108,7 @@ function RunStatusCard({
 
   if (blocked) {
     const assuranceRejected = run.blockedReason === "assurance-verifier-rejected";
+    const assuranceSafetyBlocked = run.blockedReason === "assurance-blocked";
     return (
       <div
         aria-label={translate("실행 상태")}
@@ -7117,7 +7120,9 @@ function RunStatusCard({
           <div className="min-w-0 flex-1">
             <p className="flex items-baseline gap-1.5 text-[13px] text-halt">
               <span className="shrink-0 font-medium text-halt">
-                {translate(assuranceRejected ? "검증에서 보완 필요" : "차단됨")}
+                {translate(
+                  assuranceRejected ? "검증에서 보완 필요" : assuranceSafetyBlocked ? "검증 안전 차단" : "차단됨",
+                )}
               </span>
               <span>{translate(blockedReasonText(run.blockedReason))}</span>
             </p>

@@ -6246,6 +6246,8 @@ function inboxBlockedReason(reason: unknown, detail: unknown): string {
       return "업무에 연결된 근거를 검증하지 못했습니다.";
     case "workspace-untrusted":
       return "이 폴더를 아직 신뢰하지 않았습니다.";
+    case "assurance-blocked":
+      return "검증 모델의 시도가 완료되지 않아 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.";
     case "assurance-verifier-rejected":
       return "산출물의 모순을 보완한 새 Work가 필요합니다.";
     default:

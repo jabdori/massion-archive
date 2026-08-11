@@ -1009,6 +1009,30 @@ describe("Application desktop service", () => {
     expect(native.query).not.toHaveBeenCalledWith("growth.suggestions", expect.anything());
   });
 
+  it("Assurance 안전 차단을 Inbox에서 일반 실행 오류로 뭉개지 않는다", async () => {
+    const native = transport({
+      "inbox.list": [
+        {
+          kind: "blocked",
+          id: "blocked:run-assurance-blocked",
+          runId: "run-assurance-blocked",
+          workId: detail.workId,
+          title: "검증 재시도 업무",
+          blockedReason: "assurance-blocked",
+        },
+      ],
+    });
+    const service = createApplicationDesktopService(native, { createId: () => "request-0001" });
+
+    await expect(
+      (service as DesktopService & { loadInbox(): Promise<readonly { readonly reason?: string }[]> }).loadInbox(),
+    ).resolves.toMatchObject([
+      {
+        reason: "검증 모델의 시도가 완료되지 않아 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.",
+      },
+    ]);
+  });
+
   it("개선 정책 변경은 조직 대상과 현재 version을 command에 전달한다", async () => {
     const native = transport();
     const service = createApplicationDesktopService(native, { createId: () => "request-0001" });

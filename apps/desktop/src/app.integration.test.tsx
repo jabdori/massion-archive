@@ -3306,6 +3306,46 @@ describe("AgentOS native data flow", () => {
     expect(resumeRun).not.toHaveBeenCalled();
   });
 
+  it("Assurance 안전 차단은 검증 모델 시도 실패와 재시도 가능성을 구별해 보인다", async () => {
+    const user = userEvent.setup();
+    const base = fixtureDataAdapter().works[0] as WorkView;
+    const blocked: WorkView = {
+      ...base,
+      approvals: [],
+      id: "work-assurance-blocked",
+      title: "검증 재시도 업무",
+      run: {
+        runId: "run-assurance-blocked",
+        status: "blocked",
+        stage: "assurance",
+        leaseGeneration: 4,
+        blockedReason: "assurance-blocked",
+      },
+    };
+    const resumeRun = vi.fn(async () => undefined);
+    render(
+      <App
+        service={service({
+          initialSnapshot: { works: [blocked] },
+          loadIndex: async () => [blocked],
+          loadWork: async () => blocked,
+          resumeRun,
+        })}
+      />,
+    );
+
+    const main = await screen.findByRole("main", { name: blocked.title });
+    const status = within(main).getByRole("status", { name: "실행 상태" });
+    expect(within(status).getByText("검증 안전 차단")).toBeInTheDocument();
+    expect(status).toHaveTextContent(
+      "검증 모델의 시도가 완료되지 않아 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.",
+    );
+    expect(status).toHaveTextContent("검증");
+    expect(status).not.toHaveTextContent(/assurance-blocked|실행 단계에서 오류가 발생했습니다./u);
+    await user.click(within(status).getByRole("button", { name: "다시 시도" }));
+    expect(resumeRun).toHaveBeenCalledWith(blocked);
+  });
+
   it("승인 대기 실행은 Home·Inbox·Work에서 gate 상태로 일치한다", async () => {
     const user = userEvent.setup();
     const base = fixtureDataAdapter().works[0] as WorkView;
