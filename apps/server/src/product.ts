@@ -126,6 +126,7 @@ import {
   VoltAgentRunner,
   type AgentExecutionInput,
   type ExecutionDeltaObserver,
+  type ProviderModelBuilder,
   type StructuredOutputSpec,
 } from "@massion/runtime";
 import {
@@ -156,6 +157,7 @@ import {
   SubscriptionPolicyStore,
   SubscriptionQuotaService,
   type ConnectorTransportDirectory,
+  type QuotaWindow,
 } from "@massion/subscriptions";
 import { WorkService } from "@massion/work";
 import { WorkspaceService } from "@massion/workspace";
@@ -275,6 +277,10 @@ export interface MassionDaemonAssemblyOptions {
   readonly bootstrapAuthorization?: ApplicationBootstrapAuthorization;
   /** 검증된 in-process Connector transport를 사용하는 조립 테스트 포트입니다. */
   readonly connectorTransport?: ConnectorTransportDirectory;
+  /** 테스트에서 fixture fetch를 쓰기 위한 Model builder 조립 포트입니다. */
+  readonly modelBuilder?: ProviderModelBuilder;
+  /** 테스트에서 외부 호출 없이 MiniMax 할당량 관측을 조립합니다. */
+  readonly fetchMiniMaxQuota?: (secret: string) => Promise<readonly QuotaWindow[]>;
 }
 
 export function modelPreferenceFromActiveBatch(
@@ -572,6 +578,7 @@ export async function createMassionDaemon(
       {
         intervalMs: 120_000,
         maximumConcurrency: 4,
+        ...(options.fetchMiniMaxQuota === undefined ? {} : { fetchMiniMaxQuota: options.fetchMiniMaxQuota }),
         fetchCodexQuota: async (input) => await codexSubscriptionObserver.readQuota(input),
         onTransition: (transition) => {
           if (transition.attempted > 0) operations.write("subscription.quota.synchronized", { ...transition });
@@ -652,7 +659,7 @@ export async function createMassionDaemon(
     const modelFactory = new MassionModelFactory(
       router,
       providers,
-      new OpenAICompatibleModelBuilder(),
+      options.modelBuilder ?? new OpenAICompatibleModelBuilder(),
       {
         broker: connectorBroker,
         resolver: subscriptionRuntimeResolver,

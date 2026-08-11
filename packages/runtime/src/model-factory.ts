@@ -291,10 +291,12 @@ function explicitlyNoSideEffects(value: unknown): value is false {
 }
 
 export class OpenAICompatibleModelBuilder implements ProviderModelBuilder {
+  public constructor(private readonly fetchFactory: typeof createSecureProviderFetch = createSecureProviderFetch) {}
+
   public build(selection: ProviderModelSelection): LanguageModel {
     validateDiscoveryBaseUrl(selection.endpoint.base_url, selection.endpoint.local);
     const root = selection.endpoint.base_url.replace(/\/$/u, "");
-    const fetch = createSecureProviderFetch(selection.endpoint.local);
+    const fetch = this.fetchFactory(selection.endpoint.local);
     if (selection.endpoint.subscription_protocol === "anthropic") {
       const provider = createAnthropic({
         authToken: selection.secret,

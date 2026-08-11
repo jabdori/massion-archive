@@ -18,6 +18,7 @@ import { IdentityService, OrganizationService } from "@massion/identity";
 import { OrganizationGraphService } from "@massion/organization";
 import {
   normalizeCodexExecutionEvidence,
+  OpenAICompatibleModelBuilder,
   RuntimeExecutionStore,
   type SubscriptionAgentAdapter,
 } from "@massion/runtime";
@@ -320,10 +321,12 @@ describe("Massion server product", () => {
     );
     const address = await daemon.start();
     try {
-      const ready = await fetch(`${address.url}/health/ready`);
-      expect(ready.status).toBe(200);
-      await expect(ready.json()).resolves.toMatchObject({
-        components: { "runtime-recovery": "ready" },
+      await vi.waitFor(async () => {
+        const ready = await fetch(`${address.url}/health/ready`);
+        expect(ready.status).toBe(200);
+        await expect(ready.json()).resolves.toMatchObject({
+          components: { "runtime-recovery": "ready" },
+        });
       });
       const [recovered] = await seedDatabase.query<[{ status: string }[]]>(
         "SELECT status FROM runtime_execution WHERE execution_id = $execution_id LIMIT 1;",
@@ -935,18 +938,20 @@ describe("Massion server product", () => {
     expect((await stat(join(workspaceRoot, "connectors"))).mode & 0o777).toBe(0o700);
     const address = await daemon.start();
     try {
-      const ready = await fetch(`${address.url}/health/ready`);
-      expect(ready.status).toBe(200);
-      await expect(ready.json()).resolves.toMatchObject({
-        status: "ready",
-        components: {
-          database: "ready",
-          migrations: "ready",
-          connectors: "ready",
-          "server-connectors": "ready",
-          "subscription-quota": "ready",
-          "runtime-recovery": "ready",
-        },
+      await vi.waitFor(async () => {
+        const ready = await fetch(`${address.url}/health/ready`);
+        expect(ready.status).toBe(200);
+        await expect(ready.json()).resolves.toMatchObject({
+          status: "ready",
+          components: {
+            database: "ready",
+            migrations: "ready",
+            connectors: "ready",
+            "server-connectors": "ready",
+            "subscription-quota": "ready",
+            "runtime-recovery": "ready",
+          },
+        });
       });
       await expect(connectorUpgradeStatus(address.url)).resolves.toBe(101);
       const initialized = (await ApplicationHttpClient.bootstrap(address.url, {
@@ -2106,9 +2111,26 @@ describe("Massion server product", () => {
     const upstreamRequests: Array<{ readonly url: string; readonly authorization: string }> = [];
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
-      if (!url.startsWith("https://api.minimax.io/v1/")) return await realFetch(input, init);
+      if (url.startsWith("http://127.0.0.1:")) return await realFetch(input, init);
       const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
       upstreamRequests.push({ url, authorization: headers.get("authorization") ?? "" });
+      if (url === "https://www.minimax.io/v1/token_plan/remains") {
+        return Response.json({
+          base_resp: { status_code: 0, status_msg: "success" },
+          model_remains: [
+            {
+              model_name: "MiniMax-M2.7",
+              current_interval_total_count: 1_500,
+              current_interval_usage_count: 300,
+              current_weekly_total_count: 10_000,
+              current_weekly_usage_count: 2_500,
+              remains_time: 1_000,
+              weekly_remains_time: 2_000,
+            },
+          ],
+        });
+      }
+      if (!url.startsWith("https://api.minimax.io/v1/")) throw new Error("예상하지 않은 외부 요청입니다");
       if (url === "https://api.minimax.io/v1/models") {
         return Response.json({
           object: "list",
@@ -2140,12 +2162,27 @@ describe("Massion server product", () => {
       MASSION_SOFTWARE_WORKSPACE_ROOT: workspaceRoot,
       MASSION_CONNECTOR_ROOT: join(workspaceRoot, "connectors"),
     });
-    const daemon = await createMassionDaemon({
-      ...parsed,
-      server: { ...parsed.server, port: 0 },
-      metrics: { ...parsed.metrics, port: 0 },
-      registry: { ...parsed.registry, port: 0 },
-    });
+    const daemon = await createMassionDaemon(
+      {
+        ...parsed,
+        server: { ...parsed.server, port: 0 },
+        metrics: { ...parsed.metrics, port: 0 },
+        registry: { ...parsed.registry, port: 0 },
+      },
+      {
+        modelBuilder: new OpenAICompatibleModelBuilder(() => globalThis.fetch),
+        fetchMiniMaxQuota: async () => [
+          {
+            kind: "session-5h",
+            limit: 1_500,
+            remaining: 1_200,
+            observedAt: new Date().toISOString(),
+            source: "minimax-token-plan-endpoint",
+            confidence: "reported",
+          },
+        ],
+      },
+    );
     const address = await daemon.start();
     const secret = "minimax-product-secret-never-returned";
     try {
@@ -2635,7 +2672,8 @@ describe("Massion server product", () => {
     }> = [];
     vi.stubGlobal("fetch", async (input: string | URL | Request, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
-      if (!url.startsWith("https://api.z.ai/api/coding/paas/v4/")) return await realFetch(input, init);
+      if (url.startsWith("http://127.0.0.1:")) return await realFetch(input, init);
+      if (!url.startsWith("https://api.z.ai/api/coding/paas/v4/")) throw new Error("예상하지 않은 외부 요청입니다");
       const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
       const bodyText =
         input instanceof Request ? await input.clone().text() : typeof init?.body === "string" ? init.body : "{}";
@@ -2683,7 +2721,7 @@ describe("Massion server product", () => {
         metrics: { ...parsed.metrics, port: 0 },
         registry: { ...parsed.registry, port: 0 },
       },
-      { database },
+      { database, modelBuilder: new OpenAICompatibleModelBuilder(() => globalThis.fetch) },
     );
     const secret = "zai-product-secret-never-returned";
     const address = await daemon.start();
