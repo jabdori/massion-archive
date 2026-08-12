@@ -358,6 +358,104 @@ describe("구독 실행 Runtime–Broker 브리지", () => {
     );
   });
 
+  it("일반 모델 실패 뒤 Connector 후보로 fallback할 때 이전 Session Lease를 요구하지 않는다", async () => {
+    await providers.registerProvider(context, {
+      commandId: randomUUID(),
+      providerId: "normal-provider",
+      displayName: "Normal Provider",
+      adapterKind: "openai-compatible",
+    });
+    const endpoint = await providers.registerEndpoint(context, {
+      commandId: randomUUID(),
+      providerId: "normal-provider",
+      name: "Normal Endpoint",
+      baseUrl: "https://models.example/v1",
+      local: false,
+    });
+    await providers.addCredential(context, {
+      commandId: randomUUID(),
+      providerId: "normal-provider",
+      endpointId: endpoint.endpoint.endpoint_id,
+      label: "Normal Credential",
+      credentialType: "api_key",
+      secret: "normal-fallback-secret",
+      priority: 1,
+      weight: 1,
+    });
+    const normal = await router.registerModel(context, {
+      commandId: randomUUID(),
+      providerId: "normal-provider",
+      endpointId: endpoint.endpoint.endpoint_id,
+      modelId: "normal-model",
+      routeKind: "chat",
+      contextWindow: 32_000,
+      supportsTools: true,
+      supportsStructuredOutput: true,
+      supportsVision: false,
+      supportsStreaming: false,
+      equivalenceGroup: "subscription-agent",
+      evalScore: 0.9,
+      inputCostMicrosPerMillion: 0,
+      outputCostMicrosPerMillion: 0,
+      verified: true,
+    });
+    const route = (await router.listRoutes(context)).find((candidate) => candidate.name === routeName);
+    if (!route) throw new Error("Subscription Route가 필요합니다");
+    await router.addCandidate(context, {
+      commandId: randomUUID(),
+      routeId: route.route_id,
+      modelProfileId: normal.profile.model_profile_id,
+      priority: 0,
+    });
+    const { acquire, broker, resolver } = dependencies();
+    const factory = new MassionModelFactory(
+      router,
+      providers,
+      { build: () => ({ modelId: "normal-model" }) as LanguageModel },
+      { broker, resolver },
+    );
+
+    const first = await factory.acquire(context, acquireInput());
+    if (first.kind !== "model") throw new Error("일반 model lease가 필요합니다");
+    const failed = await first.fail({
+      commandId: randomUUID(),
+      signal: { kind: "timeout" },
+      emittedTokens: 0,
+      sideEffectsStarted: false,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+    const second = await factory.acquire(context, {
+      ...acquireInput(),
+      commandId: randomUUID(),
+      fallbackFromAttemptId: first.attemptId,
+    });
+    if (second.kind !== "agent-runtime") throw new Error("Connector Agent runtime lease가 필요합니다");
+
+    expect(failed.fallbackAllowed).toBe(true);
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(acquire.mock.calls[0]?.[1]).not.toHaveProperty("fallbackFromLeaseId");
+    await expect(router.readAttempt(context, second.attemptId)).resolves.toMatchObject({
+      fallback_from_attempt_id: first.attemptId,
+      status: "reserved",
+    });
+  });
+
+  it("이전 Session Lease만 있는 Connector fallback은 거부한다", async () => {
+    const { acquire, broker, resolver } = dependencies();
+    const factory = new MassionModelFactory(
+      router,
+      providers,
+      { build: () => ({ modelId: "unused" }) as LanguageModel },
+      { broker, resolver },
+    );
+
+    await expect(
+      factory.acquire(context, { ...acquireInput(), fallbackFromLeaseId: "lease-without-route-attempt" }),
+    ).rejects.toThrow("Route Attempt ID");
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
   it("Connector 성공을 Router attempt와 Session Lease에 모두 종결한다", async () => {
     const { broker, resolver, sessions } = dependencies();
     const factory = new MassionModelFactory(

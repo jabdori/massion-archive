@@ -560,8 +560,8 @@ export class MassionModelFactory implements RoutedModelFactory {
     let workId: string;
     let agentHandle: string;
     try {
-      if (Boolean(input.fallbackFromAttemptId) !== Boolean(input.fallbackFromLeaseId)) {
-        throw new Error("Connector fallback에는 Route Attempt ID와 Session Lease ID가 모두 필요합니다");
+      if (input.fallbackFromLeaseId && !input.fallbackFromAttemptId) {
+        throw new Error("Connector Session Lease fallback에는 Route Attempt ID가 필요합니다");
       }
       const candidateScope = material.scope;
       if (
