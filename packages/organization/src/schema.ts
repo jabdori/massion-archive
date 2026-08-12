@@ -58,3 +58,17 @@ DEFINE FIELD capabilities ON organization_node TYPE array<string> DEFAULT [];
 UPDATE organization_node SET capabilities = [] WHERE capabilities = NONE;
 `,
 );
+
+export const ORGANIZATION_CORE_OFFICE_CAPABILITY_BACKFILL_MIGRATION = defineMigration(
+  "0124-organization-core-office-capability-backfill",
+  `
+UPDATE organization_node SET capabilities = ["request-coordination"] WHERE builtin = true AND handle = "representative" RETURN NONE;
+UPDATE organization_node SET capabilities = ["context-strategy"] WHERE builtin = true AND handle = "context-strategy" RETURN NONE;
+UPDATE organization_node SET capabilities = ["evidence-research"] WHERE builtin = true AND handle = "evidence-research" RETURN NONE;
+UPDATE organization_node SET capabilities = ["governance"] WHERE builtin = true AND handle = "governance" RETURN NONE;
+UPDATE organization_node SET capabilities = ["delivery-coordination"] WHERE builtin = true AND handle = "delivery-coordination" RETURN NONE;
+UPDATE organization_node SET capabilities = ["assurance"] WHERE builtin = true AND handle = "assurance" RETURN NONE;
+UPDATE organization_node SET capabilities = ["records-documentation"] WHERE builtin = true AND handle = "records-documentation" RETURN NONE;
+UPDATE organization_node SET capabilities = ["growth"] WHERE builtin = true AND handle = "growth" RETURN NONE;
+`,
+);

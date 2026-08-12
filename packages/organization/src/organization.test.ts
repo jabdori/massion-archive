@@ -4,6 +4,7 @@ import { IdentityService, OrganizationService, type TenantContext } from "@massi
 import { createDatabase, type MassionDatabase } from "@massion/storage";
 
 import { CORE_OFFICE_HANDLES, OrganizationGraphService } from "./organization.js";
+import { ORGANIZATION_CORE_OFFICE_CAPABILITY_BACKFILL_MIGRATION } from "./schema.js";
 
 describe("Organization Graph와 Core Office", () => {
   let database: MassionDatabase;
@@ -37,6 +38,54 @@ describe("Organization Graph와 Core Office", () => {
     expect(first.version.version).toBe(1);
     expect(second.version.version).toBe(1);
     expect(await graph.listNodes(context)).toHaveLength(8);
+  });
+
+  it("기존 Core Office의 빈 역량을 새 migration으로만 복구한다", async () => {
+    await graph.bootstrap(context);
+    await graph.execute(context, {
+      commandId: crypto.randomUUID(),
+      expectedVersion: 1,
+      kind: "install-profile",
+      profileId: "legacy-specialist-profile",
+      profileVersion: "1.0.0",
+      nodes: [
+        {
+          handle: "legacy-specialist",
+          name: "Legacy Specialist",
+          responsibility: "사용자 정의 역량 보존",
+          outputs: ["Finding"],
+          capabilities: ["legacy-specialist"],
+          parentHandle: "delivery-coordination",
+          scope: "persistent",
+          role: "operator",
+        },
+      ],
+    });
+    await database.query(
+      "UPDATE organization_node SET capabilities = [] WHERE organization_id = $organization_id AND builtin = true;",
+      { organization_id: context.organizationId },
+    );
+    expect((await graph.auditCompliance(context)).filter((finding) => finding.code === "core-office")).toHaveLength(8);
+
+    await database.query("DELETE system_migration WHERE migration_id = $migration_id;", {
+      migration_id: ORGANIZATION_CORE_OFFICE_CAPABILITY_BACKFILL_MIGRATION.id,
+    });
+    const upgraded = await OrganizationGraphService.create(database, organizations);
+
+    expect(
+      Object.fromEntries((await upgraded.listNodes(context)).map((node) => [node.handle, node.capabilities])),
+    ).toMatchObject({
+      representative: ["request-coordination"],
+      "context-strategy": ["context-strategy"],
+      "evidence-research": ["evidence-research"],
+      governance: ["governance"],
+      "delivery-coordination": ["delivery-coordination"],
+      assurance: ["assurance"],
+      "records-documentation": ["records-documentation"],
+      growth: ["growth"],
+      "legacy-specialist": ["legacy-specialist"],
+    });
+    expect(await upgraded.auditCompliance(context)).toEqual([]);
   });
 
   it("Core Office는 비활성화하거나 이동할 수 없다", async () => {

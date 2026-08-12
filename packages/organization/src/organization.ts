@@ -3,7 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { type OrganizationService, type TenantContext } from "@massion/identity";
 import { applyMigrations, type MassionDatabase, type QueryExecutor } from "@massion/storage";
 
-import { ORGANIZATION_CAPABILITY_MIGRATION, ORGANIZATION_GRAPH_MIGRATION } from "./schema.js";
+import {
+  ORGANIZATION_CAPABILITY_MIGRATION,
+  ORGANIZATION_CORE_OFFICE_CAPABILITY_BACKFILL_MIGRATION,
+  ORGANIZATION_GRAPH_MIGRATION,
+} from "./schema.js";
 
 export const CORE_OFFICE_HANDLES = [
   "representative",
@@ -328,6 +332,16 @@ function normalizeSnapshot(nodes: readonly StoredOrganizationNode[]): Organizati
     .sort((left, right) => left.handle.localeCompare(right.handle));
 }
 
+function restoreSnapshot(nodes: readonly StoredOrganizationNode[]): OrganizationNode[] {
+  const capabilitiesByHandle = new Map<string, readonly string[]>(
+    CORE_OFFICE.map((node) => [node.handle, node.capabilities]),
+  );
+  return normalizeSnapshot(nodes).map((node) => {
+    const capabilities = node.builtin ? capabilitiesByHandle.get(node.handle) : undefined;
+    return capabilities ? { ...node, capabilities } : node;
+  });
+}
+
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -443,7 +457,11 @@ export class OrganizationGraphService {
     organizations: OrganizationService,
     governance?: OrganizationGovernanceGate,
   ) {
-    await applyMigrations(database, [ORGANIZATION_GRAPH_MIGRATION, ORGANIZATION_CAPABILITY_MIGRATION]);
+    await applyMigrations(database, [
+      ORGANIZATION_GRAPH_MIGRATION,
+      ORGANIZATION_CAPABILITY_MIGRATION,
+      ORGANIZATION_CORE_OFFICE_CAPABILITY_BACKFILL_MIGRATION,
+    ]);
     return new OrganizationGraphService(database, organizations, governance);
   }
 
@@ -929,7 +947,7 @@ export class OrganizationGraphService {
     const target = versions.find((version) => version.version_id === input.targetVersionId);
     if (!target) throw new Error("되돌릴 OrganizationVersion을 찾을 수 없습니다");
     const before = normalizeSnapshot(await listNodes(executor, context.organizationId));
-    const after = normalizeSnapshot(JSON.parse(target.after_json) as StoredOrganizationNode[]);
+    const after = restoreSnapshot(JSON.parse(target.after_json) as StoredOrganizationNode[]);
     validateGraph(after);
     validateOperationalGraph(after);
     const impact = await this.analyzeImpactWith(executor, context.organizationId, changedHandles(before, after), after);
@@ -1143,7 +1161,7 @@ export class OrganizationGraphService {
   private snapshotForRevert(versions: OrganizationVersion[], targetVersion: number): OrganizationNode[] {
     const target = versions.find((version) => version.version === targetVersion);
     if (!target) throw new Error(`되돌릴 OrganizationVersion을 찾을 수 없습니다: ${String(targetVersion)}`);
-    return normalizeSnapshot(JSON.parse(target.after_json) as StoredOrganizationNode[]);
+    return restoreSnapshot(JSON.parse(target.after_json) as StoredOrganizationNode[]);
   }
 
   private async analyzeImpactWith(

@@ -153,6 +153,29 @@ describe("버전 기반 조직 명령", () => {
     expect(reverted.impact.nodeHandles).toContain("engineering");
   });
 
+  it("기존 빈 Core Office snapshot으로 revert해도 정본 역량을 유지한다", async () => {
+    const [versions] = await database.query<[{ readonly after_json: string }[]]>(
+      "SELECT after_json FROM organization_version WHERE organization_id = $organization_id AND version = 1;",
+      { organization_id: context.organizationId },
+    );
+    const legacy = JSON.parse(versions[0]?.after_json ?? "[]") as Array<{ builtin?: boolean; capabilities?: string[] }>;
+    await database.query(
+      "UPDATE organization_version SET after_json = $after_json WHERE organization_id = $organization_id AND version = 1;",
+      {
+        organization_id: context.organizationId,
+        after_json: JSON.stringify(legacy.map((node) => (node.builtin ? { ...node, capabilities: [] } : node))),
+      },
+    );
+
+    await create("engineering");
+    const reverted = await execute({ kind: "revert", targetVersion: 1 });
+
+    expect(reverted.nodes.find((node) => node.handle === "evidence-research")?.capabilities).toEqual([
+      "evidence-research",
+    ]);
+    expect(await graph.auditCompliance(context)).toEqual([]);
+  });
+
   it("영향 분석에 모든 하위 노드와 등록된 참조를 포함한다", async () => {
     await create("engineering");
     await create("backend", "engineering");
