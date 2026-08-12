@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -23,6 +24,7 @@ const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_LOGIN_POLL: Duration = Duration::from_millis(200);
 const BRIDGE_EVENT: &str = "massion://bridge-event";
 const MAIN_WEBVIEW_LABEL: &str = "main";
+const INSTANCE_LOCK_FILE: &str = "instance.lock";
 const BUNDLED_FRONTEND_URL: &str = concat!(
     "tauri://localhost?asset-revision=",
     env!("MASSION_FRONTEND_REVISION")
@@ -227,6 +229,37 @@ impl ResponseRouter {
 
 fn bridge_closed() -> PublicError {
     PublicError::new("bridge_unavailable", "데스크톱 브릿지에 연결할 수 없습니다")
+}
+
+fn acquire_instance_lock(directory: &Path) -> Result<File, PublicError> {
+    std::fs::create_dir_all(directory).map_err(|_| {
+        PublicError::new(
+            "desktop_instance_unavailable",
+            "데스크톱 실행 상태를 준비하지 못했습니다",
+        )
+    })?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(directory.join(INSTANCE_LOCK_FILE))
+        .map_err(|_| {
+            PublicError::new(
+                "desktop_instance_unavailable",
+                "데스크톱 실행 상태를 준비하지 못했습니다",
+            )
+        })?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(PublicError::new(
+            "desktop_already_running",
+            "Massion 데스크톱이 이미 실행 중입니다",
+        )),
+        Err(TryLockError::Error(_)) => Err(PublicError::new(
+            "desktop_instance_unavailable",
+            "데스크톱 실행 상태를 준비하지 못했습니다",
+        )),
+    }
 }
 
 #[derive(Clone)]
@@ -826,8 +859,14 @@ pub fn run() {
         )
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let instance_lock = acquire_instance_lock(
+                &app.path()
+                    .app_local_data_dir()
+                    .map_err(|_| bridge_closed())?,
+            )?;
             let paths = RuntimePaths::discover(app.handle())?;
             let bridge = Bridge::spawn(paths.clone(), app.handle().clone())?;
+            app.manage(Arc::new(instance_lock));
             app.manage(Arc::new(paths));
             app.manage(Arc::new(bridge));
             app.manage(Arc::new(CodexLoginProcess::default()));
@@ -908,6 +947,28 @@ mod tests {
         assert!(text.contains(r#""method":"connect""#));
         assert!(!text.to_ascii_lowercase().contains("capability"));
         assert!(!text.to_ascii_lowercase().contains("authorization"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn desktop_instance_lock_blocks_a_second_instance_until_the_first_exits() {
+        let root = std::env::temp_dir().join(format!(
+            "massion-instance-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = acquire_instance_lock(&root).expect("첫 번째 잠금");
+        let second = match acquire_instance_lock(&root) {
+            Ok(_) => panic!("두 번째 잠금은 차단해야 함"),
+            Err(error) => error,
+        };
+        assert_eq!(second.code, "desktop_already_running");
+        drop(first);
+        acquire_instance_lock(&root).expect("첫 번째 종료 뒤 잠금");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
