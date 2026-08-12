@@ -64,8 +64,9 @@ function required<Value>(value: Value | undefined, label: string): Value {
 }
 
 describe("StrategyPlan schema", () => {
-  it("자동 계획 JSON schema가 전문 역량을 현재 조직의 허용 목록으로 축약하지 않는다", () => {
+  it("자동 계획 JSON schema가 근거 조사와 전문 역량을 구분한다", () => {
     const schema = JSON.stringify(automaticStrategyPlanJsonSchema);
+    expect(schema).toContain("코드·설정·문서·제공된 근거 조사 Task에는 evidence-research를 사용");
     expect(schema).toContain("도메인·방법론 전문성");
     expect(schema).toContain("현재 Agent 보유 여부와 무관");
     expect(schema).toContain("critical이면 requiresApproval을 반드시 true");
