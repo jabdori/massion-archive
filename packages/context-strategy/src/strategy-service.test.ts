@@ -41,6 +41,8 @@ const PLAN: StrategyPlan = {
       requiredCapabilities: ["testing"],
       recommendedAgentHandles: [],
       parallelizable: false,
+      reasoningDifficulty: "medium",
+      taskAxis: "review-critique",
     },
   ],
   evidenceRequests: [],

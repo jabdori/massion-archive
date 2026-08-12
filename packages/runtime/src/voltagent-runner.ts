@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { Agent, type DynamicValue } from "@voltagent/core";
 import { jsonSchema, Output, type LanguageModel } from "ai";
@@ -768,6 +769,13 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
     const selection = await this.models.recoverReservedSelection?.(context, executionId);
     if (selection) {
       const snapshot = await this.store.getRecovery(context, executionId);
+      if (
+        selection.placementReceipt !== undefined &&
+        (snapshot.execution.work_id !== selection.placementReceipt.workId ||
+          snapshot.execution.task_id !== selection.placementReceipt.taskId)
+      ) {
+        throw new Error("reserved Route Attempt의 Task placement가 복구 실행과 일치하지 않습니다");
+      }
       const commandId = `${executionId}:model:${selection.attemptId}:selected`;
       const alreadyRecorded = snapshot.events.some((event) => event.command_id === commandId);
       await this.recordModelRouteSelected(context, executionId, snapshot.execution.model_route, selection);
@@ -1396,6 +1404,7 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
         modelProfileId: lease.modelProfileId,
         routeName,
         ...(lease.optimizationBatchId !== undefined ? { batchId: lease.optimizationBatchId } : {}),
+        ...(lease.placementReceipt === undefined ? {} : { placementReceipt: lease.placementReceipt }),
         preferenceApplied: lease.preferenceApplied ?? false,
       };
       const replay = (snapshot: {
@@ -1419,7 +1428,7 @@ export class VoltAgentRunner implements AgentRunner, StructuredAgentRunner {
           typeof stored !== "object" ||
           Array.isArray(stored) ||
           Object.keys(stored).length !== expectedEntries.length ||
-          expectedEntries.some(([key, value]) => (stored as Record<string, unknown>)[key] !== value)
+          expectedEntries.some(([key, value]) => !isDeepStrictEqual((stored as Record<string, unknown>)[key], value))
         ) {
           throw new Error("기존 Model Route 선택 사건 계보가 일치하지 않습니다");
         }

@@ -667,3 +667,13 @@ DEFINE FIELD output_locale ON work_request TYPE option<string>
   ASSERT $value = NONE OR $value IN ['en', 'ko'];
 `,
 );
+
+export const WORK_TASK_PLACEMENT_SIGNAL_MIGRATION = defineMigration(
+  "0125-work-task-placement-signal",
+  `
+DEFINE FIELD task_axis ON work_task TYPE option<string>
+  ASSERT $value = NONE OR $value IN ['code-generation', 'code-understanding', 'planning-design', 'review-critique', 'summary-records'];
+DEFINE FIELD reasoning_difficulty ON work_task TYPE option<string>
+  ASSERT $value = NONE OR $value IN ['low', 'medium', 'high'];
+`,
+);

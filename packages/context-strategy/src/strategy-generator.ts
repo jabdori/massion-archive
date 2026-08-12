@@ -150,11 +150,10 @@ export interface StrategyEvidenceMaterialResolver {
   ): Promise<StrategyEvidenceMaterial>;
 }
 
-function validatedPlan(
-  value: unknown,
+function validateAgentRecommendations(
+  plan: StrategyPlan,
   availableAgentCapabilities: ReadonlyMap<string, ReadonlySet<string>>,
 ): StrategyPlan {
-  const plan = validateAutomaticStrategyPlan(value);
   for (const task of plan.tasks) {
     for (const handle of task.recommendedAgentHandles) {
       const capabilities = availableAgentCapabilities.get(handle);
@@ -167,12 +166,19 @@ function validatedPlan(
   return plan;
 }
 
+function validatedAutomaticPlan(
+  value: unknown,
+  availableAgentCapabilities: ReadonlyMap<string, ReadonlySet<string>>,
+): StrategyPlan {
+  return validateAgentRecommendations(validateAutomaticStrategyPlan(value), availableAgentCapabilities);
+}
+
 function validateOutput(
   value: unknown,
   availableAgentCapabilities: ReadonlyMap<string, ReadonlySet<string>>,
 ): StructuredOutputValidationResult {
   try {
-    return { success: true, value: validatedPlan(value, availableAgentCapabilities) };
+    return { success: true, value: validatedAutomaticPlan(value, availableAgentCapabilities) };
   } catch {
     return { success: false, error: new Error("StrategyPlan structured output 검증에 실패했습니다") };
   }
@@ -550,7 +556,7 @@ export class StrategyGenerator {
           input: {
             operation: "create_strategy_plan",
             planningContract:
-              "사용자의 자연어 목표와 제공된 맥락만으로 실제 deliverable을 만드는 최소 실행 Task와 검증 가능한 acceptance criteria를 계획하세요. 사용자가 제공한 요청 자체에만 답하는 인사·접수 확인 같은 단순 대화 응답 Task에는 requiredCapabilities와 recommendedAgentHandles를 모두 빈 배열로 두세요. 코드·설정·문서·제공된 근거를 조사해 사실을 확인하는 Task는 Evidence & Research의 정본 책임입니다. availableAgents에 evidence-research가 있고 그 역량을 보유하면 requiredCapabilities와 recommendedAgentHandles에 각각 evidence-research만 사용하세요. availableAgents는 그 밖의 Task에 추천 후보를 고르기 위한 비완전 목록이며 requiredCapabilities의 허용 목록이 아닙니다. Evidence & Research 책임만으로 해결할 수 없는 불가결한 도메인·방법론 전문성은 구체적인 requiredCapabilities로 정의하고 현재 Agent에 없어도 그대로 유지하세요. 모든 필수 역량을 실제로 보유한 availableAgents만 recommendedAgentHandles에 넣고, 없으면 빈 배열로 두어 AgentOS의 동적 배치가 보완하게 하세요. intake, planning, assurance, records 같은 AgentOS 내장 단계를 Work Task로 복제하지 마세요. 별도 근거 조사가 필요하면 evidenceRequests를 만들지 말고 실행 가능한 research Task로 계획하세요. likelihood 또는 impact가 critical인 risk는 mitigation을 비우지 말고 requiresApproval을 true로 설정하세요. 사용자에게 내부 key나 schema 필드를 지정하도록 요구하지 마세요.",
+              "사용자의 자연어 목표와 제공된 맥락만으로 실제 deliverable을 만드는 최소 실행 Task와 검증 가능한 acceptance criteria를 계획하세요. 각 Task에는 risk와 독립된 reasoningDifficulty(low, medium, high)와 taskAxis(code-generation, code-understanding, planning-design, review-critique, summary-records) 중 정확히 하나를 반드시 기록하세요. 사용자가 제공한 요청 자체에만 답하는 인사·접수 확인 같은 단순 대화 응답 Task에는 requiredCapabilities와 recommendedAgentHandles를 모두 빈 배열로 두세요. 코드·설정·문서·제공된 근거를 조사해 사실을 확인하는 Task는 Evidence & Research의 정본 책임입니다. availableAgents에 evidence-research가 있고 그 역량을 보유하면 requiredCapabilities와 recommendedAgentHandles에 각각 evidence-research만 사용하세요. availableAgents는 그 밖의 Task에 추천 후보를 고르기 위한 비완전 목록이며 requiredCapabilities의 허용 목록이 아닙니다. Evidence & Research 책임만으로 해결할 수 없는 불가결한 도메인·방법론 전문성은 구체적인 requiredCapabilities로 정의하고 현재 Agent에 없어도 그대로 유지하세요. 모든 필수 역량을 실제로 보유한 availableAgents만 recommendedAgentHandles에 넣고, 없으면 빈 배열로 두어 AgentOS의 동적 배치가 보완하게 하세요. intake, planning, assurance, records 같은 AgentOS 내장 단계를 Work Task로 복제하지 마세요. 별도 근거 조사가 필요하면 evidenceRequests를 만들지 말고 실행 가능한 research Task로 계획하세요. likelihood 또는 impact가 critical인 risk는 mitigation을 비우지 말고 requiresApproval을 true로 설정하세요. 사용자에게 내부 key나 schema 필드를 지정하도록 요구하지 마세요.",
             contextVersionId: prepared.contextVersion.contextVersionId,
             objective: prepared.contextVersion.objective,
             scopeIn: prepared.contextVersion.scopeIn,
@@ -586,7 +592,7 @@ export class StrategyGenerator {
     let error: { readonly category: string; readonly causeId: string } | undefined;
     if (result.status === "succeeded") {
       try {
-        plan = validatedPlan(result.output, prepared.availableAgentCapabilities);
+        plan = validatedAutomaticPlan(result.output, prepared.availableAgentCapabilities);
         checksum = hashContextContent(plan);
         status = "generated";
       } catch {
@@ -669,7 +675,7 @@ export class StrategyGenerator {
         const availableAgents = await this.availableAgents(context, current.work_id, tx);
         signal?.throwIfAborted();
         try {
-          validatedPlan(
+          validatedAutomaticPlan(
             output.plan,
             new Map(availableAgents.map((agent) => [agent.handle, new Set(agent.capabilities)] as const)),
           );
@@ -858,7 +864,7 @@ export class StrategyGenerator {
         try {
           const availableAgents = await this.availableAgents(context, current.work_id, tx);
           signal?.throwIfAborted();
-          plan = validatedPlan(
+          plan = validatedAutomaticPlan(
             result.output,
             new Map(availableAgents.map((agent) => [agent.handle, new Set(agent.capabilities)] as const)),
           );

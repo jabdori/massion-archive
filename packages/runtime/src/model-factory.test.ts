@@ -381,12 +381,21 @@ describe("Massion routed model factory", () => {
         resolve: async () => ({
           profileIds: [preferred.profile.model_profile_id],
           batchId: "optimization-batch-1",
+          placementReceipt: {
+            workId: "work-placement-1",
+            taskId: "task-placement-1",
+            taskAxis: "code-understanding",
+            reasoningDifficulty: "high",
+            selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+          },
         }),
       },
     );
     const lease = await factory.acquire(context, {
       commandId: crypto.randomUUID(),
       executionId: "execution-lineage-1",
+      workId: "work-placement-1",
+      taskId: "task-placement-1",
       agentHandle: "assurance",
       routeName,
       estimatedTokens: 100,
@@ -397,6 +406,13 @@ describe("Massion routed model factory", () => {
       modelProfileId: preferred.profile.model_profile_id,
       optimizationBatchId: "optimization-batch-1",
       preferenceApplied: true,
+      placementReceipt: {
+        workId: "work-placement-1",
+        taskId: "task-placement-1",
+        taskAxis: "code-understanding",
+        reasoningDifficulty: "high",
+        selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+      },
     });
     const [attempts] = await database.query<[Array<{ execution_id?: string; optimization_batch_id?: string }>]>(
       "SELECT execution_id, optimization_batch_id FROM route_attempt WHERE organization_id = $organization_id AND attempt_id = $attempt_id LIMIT 1;",
@@ -438,12 +454,77 @@ describe("Massion routed model factory", () => {
         explanation_json: originalAttempt.explanation_json,
       },
     );
+    const mismatchedPlacement = JSON.parse(originalAttempt.explanation_json) as {
+      request: string;
+      explanation: unknown;
+    };
+    mismatchedPlacement.request = JSON.stringify({
+      ...(JSON.parse(mismatchedPlacement.request) as Record<string, unknown>),
+      placementReceipt: {
+        workId: "work-placement-1",
+        taskId: "other-task",
+        taskAxis: "code-understanding",
+        reasoningDifficulty: "high",
+        selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+      },
+    });
+    await database.query(
+      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
+      {
+        organization_id: context.organizationId,
+        attempt_id: lease.attemptId,
+        explanation_json: JSON.stringify(mismatchedPlacement),
+      },
+    );
+    await expect(factory.recoverReservedSelection(context, "execution-lineage-1")).rejects.toThrow(
+      "Task placement 계보",
+    );
+    const injectedPlacement = JSON.parse(originalAttempt.explanation_json) as {
+      request: string;
+      explanation: unknown;
+    };
+    const injectedRequest = JSON.parse(injectedPlacement.request) as Record<string, unknown>;
+    delete injectedRequest.preferredModelProfileIds;
+    injectedRequest.placementReceipt = {
+      workId: "work-placement-1",
+      taskId: "task-placement-1",
+      taskAxis: "code-understanding",
+      reasoningDifficulty: "high",
+      selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+    };
+    injectedPlacement.request = JSON.stringify(injectedRequest);
+    await database.query(
+      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
+      {
+        organization_id: context.organizationId,
+        attempt_id: lease.attemptId,
+        explanation_json: JSON.stringify(injectedPlacement),
+      },
+    );
+    await expect(factory.recoverReservedSelection(context, "execution-lineage-1")).rejects.toThrow(
+      "Task placement 계보",
+    );
+    await database.query(
+      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
+      {
+        organization_id: context.organizationId,
+        attempt_id: lease.attemptId,
+        explanation_json: originalAttempt.explanation_json,
+      },
+    );
     const recovered = await factory.recoverReservedSelection(context, "execution-lineage-1");
     expect(recovered).toMatchObject({
       attemptId: lease.attemptId,
       modelProfileId: preferred.profile.model_profile_id,
       optimizationBatchId: "optimization-batch-1",
       preferenceApplied: true,
+      placementReceipt: {
+        workId: "work-placement-1",
+        taskId: "task-placement-1",
+        taskAxis: "code-understanding",
+        reasoningDifficulty: "high",
+        selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+      },
     });
     await recovered?.fail({
       commandId: "execution-lineage-1:model:recovery:release",
@@ -454,6 +535,48 @@ describe("Massion routed model factory", () => {
       outputTokens: 0,
     });
     await expect(factory.recoverReservedSelection(context, "execution-lineage-1")).resolves.toBeUndefined();
+  });
+
+  it("복구는 batch 없는 예약에 주입된 Task placement 영수증을 거부한다", async () => {
+    const factory = new MassionModelFactory(router, providers, {
+      build: (selection) => ({ modelId: selection.modelId }) as LanguageModel,
+    });
+    const lease = await factory.acquire(context, {
+      commandId: crypto.randomUUID(),
+      executionId: "execution-unbatched-placement-1",
+      taskId: "task-unbatched-placement-1",
+      routeName,
+      estimatedTokens: 100,
+      estimatedCostMicros: 1_000,
+    });
+    Object.assign(router, {
+      readReservedAttemptByExecution: async (tenant: TenantContext, executionId: string) => {
+        const attempt = await router.readAttempt(tenant, lease.attemptId);
+        return attempt.execution_id === executionId && attempt.status === "reserved" ? attempt : undefined;
+      },
+    });
+    const attempt = await router.readAttempt(context, lease.attemptId);
+    const explanation = JSON.parse(attempt.explanation_json) as { request: string; explanation: unknown };
+    explanation.request = JSON.stringify({
+      ...(JSON.parse(explanation.request) as Record<string, unknown>),
+      placementReceipt: {
+        workId: "work-unbatched-placement-1",
+        taskId: "task-unbatched-placement-1",
+        selectionBasis: "role-baseline-task-signal-missing",
+      },
+    });
+    await database.query(
+      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
+      {
+        organization_id: context.organizationId,
+        attempt_id: lease.attemptId,
+        explanation_json: JSON.stringify(explanation),
+      },
+    );
+
+    await expect(factory.recoverReservedSelection(context, "execution-unbatched-placement-1")).rejects.toThrow(
+      "Task placement 계보",
+    );
   });
 
   it("명시적 선호는 활성 batch resolver보다 우선하고 batch 계보를 가져오지 않는다", async () => {

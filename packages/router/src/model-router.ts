@@ -292,6 +292,15 @@ export interface AddCandidateInput {
   readonly priority: number;
 }
 
+export interface TaskPlacementReceipt {
+  readonly workId: string;
+  readonly taskId: string;
+  readonly taskAxis?:
+    "code-generation" | "code-understanding" | "planning-design" | "review-critique" | "summary-records";
+  readonly reasoningDifficulty?: "low" | "medium" | "high";
+  readonly selectionBasis: "role-baseline-task-axis-evidence-unavailable" | "role-baseline-task-signal-missing";
+}
+
 export interface RouteRequest {
   readonly routeName: string;
   readonly estimatedTokens: number;
@@ -299,6 +308,12 @@ export interface RouteRequest {
   readonly executionId?: string;
   readonly optimizationRunId?: string;
   readonly optimizationBatchId?: string;
+  /** Runtime 실행이 선택한 Work입니다. Task placement receipt가 있으면 같은 ID여야 합니다. */
+  readonly workId?: string;
+  /** Runtime 실행이 선택한 Work Task입니다. Task placement receipt가 있으면 같은 ID여야 합니다. */
+  readonly taskId?: string;
+  /** Task 신호를 받았지만 축별 평가 근거가 없어 역할 baseline을 사용한 예약 당시의 사실입니다. */
+  readonly placementReceipt?: TaskPlacementReceipt;
   /** 모델 평가실이 활성 배치에서 선택한 선호 model profile 순서입니다. */
   readonly preferredModelProfileIds?: readonly string[];
   readonly stickyKey?: string;
@@ -415,6 +430,54 @@ function attemptRowText(value: unknown, label: string): string {
 
 function attemptRowOptionalText(value: unknown, label: string): string | undefined {
   return value === undefined ? undefined : attemptRowText(value, label);
+}
+
+const TASK_AXES = new Set<string>([
+  "code-generation",
+  "code-understanding",
+  "planning-design",
+  "review-critique",
+  "summary-records",
+]);
+const REASONING_DIFFICULTIES = new Set<string>(["low", "medium", "high"]);
+
+function isTaskAxis(value: unknown): value is NonNullable<TaskPlacementReceipt["taskAxis"]> {
+  return typeof value === "string" && TASK_AXES.has(value);
+}
+
+function isReasoningDifficulty(value: unknown): value is NonNullable<TaskPlacementReceipt["reasoningDifficulty"]> {
+  return typeof value === "string" && REASONING_DIFFICULTIES.has(value);
+}
+
+export function taskPlacementReceipt(value: unknown): TaskPlacementReceipt | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Task placement 계보가 유효하지 않습니다");
+  const receipt = value as Record<string, unknown>;
+  const workId = attemptRowText(receipt.workId, "Task placement Work ID");
+  const taskId = attemptRowText(receipt.taskId, "Task placement Task ID");
+  const taskAxis = receipt.taskAxis;
+  const reasoningDifficulty = receipt.reasoningDifficulty;
+  const selectionBasis = receipt.selectionBasis;
+  if (
+    (taskAxis !== undefined && !isTaskAxis(taskAxis)) ||
+    (reasoningDifficulty !== undefined && !isReasoningDifficulty(reasoningDifficulty)) ||
+    (selectionBasis !== "role-baseline-task-axis-evidence-unavailable" &&
+      selectionBasis !== "role-baseline-task-signal-missing") ||
+    (selectionBasis === "role-baseline-task-axis-evidence-unavailable" &&
+      (taskAxis === undefined || reasoningDifficulty === undefined)) ||
+    (selectionBasis === "role-baseline-task-signal-missing" &&
+      (taskAxis !== undefined || reasoningDifficulty !== undefined))
+  ) {
+    throw new Error("Task placement 계보가 유효하지 않습니다");
+  }
+  return {
+    workId,
+    taskId,
+    ...(taskAxis === undefined ? {} : { taskAxis }),
+    ...(reasoningDifficulty === undefined ? {} : { reasoningDifficulty }),
+    selectionBasis,
+  };
 }
 
 function attemptRowCount(value: unknown, label: string): number {
@@ -1249,6 +1312,19 @@ export class ModelRouter {
   public async reserve(context: TenantContext, input: ReserveRouteInput): Promise<RouteReservation> {
     await this.organizations.verifyTenantContext(context);
     const stickyKeyHash = input.stickyKey ? createHash("sha256").update(input.stickyKey).digest("hex") : undefined;
+    const placementReceipt = taskPlacementReceipt(input.placementReceipt);
+    const workId = input.workId === undefined ? undefined : attemptRowText(input.workId, "Work ID");
+    const taskId = input.taskId === undefined ? undefined : attemptRowText(input.taskId, "Task ID");
+    if (
+      placementReceipt !== undefined &&
+      (!input.executionId ||
+        !input.optimizationBatchId ||
+        !input.preferredModelProfileIds?.length ||
+        workId !== placementReceipt.workId ||
+        taskId !== placementReceipt.taskId)
+    ) {
+      throw new Error("Task placement 계보에는 실행·활성 batch·선호 모델 계보가 필요합니다");
+    }
     const requestJson = canonicalJson({
       commandId: input.commandId,
       routeName: input.routeName,
@@ -1257,6 +1333,9 @@ export class ModelRouter {
       ...(input.executionId !== undefined ? { executionId: input.executionId } : {}),
       ...(input.optimizationRunId !== undefined ? { optimizationRunId: input.optimizationRunId } : {}),
       ...(input.optimizationBatchId !== undefined ? { optimizationBatchId: input.optimizationBatchId } : {}),
+      ...(workId === undefined ? {} : { workId }),
+      ...(taskId === undefined ? {} : { taskId }),
+      ...(placementReceipt === undefined ? {} : { placementReceipt }),
       ...(input.preferredModelProfileIds ? { preferredModelProfileIds: input.preferredModelProfileIds } : {}),
       ...(stickyKeyHash ? { stickyKeyHash } : {}),
       ...(input.fallbackFromAttemptId ? { fallbackFromAttemptId: input.fallbackFromAttemptId } : {}),

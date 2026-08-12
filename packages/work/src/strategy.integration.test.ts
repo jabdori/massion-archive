@@ -32,6 +32,8 @@ const STRATEGY: StrategyProjection = {
       requiredCapabilities: ["architecture"],
       recommendedAgentHandles: ["context-strategy"],
       parallelizable: false,
+      taskAxis: "planning-design",
+      reasoningDifficulty: "high",
     },
     {
       key: "verify",
@@ -42,6 +44,8 @@ const STRATEGY: StrategyProjection = {
       requiredCapabilities: ["testing"],
       recommendedAgentHandles: ["assurance"],
       parallelizable: false,
+      taskAxis: "review-critique",
+      reasoningDifficulty: "medium",
     },
   ],
   evidenceRequests: [],
@@ -109,8 +113,45 @@ describe("StrategyPlan의 Work 투영", () => {
       ["verify", "blocked"],
     ]);
     expect(result.tasks[1]?.dependency_ids).toEqual([result.tasks[0]?.task_id]);
+    expect(result.tasks.map((task) => [task.task_axis, task.reasoning_difficulty])).toEqual([
+      ["planning-design", "high"],
+      ["review-critique", "medium"],
+    ]);
+    expect(JSON.parse(result.plan.content_json)).toMatchObject({
+      tasks: [
+        { taskAxis: "planning-design", reasoningDifficulty: "high" },
+        { taskAxis: "review-critique", reasoningDifficulty: "medium" },
+      ],
+    });
     expect(JSON.parse(result.tasks[1]?.acceptance_criteria_json ?? "[]")).toEqual([STRATEGY.acceptanceCriteria[0]]);
     expect(result.event.event_type).toBe("strategy_projection_applied");
+  });
+
+  it("신호가 없는 이전 계획도 유효한 JSON으로 투영한다", async () => {
+    const work = await draftWork();
+    const legacyPlan: StrategyProjection = {
+      ...STRATEGY,
+      tasks: STRATEGY.tasks.map((task) => ({
+        ...task,
+        taskAxis: undefined,
+        reasoningDifficulty: undefined,
+      })),
+    };
+    const result = await service.applyStrategyProjection(context, {
+      commandId: crypto.randomUUID(),
+      workId: work.work_id,
+      expectedRevision: work.revision,
+      contextVersionId: "context-version-legacy",
+      strategyGenerationId: "strategy-generation-legacy",
+      strategyChecksum: "d".repeat(64),
+      plan: legacyPlan,
+    });
+
+    const persisted = JSON.parse(result.plan.content_json) as { tasks: Record<string, unknown>[] };
+    expect(persisted.tasks).toHaveLength(2);
+    expect(
+      persisted.tasks.every((task) => !Object.hasOwn(task, "taskAxis") && !Object.hasOwn(task, "reasoningDifficulty")),
+    ).toBe(true);
   });
 
   it("잘못된 계획은 Plan, Task와 Work 상태를 일부도 남기지 않고 rollback한다", async () => {

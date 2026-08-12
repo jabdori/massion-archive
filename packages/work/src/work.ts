@@ -17,6 +17,7 @@ import {
   WORK_DELIVERY_MIGRATION,
   WORK_HANDOFF_RECIPIENT_MIGRATION,
   WORK_OUTPUT_LOCALE_MIGRATION,
+  WORK_TASK_PLACEMENT_SIGNAL_MIGRATION,
   WORK_RECORDS_MIGRATION,
   WORK_PROMPT_VERSION_MIGRATION,
   WORK_STRATEGY_PROJECTION_MIGRATION,
@@ -204,6 +205,17 @@ export interface StrategyProjectionRisk {
   readonly requiresApproval: boolean;
 }
 
+const TASK_AXES = [
+  "code-generation",
+  "code-understanding",
+  "planning-design",
+  "review-critique",
+  "summary-records",
+] as const;
+const REASONING_DIFFICULTIES = ["low", "medium", "high"] as const;
+type TaskAxis = (typeof TASK_AXES)[number];
+type ReasoningDifficulty = (typeof REASONING_DIFFICULTIES)[number];
+
 export interface StrategyProjectionTask {
   readonly key: string;
   readonly title: string;
@@ -213,6 +225,8 @@ export interface StrategyProjectionTask {
   readonly requiredCapabilities: readonly string[];
   readonly recommendedAgentHandles: readonly string[];
   readonly parallelizable: boolean;
+  readonly taskAxis?: TaskAxis | undefined;
+  readonly reasoningDifficulty?: ReasoningDifficulty | undefined;
 }
 
 export interface StrategyProjectionEvidenceRequest {
@@ -263,6 +277,8 @@ export interface WorkTask {
   readonly required_capabilities?: readonly string[];
   readonly recommended_agent_handles?: readonly string[];
   readonly parallelizable?: boolean;
+  readonly task_axis?: TaskAxis | undefined;
+  readonly reasoning_difficulty?: ReasoningDifficulty | undefined;
   readonly status: TaskStatus;
   readonly revision: number;
   readonly created_at: unknown;
@@ -675,9 +691,11 @@ const COLLABORATION_MESSAGE_TYPES = new Set<CollaborationMessageType>([
 ]);
 
 function canonicalJson(value: unknown): string {
+  if (value === undefined) return "null";
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(",")}}`;
@@ -818,6 +836,12 @@ function assertStrategyProjection(plan: StrategyProjection): void {
   const assignedCriteria = new Set<string>();
   for (const task of plan.tasks) {
     if (!task.title.trim() || !task.objective.trim()) throw new Error(`Strategy Task 내용이 비었습니다: ${task.key}`);
+    if (task.taskAxis !== undefined && !TASK_AXES.includes(task.taskAxis)) {
+      throw new Error(`Strategy Task 작업 축이 유효하지 않습니다: ${task.key}`);
+    }
+    if (task.reasoningDifficulty !== undefined && !REASONING_DIFFICULTIES.includes(task.reasoningDifficulty)) {
+      throw new Error(`Strategy Task 추론 난이도가 유효하지 않습니다: ${task.key}`);
+    }
     for (const criterionKey of task.criterionKeys) {
       if (!criteriaByKey.has(criterionKey)) throw new Error(`존재하지 않는 criterion입니다: ${criterionKey}`);
       assignedCriteria.add(criterionKey);
@@ -896,6 +920,7 @@ export class WorkService {
       WORK_AUTONOMY_LINEAGE_MIGRATION,
       WORK_HANDOFF_RECIPIENT_MIGRATION,
       WORK_OUTPUT_LOCALE_MIGRATION,
+      WORK_TASK_PLACEMENT_SIGNAL_MIGRATION,
     ]);
     await database.query(WORK_ASSURANCE_FAIL_CLOSED_GUARD);
     return new WorkService(database, organizations, graph, governance, promptVersions, autonomy);
@@ -1222,7 +1247,7 @@ export class WorkService {
           return criterion;
         });
         const [createdTasks] = await transaction.query<[WorkTask[]]>(
-          "CREATE work_task CONTENT { task_id: $task_id, organization_id: $organization_id, work_id: $work_id, plan_version_id: $plan_version_id, task_key: $task_key, title: $title, objective: $objective, acceptance_criteria_json: $acceptance_criteria_json, dependency_ids: $dependency_ids, required_capabilities: $required_capabilities, recommended_agent_handles: $recommended_agent_handles, parallelizable: $parallelizable, status: $status, revision: 1, created_at: time::now(), updated_at: time::now() } RETURN AFTER;",
+          "CREATE work_task CONTENT { task_id: $task_id, organization_id: $organization_id, work_id: $work_id, plan_version_id: $plan_version_id, task_key: $task_key, title: $title, objective: $objective, acceptance_criteria_json: $acceptance_criteria_json, dependency_ids: $dependency_ids, required_capabilities: $required_capabilities, recommended_agent_handles: $recommended_agent_handles, parallelizable: $parallelizable, task_axis: $task_axis, reasoning_difficulty: $reasoning_difficulty, status: $status, revision: 1, created_at: time::now(), updated_at: time::now() } RETURN AFTER;",
           {
             task_id: taskIdByKey.get(projected.key),
             organization_id: context.organizationId,
@@ -1236,6 +1261,8 @@ export class WorkService {
             required_capabilities: projected.requiredCapabilities,
             recommended_agent_handles: projected.recommendedAgentHandles,
             parallelizable: projected.parallelizable,
+            task_axis: projected.taskAxis,
+            reasoning_difficulty: projected.reasoningDifficulty,
             status: dependencyIds.length === 0 ? "ready" : "blocked",
           },
         );

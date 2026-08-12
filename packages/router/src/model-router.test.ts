@@ -394,7 +394,16 @@ describe("Model Route simulation과 reservation", () => {
       commandId: crypto.randomUUID(),
       executionId: "execution-lineage-1",
       optimizationBatchId: "optimization-batch-1",
+      workId: "work-placement-1",
+      taskId: "task-placement-1",
       preferredModelProfileIds: [profile.model_profile_id],
+      placementReceipt: {
+        workId: "work-placement-1",
+        taskId: "task-placement-1",
+        taskAxis: "code-understanding",
+        reasoningDifficulty: "high",
+        selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+      },
       routeName: created.name,
       estimatedTokens: 100,
       estimatedCostMicros: 1_000,
@@ -412,6 +421,64 @@ describe("Model Route simulation과 reservation", () => {
       execution_id: "execution-lineage-1",
       optimization_batch_id: "optimization-batch-1",
     });
+    expect(JSON.parse(reserved.attempt.explanation_json)).toMatchObject({
+      request: expect.stringContaining('"placementReceipt"'),
+    });
+  });
+
+  it("Task placement 계보는 strict하고 같은 command의 다른 receipt를 거부한다", async () => {
+    const created = await route();
+    await database.query(
+      "DEFINE TABLE optimization_batch SCHEMALESS; DEFINE TABLE optimization_active_pointer SCHEMALESS; CREATE optimization_batch CONTENT { batch_id: 'optimization-batch-1', organization_id: $organization_id, role_key: 'assurance', version: 1, status: 'active', primary_model_profile_id: $profile_id, fallback_model_profile_ids: [], checksum: $checksum }; CREATE optimization_active_pointer CONTENT { pointer_id: 'optimization-pointer-task-placement', organization_id: $organization_id, role_key: 'assurance', batch_id: 'optimization-batch-1', batch_version: 1, checksum: $checksum };",
+      {
+        organization_id: context.organizationId,
+        profile_id: profile.model_profile_id,
+        checksum: "a".repeat(64),
+      },
+    );
+    const commandId = crypto.randomUUID();
+    const request = {
+      commandId,
+      executionId: "execution-task-placement-1",
+      optimizationBatchId: "optimization-batch-1",
+      workId: "work-placement-1",
+      taskId: "task-placement-1",
+      preferredModelProfileIds: [profile.model_profile_id],
+      routeName: created.name,
+      estimatedTokens: 100,
+      estimatedCostMicros: 1_000,
+      placementReceipt: {
+        workId: "work-placement-1",
+        taskId: "task-placement-1",
+        selectionBasis: "role-baseline-task-signal-missing" as const,
+      },
+    };
+    await expect(router.reserve(context, request)).resolves.toMatchObject({ status: "selected" });
+    await expect(
+      router.reserve(context, {
+        ...request,
+        taskId: "other-task",
+        placementReceipt: {
+          workId: "work-placement-1",
+          taskId: "task-placement-1",
+          taskAxis: "code-understanding",
+          reasoningDifficulty: "high",
+          selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+        },
+      }),
+    ).rejects.toThrow("Task placement 계보");
+    await expect(
+      router.reserve(context, {
+        ...request,
+        commandId: crypto.randomUUID(),
+        placementReceipt: {
+          workId: "work-placement-1",
+          taskId: "task-placement-1",
+          taskAxis: "unsupported-axis",
+          selectionBasis: "role-baseline-task-signal-missing",
+        },
+      }),
+    ).rejects.toThrow("Task placement 계보");
   });
 
   it("실행 ID의 reserved attempt 정본은 tenant·예약 사용자·단일성 경계를 지킨다", async () => {

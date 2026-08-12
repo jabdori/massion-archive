@@ -42,6 +42,8 @@ const REPLAN: StrategyPlan = {
       requiredCapabilities: ["deployment"],
       recommendedAgentHandles: [],
       parallelizable: false,
+      reasoningDifficulty: "medium",
+      taskAxis: "planning-design",
     },
   ],
   evidenceRequests: [],

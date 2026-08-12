@@ -43,6 +43,8 @@ export const VALID_STRATEGY_PLAN: StrategyPlan = {
       requiredCapabilities: ["architecture"],
       recommendedAgentHandles: ["context-strategy"],
       parallelizable: false,
+      reasoningDifficulty: "high",
+      taskAxis: "planning-design",
     },
     {
       key: "verify",
@@ -53,6 +55,8 @@ export const VALID_STRATEGY_PLAN: StrategyPlan = {
       requiredCapabilities: ["testing"],
       recommendedAgentHandles: ["assurance"],
       parallelizable: false,
+      reasoningDifficulty: "medium",
+      taskAxis: "review-critique",
     },
   ],
   evidenceRequests: [{ key: "evidence-runtime", question: "Runtime 계약이 최신인가", required: true }],
@@ -169,6 +173,44 @@ describe("StrategyPlan schema", () => {
       validateAutomaticStrategyPlan({
         ...automatic,
         evidenceRequests: [{ key: "missing-evidence", question: "추가 근거가 필요한가", required: true }],
+      }),
+    ).toThrow();
+  });
+
+  it("새 자동 계획은 작업 축과 추론 난이도를 요구하지만 이전 계획은 읽는다", () => {
+    const automatic = {
+      ...VALID_STRATEGY_PLAN,
+      acceptanceCriteria: [
+        {
+          ...required(VALID_STRATEGY_PLAN.acceptanceCriteria[0], "first criterion"),
+          method: "evidence" as const,
+          evidenceKinds: ["artifact-version"],
+        },
+      ],
+      evidenceRequests: [],
+    };
+
+    expect(validateAutomaticStrategyPlan(automatic).tasks[0]).toMatchObject({
+      reasoningDifficulty: "high",
+      taskAxis: "planning-design",
+    });
+    const legacy = {
+      ...automatic,
+      tasks: automatic.tasks.map((candidate) => {
+        const legacyTask = { ...candidate } as Record<string, unknown>;
+        delete legacyTask.reasoningDifficulty;
+        delete legacyTask.taskAxis;
+        return legacyTask;
+      }),
+    };
+    expect(() => validateAutomaticStrategyPlan(legacy)).toThrow();
+    expect(validateStrategyPlan(legacy).tasks[0]).not.toHaveProperty("taskAxis");
+    expect(() =>
+      validateStrategyPlan({
+        ...automatic,
+        tasks: automatic.tasks.map((candidate, index) =>
+          index === 0 ? { ...candidate, taskAxis: "unsupported-axis" } : candidate,
+        ),
       }),
     ).toThrow();
   });

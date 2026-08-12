@@ -71,6 +71,34 @@ describe("Massion server model optimization product boundary", () => {
     expect(resolve?.("growth", active)).toBeUndefined();
   });
 
+  it("Task 신호가 있어도 축별 표본이 없으면 역할 baseline 선택 근거를 남긴다", () => {
+    const receipt = (
+      productModule as unknown as {
+        placementReceiptForTask?: (task: Record<string, unknown>) => Record<string, unknown>;
+      }
+    ).placementReceiptForTask;
+    expect(receipt).toEqual(expect.any(Function));
+    expect(
+      receipt?.({
+        work_id: "work-axis-1",
+        task_id: "task-axis-1",
+        task_axis: "code-understanding",
+        reasoning_difficulty: "high",
+      }),
+    ).toEqual({
+      workId: "work-axis-1",
+      taskId: "task-axis-1",
+      taskAxis: "code-understanding",
+      reasoningDifficulty: "high",
+      selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+    });
+    expect(receipt?.({ work_id: "work-legacy-1", task_id: "legacy-task-1" })).toEqual({
+      workId: "work-legacy-1",
+      taskId: "legacy-task-1",
+      selectionBasis: "role-baseline-task-signal-missing",
+    });
+  });
+
   it("서버 bootstrap부터 실제 로컬 모델 평가·receipt·추천까지 연결한다", async () => {
     const modelServer = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");

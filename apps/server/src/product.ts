@@ -112,7 +112,7 @@ import {
   SurrealRegistryStore,
 } from "@massion/registry";
 import { RecordsService } from "@massion/records";
-import { CredentialVault, ModelRouter, ProviderService } from "@massion/router";
+import { CredentialVault, ModelRouter, ProviderService, type TaskPlacementReceipt } from "@massion/router";
 import {
   AgentInstructionRegistry,
   DirectExecutionLifecycle,
@@ -159,7 +159,7 @@ import {
   type ConnectorTransportDirectory,
   type QuotaWindow,
 } from "@massion/subscriptions";
-import { WorkService } from "@massion/work";
+import { WorkService, type WorkTask } from "@massion/work";
 import { WorkspaceService } from "@massion/workspace";
 
 import type { DatabaseProvisionConfig, ServerConfig } from "./config.js";
@@ -286,7 +286,14 @@ export interface MassionDaemonAssemblyOptions {
 export function modelPreferenceFromActiveBatch(
   roleKey: string | undefined,
   batch: OptimizationBatch | undefined,
-): { readonly profileIds: readonly string[]; readonly batchId: string } | undefined {
+  placementReceipt?: TaskPlacementReceipt,
+):
+  | {
+      readonly profileIds: readonly string[];
+      readonly batchId: string;
+      readonly placementReceipt?: TaskPlacementReceipt;
+    }
+  | undefined {
   if (!roleKey || !isOptimizationRoleKey(roleKey) || !batch || batch.status !== "active" || batch.roleKey !== roleKey) {
     return undefined;
   }
@@ -294,7 +301,24 @@ export function modelPreferenceFromActiveBatch(
     ...(batch.primaryModelProfileId ? [batch.primaryModelProfileId] : []),
     ...batch.fallbackModelProfileIds,
   ];
-  return profileIds.length > 0 ? { profileIds, batchId: batch.batchId } : undefined;
+  return profileIds.length > 0
+    ? { profileIds, batchId: batch.batchId, ...(placementReceipt === undefined ? {} : { placementReceipt }) }
+    : undefined;
+}
+
+export function placementReceiptForTask(
+  task: Pick<WorkTask, "work_id" | "task_id" | "task_axis" | "reasoning_difficulty">,
+): TaskPlacementReceipt {
+  if (task.task_axis === undefined || task.reasoning_difficulty === undefined) {
+    return { workId: task.work_id, taskId: task.task_id, selectionBasis: "role-baseline-task-signal-missing" };
+  }
+  return {
+    workId: task.work_id,
+    taskId: task.task_id,
+    taskAxis: task.task_axis,
+    reasoningDifficulty: task.reasoning_difficulty,
+    selectionBasis: "role-baseline-task-axis-evidence-unavailable",
+  };
 }
 
 export async function createMassionDaemon(
@@ -669,7 +693,14 @@ export async function createMassionDaemon(
         resolve: async (context, input) => {
           if (!input.agentHandle || !isOptimizationRoleKey(input.agentHandle)) return undefined;
           const active = await optimizationBatches.getActiveBatch(context, input.agentHandle);
-          return modelPreferenceFromActiveBatch(input.agentHandle, active);
+          const baseline = modelPreferenceFromActiveBatch(input.agentHandle, active);
+          if (!baseline || input.taskId === undefined) return baseline;
+          if (input.workId === undefined) throw new Error("Task placement에는 Work ID가 필요합니다");
+          const task = (await works.listTasks(context, input.workId)).find(
+            (candidate) => candidate.task_id === input.taskId,
+          );
+          if (!task) throw new Error("모델 선택 Task가 같은 Work에 없습니다");
+          return modelPreferenceFromActiveBatch(input.agentHandle, active, placementReceiptForTask(task));
         },
       },
     );

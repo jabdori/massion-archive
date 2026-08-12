@@ -42,6 +42,8 @@ const PLAN: StrategyPlan = {
       requiredCapabilities: ["delivery-coordination"],
       recommendedAgentHandles: ["delivery-coordination"],
       parallelizable: false,
+      reasoningDifficulty: "medium",
+      taskAxis: "summary-records",
     },
   ],
   evidenceRequests: [],

@@ -13,6 +13,8 @@ import {
   type ProviderEndpoint,
   type ProviderService,
   type RouteAttempt,
+  type TaskPlacementReceipt,
+  taskPlacementReceipt,
 } from "@massion/router";
 import type {
   AcquireSessionInput,
@@ -91,6 +93,7 @@ export interface RoutedModelSelectionLease {
   readonly modelProfileId?: string;
   readonly optimizationBatchId?: string;
   readonly preferenceApplied?: boolean;
+  readonly placementReceipt?: TaskPlacementReceipt;
   fail(usage: ModelFailureUsage): Promise<ModelFailureOutcome>;
 }
 
@@ -176,6 +179,7 @@ export interface RoutedModelPreferenceResolver {
 export interface ModelPreferenceResolution {
   readonly profileIds: readonly string[];
   readonly batchId?: string;
+  readonly placementReceipt?: TaskPlacementReceipt;
 }
 
 export interface ConnectorSessionBroker {
@@ -362,12 +366,24 @@ export class MassionModelFactory implements RoutedModelFactory {
       : await this.preferenceResolver?.resolve(context, input);
     const resolvedPreferences = preferenceResolution?.profileIds;
     const optimizationBatchId = resolvedPreferences?.length ? preferenceResolution?.batchId : undefined;
+    const placementReceipt = resolvedPreferences?.length
+      ? taskPlacementReceipt(preferenceResolution?.placementReceipt)
+      : undefined;
+    if (
+      placementReceipt !== undefined &&
+      (placementReceipt.workId !== input.workId || placementReceipt.taskId !== input.taskId)
+    ) {
+      throw new Error("Task placement 계보의 Work·Task ID가 모델 요청과 일치하지 않습니다");
+    }
     const reservation = await this.router
       .reserve(context, {
         commandId: input.commandId,
         ...(input.executionId !== undefined ? { executionId: input.executionId } : {}),
         ...(input.optimizationRunId !== undefined ? { optimizationRunId: input.optimizationRunId } : {}),
         ...(optimizationBatchId !== undefined ? { optimizationBatchId } : {}),
+        ...(input.workId === undefined ? {} : { workId: input.workId }),
+        ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+        ...(placementReceipt === undefined ? {} : { placementReceipt }),
         routeName: input.routeName,
         estimatedTokens: input.estimatedTokens,
         estimatedCostMicros: input.estimatedCostMicros,
@@ -395,6 +411,7 @@ export class MassionModelFactory implements RoutedModelFactory {
       return await this.connectorLease(context, input, reservation, {
         modelProfileId: profile.model_profile_id,
         ...(optimizationBatchId !== undefined ? { optimizationBatchId } : {}),
+        ...(placementReceipt === undefined ? {} : { placementReceipt }),
         preferenceApplied,
       });
     }
@@ -420,6 +437,7 @@ export class MassionModelFactory implements RoutedModelFactory {
       credentialId: credential.credential_id,
       modelProfileId: profile.model_profile_id,
       ...(optimizationBatchId !== undefined ? { optimizationBatchId } : {}),
+      ...(placementReceipt === undefined ? {} : { placementReceipt }),
       preferenceApplied,
       model,
       supportsStructuredOutput: profile.supports_structured_output,
@@ -457,6 +475,20 @@ export class MassionModelFactory implements RoutedModelFactory {
     ) {
       throw new Error("reserved Route Attempt의 batch 계보가 유효하지 않습니다");
     }
+    const requestTaskId = request.taskId;
+    if (
+      requestTaskId !== undefined &&
+      (typeof requestTaskId !== "string" || !requestTaskId || requestTaskId.length > 256)
+    ) {
+      throw new Error("reserved Route Attempt의 Task 계보가 유효하지 않습니다");
+    }
+    const requestWorkId = request.workId;
+    if (
+      requestWorkId !== undefined &&
+      (typeof requestWorkId !== "string" || !requestWorkId || requestWorkId.length > 256)
+    ) {
+      throw new Error("reserved Route Attempt의 Work 계보가 유효하지 않습니다");
+    }
     const preferences = request.preferredModelProfileIds;
     let preferenceApplied = false;
     if (preferences !== undefined) {
@@ -472,6 +504,22 @@ export class MassionModelFactory implements RoutedModelFactory {
         throw new Error("reserved Route Attempt의 선호 계보가 유효하지 않습니다");
       }
     }
+    let placementReceipt: TaskPlacementReceipt | undefined;
+    try {
+      placementReceipt = taskPlacementReceipt(request.placementReceipt);
+    } catch (cause) {
+      throw new Error("reserved Route Attempt의 Task placement 계보가 유효하지 않습니다", { cause });
+    }
+    if (
+      placementReceipt !== undefined &&
+      (requestWorkId !== placementReceipt.workId ||
+        requestTaskId !== placementReceipt.taskId ||
+        requestBatchId === undefined ||
+        preferences === undefined ||
+        preferences.length === 0)
+    ) {
+      throw new Error("reserved Route Attempt의 Task placement 계보가 유효하지 않습니다");
+    }
     const sessions = this.connectorRuntime
       ? await this.connectorRuntime.broker.findExecutionLeases(context, executionId)
       : [];
@@ -483,6 +531,7 @@ export class MassionModelFactory implements RoutedModelFactory {
       modelProfileId: attempt.model_profile_id,
       ...(attempt.optimization_batch_id === undefined ? {} : { optimizationBatchId: attempt.optimization_batch_id }),
       preferenceApplied,
+      ...(placementReceipt === undefined ? {} : { placementReceipt }),
       fail: async (usage) =>
         session
           ? await this.failConnectorAttempt(context, attempt.attempt_id, session, usage)
@@ -531,6 +580,7 @@ export class MassionModelFactory implements RoutedModelFactory {
       readonly modelProfileId: string;
       readonly optimizationBatchId?: string;
       readonly preferenceApplied: boolean;
+      readonly placementReceipt?: TaskPlacementReceipt;
     },
   ): Promise<RoutedModelLease> {
     const runtime = this.connectorRuntime;

@@ -26,6 +26,13 @@ const USAGE = {
   inputTokens: { total: 2, noCache: 2, cacheRead: 0, cacheWrite: 0 },
   outputTokens: { total: 3, text: 3, reasoning: 0 },
 };
+const PLACEMENT_RECEIPT = {
+  workId: "work-1",
+  taskId: "task-1",
+  taskAxis: "code-understanding" as const,
+  reasoningDifficulty: "high" as const,
+  selectionBasis: "role-baseline-task-axis-evidence-unavailable" as const,
+};
 
 describe("VoltAgent AgentRunner", () => {
   let database: MassionDatabase;
@@ -101,6 +108,7 @@ describe("VoltAgent AgentRunner", () => {
     model: MockLanguageModelV3,
     attemptId = crypto.randomUUID(),
     fallbackAllowed = false,
+    placementReceipt?: RoutedModelLease["placementReceipt"],
   ): RoutedModelLease {
     return {
       kind: "model",
@@ -109,6 +117,7 @@ describe("VoltAgent AgentRunner", () => {
       modelProfileId: "model-profile-1",
       optimizationBatchId: "optimization-batch-1",
       preferenceApplied: true,
+      ...(placementReceipt === undefined ? {} : { placementReceipt }),
       model,
       supportsStructuredOutput: true,
       complete: vi.fn().mockResolvedValue({ status: "succeeded" } as RouteAttempt),
@@ -341,6 +350,9 @@ describe("VoltAgent AgentRunner", () => {
           warnings: [],
         },
       }),
+      undefined,
+      false,
+      PLACEMENT_RECEIPT,
     );
     const factory: RoutedModelFactory = { acquire: vi.fn().mockResolvedValue(routed) };
     const runner = new VoltAgentRunner(voltAgent, store, factory, registry);
@@ -368,6 +380,7 @@ describe("VoltAgent AgentRunner", () => {
       modelProfileId: "model-profile-1",
       routeName: "coding-balanced",
       batchId: "optimization-batch-1",
+      placementReceipt: PLACEMENT_RECEIPT,
       preferenceApplied: true,
     });
     expect(registry.size).toBe(0);
@@ -2670,6 +2683,7 @@ THEN {
       modelProfileId: "recovered-profile-1",
       optimizationBatchId: "recovered-batch-1",
       preferenceApplied: true,
+      placementReceipt: PLACEMENT_RECEIPT,
       fail: release,
     };
     const recoverReservedSelection = vi
@@ -2713,9 +2727,53 @@ THEN {
         modelProfileId: "recovered-profile-1",
         routeName: "coding-balanced",
         batchId: "recovered-batch-1",
+        placementReceipt: PLACEMENT_RECEIPT,
         preferenceApplied: true,
       },
     ]);
+  });
+
+  it("cold recovery는 다른 Work·Task의 placement 영수증을 선택 사건으로 쓰지 않는다", async () => {
+    const created = await store.createExecution(context, input());
+    await store.transition(context, {
+      commandId: `${created.execution.execution_id}:running`,
+      executionId: created.execution.execution_id,
+      expectedVersion: created.execution.version,
+      target: "running",
+      payload: {},
+    });
+    const release = vi.fn();
+    const lifecycle = {
+      suspend: vi.fn(),
+      resume: vi.fn(),
+      recover: vi.fn(),
+    };
+    const runner = new VoltAgentRunner(
+      voltAgent,
+      store,
+      {
+        acquire: vi.fn(),
+        recoverReservedSelection: vi.fn().mockResolvedValue({
+          attemptId: "recovered-mismatched-placement-1",
+          modelProfileId: "recovered-profile-1",
+          optimizationBatchId: "recovered-batch-1",
+          preferenceApplied: true,
+          placementReceipt: { ...PLACEMENT_RECEIPT, workId: "other-work", taskId: "other-task" },
+          fail: release,
+        }),
+      },
+      registry,
+      lifecycle,
+    );
+
+    await expect(runner.recover(context, created.execution.execution_id)).rejects.toThrow(
+      "Task placement가 복구 실행과 일치하지 않습니다",
+    );
+    expect(release).not.toHaveBeenCalled();
+    expect(lifecycle.recover).not.toHaveBeenCalled();
+    await expect(store.getRecovery(context, created.execution.execution_id)).resolves.toMatchObject({
+      events: expect.not.arrayContaining([expect.objectContaining({ event_type: "model.route.selected" })]),
+    });
   });
 
   it("프로세스 재시작으로 live 구독 adapter가 사라진 checkpoint는 interrupted 복구를 요청한다", async () => {

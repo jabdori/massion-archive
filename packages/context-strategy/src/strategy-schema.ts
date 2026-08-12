@@ -47,6 +47,12 @@ export const strategyRiskSchema = z
   .strict();
 
 const nonCriticalRiskLevel = z.enum(["low", "medium", "high"]);
+const reasoningDifficultySchema = z
+  .enum(["low", "medium", "high"])
+  .describe("Task 추론 난이도입니다. risk의 likelihood나 impact를 재사용하지 않습니다.");
+const taskAxisSchema = z
+  .enum(["code-generation", "code-understanding", "planning-design", "review-critique", "summary-records"])
+  .describe("Task가 가장 많이 요구하는 작업 성격 축입니다.");
 const criticalRiskFields = {
   mitigation: z.string().trim().min(1).max(2_000),
   requiresApproval: z.literal(true),
@@ -86,8 +92,16 @@ export const strategyTaskSchema = z
         "인사·접수 확인 Task에는 빈 배열을 사용합니다. 그 밖에는 모든 필수 역량을 실제로 보유한 현재 Agent만 추천하며, 없으면 빈 배열을 사용합니다.",
       ),
     parallelizable: z.boolean(),
+    // 과거 plan_json은 이 신호가 없으므로 base schema에서는 호환해 읽습니다.
+    reasoningDifficulty: reasoningDifficultySchema.optional(),
+    taskAxis: taskAxisSchema.optional(),
   })
   .strict();
+
+const automaticStrategyTaskSchema = strategyTaskSchema.extend({
+  reasoningDifficulty: reasoningDifficultySchema,
+  taskAxis: taskAxisSchema,
+});
 
 export const evidenceRequestSchema = z
   .object({
@@ -115,12 +129,15 @@ export const strategyPlanSchema = z
 const automaticStrategyPlanSchema = strategyPlanSchema.extend({
   acceptanceCriteria: z.array(automaticAcceptanceCriterionSchema).min(1).max(100),
   risks: z.array(automaticStrategyRiskSchema).max(100),
+  tasks: z.array(automaticStrategyTaskSchema).min(1).max(50),
   // 자동 실행 경로에는 별도 evidence request 소비자가 없습니다. 필요한 조사는 실행 Task로 계획합니다.
   evidenceRequests: z.array(evidenceRequestSchema).length(0),
 });
 
 export type AcceptanceCriterion = z.infer<typeof acceptanceCriterionSchema>;
 export type StrategyRisk = z.infer<typeof strategyRiskSchema>;
+export type ReasoningDifficulty = z.infer<typeof reasoningDifficultySchema>;
+export type TaskAxis = z.infer<typeof taskAxisSchema>;
 export type StrategyTask = z.infer<typeof strategyTaskSchema>;
 export type EvidenceRequest = z.infer<typeof evidenceRequestSchema>;
 export type StrategyPlan = z.infer<typeof strategyPlanSchema>;

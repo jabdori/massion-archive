@@ -42,6 +42,8 @@ const VALID_STRATEGY_PLAN: StrategyPlan = {
       requiredCapabilities: ["assurance"],
       recommendedAgentHandles: ["assurance"],
       parallelizable: false,
+      reasoningDifficulty: "medium",
+      taskAxis: "review-critique",
     },
   ],
   evidenceRequests: [],
@@ -114,12 +116,13 @@ describe("Strategy Generator", () => {
 
   it("ContextVersion을 structured Runtime으로 생성하고 plan checksum을 저장한다", async () => {
     const version = await contextVersion();
+    const executeStructured = vi.fn<StructuredAgentRunner["executeStructured"]>().mockResolvedValue({
+      executionId: "execution-1",
+      status: "succeeded",
+      output: VALID_STRATEGY_PLAN,
+    });
     const runner: StructuredAgentRunner = {
-      executeStructured: vi.fn().mockResolvedValue({
-        executionId: "execution-1",
-        status: "succeeded",
-        output: VALID_STRATEGY_PLAN,
-      }),
+      executeStructured,
     };
     const generator = await StrategyGenerator.create(database, organizations, runner, contextStore, work);
 
@@ -133,7 +136,7 @@ describe("Strategy Generator", () => {
     expect(generated).toMatchObject({ status: "generated", runtimeExecutionId: "execution-1" });
     expect(generated.checksum).toMatch(/^[a-f0-9]{64}$/u);
     expect(generated.plan).toEqual(VALID_STRATEGY_PLAN);
-    expect(runner.executeStructured).toHaveBeenCalledWith(
+    expect(executeStructured).toHaveBeenCalledWith(
       context,
       expect.objectContaining({
         agentHandle: "context-strategy",
@@ -141,7 +144,7 @@ describe("Strategy Generator", () => {
         estimatedTokens: 1_000,
         input: expect.objectContaining({
           planningContract: expect.stringMatching(
-            /자연어 목표.+인사·접수 확인.+requiredCapabilities.+recommendedAgentHandles.+빈 배열.+코드·설정·문서.+Evidence & Research.+evidence-research.+비완전 목록.+허용 목록.+Evidence & Research 책임만으로 해결할 수 없는.+도메인.+방법론.+현재 Agent에 없어도.+모든 필수 역량.+동적 배치.+critical.+requiresApproval/su,
+            /risk와 독립된.+reasoningDifficulty\(low, medium, high\).+taskAxis\(code-generation, code-understanding, planning-design, review-critique, summary-records\)/su,
           ),
         }),
       }),
@@ -381,6 +384,8 @@ describe("Strategy Generator", () => {
           requiredCapabilities: ["testing"],
           recommendedAgentHandles: ["zai-agent"],
           parallelizable: false,
+          reasoningDifficulty: "medium",
+          taskAxis: "review-critique",
         },
       ],
     };
@@ -423,6 +428,8 @@ describe("Strategy Generator", () => {
           requiredCapabilities: ["backend-engineering"],
           recommendedAgentHandles: ["software-engineering.backend-specialist"],
           parallelizable: false,
+          reasoningDifficulty: "high",
+          taskAxis: "code-generation",
         },
       ],
     };
