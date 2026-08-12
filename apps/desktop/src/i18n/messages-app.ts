@@ -659,8 +659,12 @@ export const appEnglishMessages = {
   "실행 단계에서 오류가 발생했습니다.": "An error occurred during execution.",
   "실행 상태": "Run status",
   "검증 안전 차단": "Assurance safety block",
-  "검증 모델의 시도가 완료되지 않아 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.":
-    "The verification model did not complete its attempt, so the result was not finalized. You can retry it.",
+  "검증을 완료하지 못해 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.":
+    "The assurance could not complete, so the result was not finalized. You can retry it.",
+  "검증 실행이 중단되어 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.":
+    "The verification execution was interrupted, so the result was not finalized. You can retry it.",
+  "검증 단계를 완료하지 못해 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.":
+    "The assurance stage did not complete, so the result was not finalized. You can retry it.",
   "검증에서 보완 필요": "Assurance needs revisions",
   "재개 중": "Resuming",
   "다시 시도": "Retry",

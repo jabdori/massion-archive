@@ -1009,16 +1009,20 @@ describe("Application desktop service", () => {
     expect(native.query).not.toHaveBeenCalledWith("growth.suggestions", expect.anything());
   });
 
-  it("Assurance 안전 차단을 Inbox에서 일반 실행 오류로 뭉개지 않는다", async () => {
+  it.each([
+    ["assurance-blocked", "검증을 완료하지 못해 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다."],
+    ["assurance-verifier-interrupted", "검증 실행이 중단되어 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다."],
+    ["assurance-stage-failed", "검증 단계를 완료하지 못해 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다."],
+  ])("Assurance %s를 Inbox에서 일반 실행 오류로 뭉개지 않는다", async (blockedReason, reason) => {
     const native = transport({
       "inbox.list": [
         {
-          kind: "blocked",
-          id: "blocked:run-assurance-blocked",
-          runId: "run-assurance-blocked",
+          kind: "blocked" as const,
+          id: `blocked:run-${blockedReason}`,
+          runId: `run-${blockedReason}`,
           workId: detail.workId,
           title: "검증 재시도 업무",
-          blockedReason: "assurance-blocked",
+          blockedReason,
         },
       ],
     });
@@ -1028,7 +1032,7 @@ describe("Application desktop service", () => {
       (service as DesktopService & { loadInbox(): Promise<readonly { readonly reason?: string }[]> }).loadInbox(),
     ).resolves.toMatchObject([
       {
-        reason: "검증 모델의 시도가 완료되지 않아 결과를 확정하지 않았습니다. 다시 시도할 수 있습니다.",
+        reason,
       },
     ]);
   });
