@@ -39,6 +39,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EdgeRequestExecutor } from "../../connector/src/executor.js";
 import { ConnectorIdentityStore } from "../../connector/src/identity-store.js";
 import type { ConnectorRequestFrame } from "../../connector/src/protocol.js";
+import { createApplicationDesktopService } from "../../desktop/src/desktop-service.js";
 import { loadServerConfig, parseDatabaseProvisionConfig, parseServerConfig } from "./config.js";
 import {
   createLimitedExecutors,
@@ -2261,6 +2262,7 @@ describe("Massion server product", () => {
   }, 20_000);
 
   it("설치된 Software Engineering 조직이 실제 Git 변경과 독립 Assurance까지 완성한다", async () => {
+    const catalogModelId = "massion-test-model";
     const plan = {
       objective: "값 모듈 변경",
       summary: "백엔드 전문 담당자가 테스트 우선으로 값을 변경한다",
@@ -2327,6 +2329,13 @@ describe("Massion server product", () => {
     };
     const modelRequests: string[] = [];
     const modelServer = createServer((request, response) => {
+      if (request.method === "GET" && request.url === "/v1/models") {
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({ object: "list", data: [{ id: catalogModelId, object: "model", owned_by: "Massion" }] }),
+        );
+        return;
+      }
       const chunks: Buffer[] = [];
       request.on("data", (chunk: Buffer) => chunks.push(chunk));
       request.on("end", () => {
@@ -2345,7 +2354,7 @@ describe("Massion server product", () => {
             : structuredPrompt.includes("massion-strategy-plan") || body.response_format
               ? JSON.stringify(plan)
               : "완료",
-          "massion-test-model",
+          catalogModelId,
         );
         response.setHeader("content-type", fixture.contentType);
         response.end(fixture.body);
@@ -2468,10 +2477,36 @@ describe("Massion server product", () => {
         priority: 1,
         weight: 1,
       });
+      const synchronized = await command("router.models.sync", { endpointId: endpoint.data.endpointId });
+      expect(synchronized.data).toMatchObject({
+        endpointId: endpoint.data.endpointId,
+        status: "available",
+        activeCount: 1,
+        invalidCount: 0,
+        duplicateCount: 0,
+      });
+      const catalog = (await client.query("router.catalog", {})) as {
+        readonly data: {
+          readonly discoveredModels: readonly {
+            readonly endpointId: string;
+            readonly providerId: string;
+            readonly modelId: string;
+            readonly state: string;
+          }[];
+        };
+      };
+      const discoveredModel = catalog.data.discoveredModels.find(
+        (candidate) =>
+          candidate.endpointId === endpoint.data.endpointId &&
+          candidate.providerId === "local-openai" &&
+          candidate.modelId === catalogModelId &&
+          candidate.state === "active",
+      );
+      if (!discoveredModel) throw new Error("동기화한 Provider 카탈로그 모델을 찾을 수 없습니다");
       const model = await command("router.model.register", {
         providerId: "local-openai",
         endpointId: endpoint.data.endpointId,
-        modelId: "massion-test-model",
+        modelId: discoveredModel.modelId,
         routeKind: "chat",
         contextWindow: 200_000,
         supportsTools: true,
@@ -2484,6 +2519,7 @@ describe("Massion server product", () => {
         outputCostMicrosPerMillion: 0,
         verified: true,
       });
+      expect(model.data.modelId).toBe(discoveredModel.modelId);
       for (const name of [
         "orchestration-balanced",
         "planning-quality",
@@ -2512,6 +2548,28 @@ describe("Massion server product", () => {
           priority: 1,
         });
       }
+      const disabled = await command("router.model.enabled.set", {
+        modelProfileId: model.data.modelProfileId,
+        enabled: false,
+      });
+      expect(disabled.data).toMatchObject({ modelProfileId: model.data.modelProfileId, enabled: false });
+      await expect(client.query("router.catalog", {})).resolves.toMatchObject({
+        data: { models: [expect.objectContaining({ modelProfileId: model.data.modelProfileId, enabled: false })] },
+      });
+      const unavailable = (await command("run.start", {
+        request: { text: "꺼진 등록 모델은 실행에서 제외되어야 합니다" },
+      })) as { readonly data: { readonly runId: string } };
+      let unavailableRun = (await client.query("run.get", { runId: unavailable.data.runId })) as {
+        readonly data: { readonly status: string; readonly blockedReason?: string };
+      };
+      for (let attempt = 0; attempt < 300 && unavailableRun.data.status !== "blocked"; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        unavailableRun = (await client.query("run.get", { runId: unavailable.data.runId })) as typeof unavailableRun;
+      }
+      expect(unavailableRun.data).toMatchObject({ status: "blocked", blockedReason: "model-unavailable" });
+      await expect(
+        command("router.model.enabled.set", { modelProfileId: model.data.modelProfileId, enabled: true }),
+      ).resolves.toMatchObject({ data: { modelProfileId: model.data.modelProfileId, enabled: true } });
 
       const organizations = await OrganizationService.create(database);
       const repositories = await RepositoryStore.create(database, organizations);
@@ -2558,7 +2616,7 @@ describe("Massion server product", () => {
         scanOptions,
       });
 
-      await command("run.start", {
+      const accepted = (await command("run.start", {
         request: {
           text: "value 모듈을 테스트 우선으로 2로 변경해주세요",
           softwareDelivery: {
@@ -2571,7 +2629,7 @@ describe("Massion server product", () => {
             testPaths: ["src/value.test.mjs"],
           },
         },
-      });
+      })) as { readonly data: { readonly runId: string } };
       let snapshot: {
         data?: {
           readonly works?: readonly { readonly status: string; readonly artifactIds: readonly string[] }[];
@@ -2593,9 +2651,11 @@ describe("Massion server product", () => {
         if (completed && specialistCompleted && assuranceCompleted) break;
         await new Promise((resolve) => setTimeout(resolve, 25));
       }
-      expect(snapshot.data?.works).toEqual([
-        expect.objectContaining({ status: "completed", artifactIds: expect.arrayContaining([expect.any(String)]) }),
-      ]);
+      expect(snapshot.data?.works).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ status: "completed", artifactIds: expect.arrayContaining([expect.any(String)]) }),
+        ]),
+      );
       expect(snapshot.data?.executions).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ agentHandle: "representative", status: "succeeded" }),
@@ -2607,6 +2667,75 @@ describe("Massion server product", () => {
       expect(
         modelRequests.filter((request) => request.includes("software_patch_proposal") || request.includes("testPatch")),
       ).toHaveLength(1);
+      let completedRun = (await client.query("run.get", { runId: accepted.data.runId })) as {
+        readonly data: { readonly workId: string; readonly status: string };
+      };
+      for (let attempt = 0; attempt < 300 && completedRun.data.status !== "completed"; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        completedRun = (await client.query("run.get", { runId: accepted.data.runId })) as typeof completedRun;
+      }
+      expect(completedRun.data.status).toBe("completed");
+      const [artifacts, verifications, records] = (await Promise.all([
+        client.query("work.artifacts", { workId: completedRun.data.workId }),
+        client.query("work.verifications", { workId: completedRun.data.workId }),
+        client.query("work.records", { workId: completedRun.data.workId }),
+      ])) as readonly [
+        { readonly data: readonly { readonly workId: string; readonly artifactVersionId: string }[] },
+        {
+          readonly data: readonly {
+            readonly verificationId: string;
+            readonly workId: string;
+            readonly passed: boolean;
+            readonly evidenceArtifactVersionIds: readonly string[];
+          }[];
+        },
+        {
+          readonly data: readonly {
+            readonly recordId: string;
+            readonly artifactIds: readonly string[];
+            readonly verificationIds: readonly string[];
+          }[];
+        },
+      ];
+      const verification = verifications.data.find(
+        (candidate) => candidate.workId === completedRun.data.workId && candidate.passed,
+      );
+      if (!verification) throw new Error("완료된 Work의 독립 Assurance 검증을 찾을 수 없습니다");
+      const evidenceArtifactVersionId = verification.evidenceArtifactVersionIds.find((artifactVersionId) =>
+        artifacts.data.some(
+          (artifact) =>
+            artifact.workId === completedRun.data.workId && artifact.artifactVersionId === artifactVersionId,
+        ),
+      );
+      if (!evidenceArtifactVersionId) throw new Error("Assurance 검증이 가리키는 산출물을 찾을 수 없습니다");
+      const record = records.data.find(
+        (candidate) =>
+          candidate.verificationIds.includes(verification.verificationId) &&
+          candidate.artifactIds.includes(evidenceArtifactVersionId),
+      );
+      if (!record) throw new Error("Records가 Assurance 검증과 산출물을 함께 가리키지 않습니다");
+      const desktop = createApplicationDesktopService({
+        bootstrap: async () => ({ connection: { status: "connected" } }),
+        query: async (operation, payload) => await client.query(operation, payload),
+        command: async (input) => await client.command(input),
+        loginCodex: async () => ({ status: "ready" }),
+        startStream: async () => async () => undefined,
+      });
+      const desktopWork = await desktop.loadWork(completedRun.data.workId);
+      expect(desktopWork).toMatchObject({
+        id: completedRun.data.workId,
+        status: "complete",
+        progress: 100,
+        tasks: expect.arrayContaining([expect.objectContaining({ state: "done" })]),
+        artifacts: expect.arrayContaining([expect.objectContaining({ artifactVersionId: evidenceArtifactVersionId })]),
+        verifications: expect.arrayContaining([
+          expect.objectContaining({ id: verification.verificationId, state: "done" }),
+        ]),
+      });
+      const desktopRecord = desktopWork.records.find((candidate) => candidate.id === record.recordId);
+      if (!desktopRecord) throw new Error("Desktop이 Records 항목을 투영하지 않았습니다");
+      expect(desktopRecord.artifactVersionIds).toContain(evidenceArtifactVersionId);
+      expect(desktopRecord.verificationIds).toContain(verification.verificationId);
       const [taskArtifactMessages] = await database.query<
         [{ task_id?: string; execution_id?: string; artifact_version_id?: string }[]]
       >(
@@ -2620,6 +2749,18 @@ describe("Massion server product", () => {
           artifact_version_id: expect.any(String),
         }),
       ]);
+      const taskArtifactMessage = taskArtifactMessages[0];
+      if (!taskArtifactMessage?.artifact_version_id) throw new Error("Task 산출물 계보를 찾을 수 없습니다");
+      expect(artifacts.data).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ artifactVersionId: taskArtifactMessage.artifact_version_id }),
+        ]),
+      );
+      expect(desktopWork.artifacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ artifactVersionId: taskArtifactMessage.artifact_version_id }),
+        ]),
+      );
       expect(await readFile(join(repositoryRoot, "src", "value.mjs"), "utf8")).toBe("export const value = 1;\n");
       await expect(runFile("git", ["status", "--porcelain=v1"], { cwd: repositoryRoot })).resolves.toMatchObject({
         stdout: "",
