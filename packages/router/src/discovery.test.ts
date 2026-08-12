@@ -92,6 +92,10 @@ describe("Provider model discovery 계약", () => {
       fetcher,
     );
 
+    expect(fetcher).toHaveBeenCalledWith(
+      "https://openrouter.ai/api/v1/models?output_modalities=all",
+      expect.any(Object),
+    );
     expect(result).toMatchObject({
       status: "available",
       invalidCount: 0,

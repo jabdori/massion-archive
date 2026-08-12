@@ -60,7 +60,7 @@ describe("Provider 모델 카탈로그 동기화", () => {
     );
 
     expect(fetcher).toHaveBeenCalledWith(
-      "https://openrouter.ai/api/v1/models",
+      "https://openrouter.ai/api/v1/models?output_modalities=all",
       expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer catalog-secret" }) }),
     );
     expect(result).toMatchObject({

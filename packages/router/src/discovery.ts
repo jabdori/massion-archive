@@ -318,7 +318,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function discoveryUrl(request: DiscoveryRequest): URL {
   const url = validateDiscoveryBaseUrl(request.baseUrl, request.local === true);
-  url.pathname = `${url.pathname.replace(/\/$/u, "")}${request.adapterKind === "ollama" ? "/api/tags" : "/models"}`;
+  const path = url.pathname.replace(/\/$/u, "");
+  url.pathname = `${path}${request.adapterKind === "ollama" ? "/api/tags" : "/models"}`;
+  if (request.adapterKind === "openai-compatible" && url.origin === "https://openrouter.ai" && path === "/api/v1") {
+    url.searchParams.set("output_modalities", "all");
+  }
   return url;
 }
 
