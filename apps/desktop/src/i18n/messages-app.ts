@@ -539,6 +539,11 @@ export const appEnglishMessages = {
   미확인: "Unverified",
   켜짐: "On",
   꺼짐: "Off",
+  "모델을 켰습니다.": "Model enabled.",
+  "모델을 껐습니다.": "Model disabled.",
+  "모델 상태를 저장하지 못했습니다.": "Couldn't save the model state.",
+  "모델 상태는 저장했지만 화면을 새로 고치지 못했습니다.":
+    "The model state was saved, but the screen couldn't be refreshed.",
   "모델 새로고침": "Refresh models",
   "모델 확인 중": "Checking models",
   새로고침: "Refresh",

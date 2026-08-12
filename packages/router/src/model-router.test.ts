@@ -2613,6 +2613,71 @@ describe("Model Route simulation과 reservation", () => {
     ).rejects.toThrow();
   });
 
+  it("모델을 끄면 Candidate와 Route는 남고 새 선택만 막았다가 다시 켤 수 있다", async () => {
+    const created = await route();
+    const candidates = await router.listCandidates(context, created.route_id);
+    const routeBefore = (await router.listRoutes(context)).find((item) => item.route_id === created.route_id);
+    if (!routeBefore) throw new Error("Route fixture가 없습니다");
+    const commandId = crypto.randomUUID();
+
+    const disabled = await router.setModelEnabled(context, {
+      commandId,
+      modelProfileId: profile.model_profile_id,
+      enabled: false,
+    });
+    const repeated = await router.setModelEnabled(context, {
+      commandId,
+      modelProfileId: profile.model_profile_id,
+      enabled: false,
+    });
+
+    expect(disabled).toMatchObject({ profile: { model_profile_id: profile.model_profile_id, enabled: false } });
+    expect(disabled.audit.event_type).toBe("model_profile_enabled_set");
+    expect(repeated.audit.audit_event_id).toBe(disabled.audit.audit_event_id);
+    await expect(
+      router.setModelEnabled(context, { commandId, modelProfileId: profile.model_profile_id, enabled: true }),
+    ).rejects.toThrow("같은 commandId에 다른 명령을 사용할 수 없습니다");
+    await expect(router.listModels(context)).resolves.toContainEqual(
+      expect.objectContaining({ model_profile_id: profile.model_profile_id, enabled: false }),
+    );
+    await expect(router.listCandidates(context, created.route_id)).resolves.toEqual(candidates);
+    await expect(router.listRoutes(context)).resolves.toContainEqual(
+      expect.objectContaining({
+        route_id: created.route_id,
+        enabled: true,
+        routing_policy_version: routeBefore.routing_policy_version,
+      }),
+    );
+    await expect(
+      router.reserve(context, {
+        commandId: crypto.randomUUID(),
+        routeName: created.name,
+        estimatedTokens: 10,
+        estimatedCostMicros: 10,
+      }),
+    ).rejects.toThrow("blocked_model_unavailable");
+
+    await expect(
+      router.setModelEnabled(context, {
+        commandId: crypto.randomUUID(),
+        modelProfileId: profile.model_profile_id,
+        enabled: true,
+      }),
+    ).resolves.toMatchObject({ profile: { model_profile_id: profile.model_profile_id, enabled: true } });
+    await expect(
+      router.reserve(context, {
+        commandId: crypto.randomUUID(),
+        routeName: created.name,
+        estimatedTokens: 10,
+        estimatedCostMicros: 10,
+      }),
+    ).resolves.toMatchObject({
+      status: "selected",
+      profile: { model_profile_id: profile.model_profile_id },
+      candidate: { model_profile_id: profile.model_profile_id },
+    });
+  });
+
   it("음수 예산은 거부한다", async () => {
     const created = await route();
 

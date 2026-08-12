@@ -96,7 +96,10 @@ export interface ApplicationDomainDependencies {
     | "revokeCredential"
     | "synchronizeModelCatalog"
   >;
-  readonly router?: Pick<ModelRouter, "registerModel" | "createRoute" | "addCandidate" | "setRouteBudget">;
+  readonly router?: Pick<
+    ModelRouter,
+    "registerModel" | "setModelEnabled" | "createRoute" | "addCandidate" | "setRouteBudget"
+  >;
   readonly optimization?: {
     readonly evaluations: Pick<
       ModelOptimizationStore,
@@ -1826,6 +1829,35 @@ function registerRouter(registry: ApplicationCommandRegistry, dependencies: Appl
         return result(command, {
           resource: { type: "ModelProfile", id: registered.profile.model_profile_id },
           data: { modelProfileId: registered.profile.model_profile_id, modelId: registered.profile.model_id },
+        });
+      },
+    });
+    register(registry, {
+      operation: "router.model.enabled.set",
+      requiredScopes: ["router:write"],
+      allowedRoles: ["owner", "admin"],
+      recovery: "replay-domain",
+      validate(value) {
+        const parsed = payload(value, ["modelProfileId", "enabled"], ["modelProfileId", "enabled"]);
+        const modelProfileId = string(parsed.modelProfileId, "modelProfileId").trim();
+        if (!modelProfileId || modelProfileId.length > 256)
+          throw new Error("modelProfileId 문자열이 유효하지 않습니다");
+        return { modelProfileId, enabled: boolean(parsed.enabled, "enabled") };
+      },
+      async handle(context, command, value) {
+        const changed = await dependencies.router?.setModelEnabled(context, {
+          commandId: command.commandId,
+          modelProfileId: value.modelProfileId,
+          enabled: value.enabled,
+        });
+        if (!changed) throw new Error("Model Router가 구성되지 않았습니다");
+        return result(command, {
+          resource: { type: "ModelProfile", id: changed.profile.model_profile_id },
+          data: {
+            modelProfileId: changed.profile.model_profile_id,
+            modelId: changed.profile.model_id,
+            enabled: changed.profile.enabled,
+          },
         });
       },
     });

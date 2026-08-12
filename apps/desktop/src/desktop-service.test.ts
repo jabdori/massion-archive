@@ -2824,6 +2824,20 @@ describe("Application desktop service", () => {
     );
   });
 
+  it("등록 모델 활성 상태는 전용 typed command로 보낸다", async () => {
+    const native = transport();
+    const service = createApplicationDesktopService(native, { createId: () => "request-0001" });
+
+    await service.setModelEnabled("profile-1", false);
+
+    expect(native.command).toHaveBeenCalledWith(
+      expect.objectContaining({
+        operation: "router.model.enabled.set",
+        payload: { modelProfileId: "profile-1", enabled: false },
+      }),
+    );
+  });
+
   it("조직 편성은 Organization Version을 낙관적 잠금으로 실어 typed command로 보낸다", async () => {
     const native = transport();
     const service = createApplicationDesktopService(native, { createId: () => "request-0001" });

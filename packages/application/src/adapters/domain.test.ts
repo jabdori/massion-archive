@@ -924,6 +924,89 @@ describe("Application domain adapters", () => {
     expect(complete).toHaveBeenCalledTimes(3);
   });
 
+  it("모델 활성 상태 변경은 owner·admin, scope와 strict payload를 거쳐 Router에 위임한다", async () => {
+    const begin = vi.fn().mockResolvedValue({ outcome: "claimed", commandRecordId: "record-1", leaseGeneration: 1 });
+    const complete = vi.fn().mockResolvedValue(undefined);
+    const setModelEnabled = vi.fn().mockResolvedValue({
+      profile: { model_profile_id: "profile-1", model_id: "gpt", enabled: false },
+    });
+    const registry = new ApplicationCommandRegistry({
+      begin,
+      complete,
+      fail: vi.fn().mockResolvedValue(undefined),
+    } as never);
+    registerApplicationDomainCommands(registry, { router: { setModelEnabled } } as never);
+    const command = (commandId: string, payload: unknown) => ({
+      schemaVersion: "massion.application.v1" as const,
+      commandId,
+      correlationId: `${commandId}-correlation`,
+      operation: "router.model.enabled.set",
+      payload,
+    });
+    const owner = { organizationId: "org-1", userId: "owner-1", role: "owner" } as never;
+    const admin = { organizationId: "org-1", userId: "admin-1", role: "admin" } as never;
+    const member = { organizationId: "org-1", userId: "member-1", role: "member" } as never;
+
+    await expect(
+      registry.dispatch(owner, [], command("model-enabled-no-scope", { modelProfileId: "profile-1", enabled: false })),
+    ).rejects.toMatchObject({ operatorCode: "APP_SCOPE_REQUIRED" });
+    await expect(
+      registry.dispatch(
+        member,
+        ["router:write"],
+        command("model-enabled-member", { modelProfileId: "profile-1", enabled: false }),
+      ),
+    ).rejects.toMatchObject({ operatorCode: "APP_ROLE_REQUIRED" });
+    await expect(
+      registry.dispatch(owner, ["router:write"], command("model-enabled-missing", { modelProfileId: "profile-1" })),
+    ).rejects.toMatchObject({ operatorCode: "APP_COMMAND_VALIDATION" });
+    await expect(
+      registry.dispatch(
+        owner,
+        ["router:write"],
+        command("model-enabled-extra", { modelProfileId: "profile-1", enabled: false, extra: true }),
+      ),
+    ).rejects.toMatchObject({ operatorCode: "APP_COMMAND_VALIDATION" });
+    await expect(
+      registry.dispatch(
+        owner,
+        ["router:write"],
+        command("model-enabled-nonboolean", { modelProfileId: "profile-1", enabled: "false" }),
+      ),
+    ).rejects.toMatchObject({ operatorCode: "APP_COMMAND_VALIDATION" });
+
+    await expect(
+      registry.dispatch(
+        owner,
+        ["router:write"],
+        command("model-enabled-owner", { modelProfileId: "profile-1", enabled: false }),
+      ),
+    ).resolves.toMatchObject({
+      outcome: "succeeded",
+      resource: { type: "ModelProfile", id: "profile-1" },
+      data: { modelProfileId: "profile-1", modelId: "gpt", enabled: false },
+    });
+    await expect(
+      registry.dispatch(
+        admin,
+        ["router:write"],
+        command("model-enabled-admin", { modelProfileId: "profile-2", enabled: true }),
+      ),
+    ).resolves.toMatchObject({ outcome: "succeeded" });
+    expect(setModelEnabled).toHaveBeenNthCalledWith(1, owner, {
+      commandId: "model-enabled-owner",
+      modelProfileId: "profile-1",
+      enabled: false,
+    });
+    expect(setModelEnabled).toHaveBeenNthCalledWith(2, admin, {
+      commandId: "model-enabled-admin",
+      modelProfileId: "profile-2",
+      enabled: true,
+    });
+    expect(begin).toHaveBeenCalledTimes(2);
+    expect(complete).toHaveBeenCalledTimes(2);
+  });
+
   it("Provider 제거 거부는 사용자가 조치할 수 있는 사유로 전달한다", async () => {
     const registry = new ApplicationCommandRegistry(
       new (class {

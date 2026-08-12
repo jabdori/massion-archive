@@ -5357,6 +5357,27 @@ function ProviderSurface({ service }: { service: DesktopService }) {
     }
   };
 
+  const setModelEnabled = async (modelProfileId: string, enabled: boolean) => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      await service.setModelEnabled(modelProfileId, enabled);
+      let nextNotice = enabled ? "모델을 켰습니다." : "모델을 껐습니다.";
+      try {
+        setSettings(await service.loadSettings());
+      } catch {
+        nextNotice = "모델 상태는 저장했지만 화면을 새로 고치지 못했습니다.";
+      }
+      setNotice(nextNotice);
+    } catch (cause) {
+      setError(surfaceErrorMessage(cause, "모델 상태를 저장하지 못했습니다."));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const connectKey = async (providerId: string, secret: string) => {
     if (saving || !secret.trim()) return;
     const target = connections.find((connection) => connection.providerId === providerId);
@@ -5652,6 +5673,8 @@ function ProviderSurface({ service }: { service: DesktopService }) {
               <ProviderModelList
                 connection={selected}
                 onSync={(endpointId) => void refreshEndpoint(endpointId, true)}
+                onSetEnabled={(modelProfileId, enabled) => void setModelEnabled(modelProfileId, enabled)}
+                saving={saving}
                 syncingEndpointIds={syncingEndpointIds}
               />
             )}
@@ -5799,18 +5822,17 @@ function ProviderSurface({ service }: { service: DesktopService }) {
 }
 
 /** 열3. 이 프로바이더가 제공하는 모델 전부. 목록이라 열 하나를 온전히 씁니다. */
-/**
- * 모델 켜고 끄기는 아직 계약에 명령이 없습니다. 저장되지 않는 토글을 두면 사용자가
- * 끈 것이 조용히 되살아나므로, 명령이 생기기 전까지는 사실만 읽습니다.
- * 인계: docs/phases/30-surface-parity-agent-ux/settings-contract-handoff.md
- */
 function ProviderModelList({
   connection,
   onSync,
+  onSetEnabled,
+  saving,
   syncingEndpointIds,
 }: {
   connection: ProviderConnectionView;
   onSync: (endpointId: string) => void;
+  onSetEnabled: (modelProfileId: string, enabled: boolean) => void;
+  saving: boolean;
   syncingEndpointIds: ReadonlySet<string>;
 }) {
   if (connection.endpoints.length === 0)
@@ -5877,6 +5899,7 @@ function ProviderModelList({
               ) : (
                 <ul className="min-w-0 max-w-full overflow-hidden">
                   {models.map((model) => {
+                    const modelProfileId = model.modelProfileId;
                     const details = [
                       ...(!model.verified && model.modelProfileId ? ["미확인"] : []),
                       ...(model.catalogState === "stale" ? ["이전 목록"] : []),
@@ -5886,17 +5909,37 @@ function ProviderModelList({
                         className={`flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden px-3 py-1.5 ${model.catalogState === "stale" || !endpoint.enabled ? "opacity-60" : ""}`}
                         key={model.modelProfileId ?? model.catalogEntryId ?? `${endpoint.endpointId}:${model.modelId}`}
                       >
-                        {/* 실행 활성 상태는 서버의 ModelProfile 값만 읽습니다. API 목록에만 있는 모델은 Off입니다. */}
-                        <span
-                          aria-hidden="true"
-                          className={`relative h-3 w-6 shrink-0 rounded-full ${model.enabled ? "bg-control" : "bg-border"}`}
-                        >
+                        {modelProfileId ? (
+                          <button
+                            aria-checked={model.enabled}
+                            aria-label={model.modelId}
+                            className={`relative h-3 w-6 shrink-0 rounded-full focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-fg-3 disabled:cursor-not-allowed disabled:opacity-40 ${model.enabled ? "bg-control" : "bg-border"}`}
+                            disabled={saving || !endpoint.enabled}
+                            onClick={() => {
+                              onSetEnabled(modelProfileId, !model.enabled);
+                            }}
+                            role="switch"
+                            type="button"
+                          >
+                            <span
+                              aria-hidden="true"
+                              className={`absolute top-0.5 h-2 w-2 rounded-full ${
+                                model.enabled ? "left-3.5 bg-fg" : "left-0.5 bg-fg-3"
+                              }`}
+                            />
+                          </button>
+                        ) : (
                           <span
-                            className={`absolute top-0.5 h-2 w-2 rounded-full ${
-                              model.enabled ? "left-3.5 bg-fg" : "left-0.5 bg-fg-3"
-                            }`}
-                          />
-                        </span>
+                            aria-hidden="true"
+                            className={`relative h-3 w-6 shrink-0 rounded-full ${model.enabled ? "bg-control" : "bg-border"}`}
+                          >
+                            <span
+                              className={`absolute top-0.5 h-2 w-2 rounded-full ${
+                                model.enabled ? "left-3.5 bg-fg" : "left-0.5 bg-fg-3"
+                              }`}
+                            />
+                          </span>
+                        )}
                         <span
                           className={`min-w-0 flex-1 truncate font-mono text-speaker ${model.enabled ? "text-secondary" : "text-muted"}`}
                         >

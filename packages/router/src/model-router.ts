@@ -920,6 +920,44 @@ export class ModelRouter {
     return profiles;
   }
 
+  /**
+   * 등록된 모델의 이후 route 선택만 켜거나 끕니다.
+   *
+   * Candidate와 기존 Route Attempt는 실행·감사 계보이므로 지우지 않습니다. `profileFailures`가
+   * 비활성 profile을 새 선택에서 제외하므로, 다시 켜면 같은 Candidate가 별도 재구성 없이 돌아옵니다.
+   */
+  public async setModelEnabled(
+    context: TenantContext,
+    input: { readonly commandId: string; readonly modelProfileId: string; readonly enabled: boolean },
+    executor: QueryExecutor = this.database,
+  ): Promise<{ profile: ModelProfile; audit: RouterAuditEvent }> {
+    const modelProfileId = input.modelProfileId.trim();
+    if (!modelProfileId || modelProfileId.length > 256) throw new Error("Model Profile ID가 유효하지 않습니다");
+    if (typeof input.enabled !== "boolean") throw new Error("Model Profile 활성 상태가 유효하지 않습니다");
+    const request = { ...input, modelProfileId };
+    return await this.command(
+      context,
+      input.commandId,
+      "model_profile_enabled_set",
+      canonicalJson(request),
+      async (tx) => {
+        const profile = await this.profile(tx, context.organizationId, modelProfileId);
+        const [profiles] = await tx.query<[ModelProfile[]]>(
+          "UPDATE model_profile SET enabled = $enabled, updated_at = time::now() WHERE organization_id = $organization_id AND model_profile_id = $model_profile_id RETURN AFTER;",
+          {
+            organization_id: context.organizationId,
+            model_profile_id: profile.model_profile_id,
+            enabled: input.enabled,
+          },
+        );
+        const updated = profiles[0];
+        if (!updated) throw new Error("Model Profile 활성 상태 변경 결과가 없습니다");
+        return { profile: updated };
+      },
+      { executor },
+    );
+  }
+
   public async listRoutes(
     context: TenantContext,
     executor: QueryExecutor = this.database,

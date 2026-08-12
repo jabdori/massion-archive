@@ -96,9 +96,9 @@ snapshot을 보존한 `degraded`가 됩니다. adapter 이름만 보고 Anthropi
 않습니다. stale과 미확인은 필요한 행에만 보조 상태로 남깁니다.
 
 과거 화면 메모리의 `disabledModels`로 동작한 스위치는 재시작하면 설정이 되살아나는 가짜 제어였으므로
-복원하지 않습니다. 영속 On/Off 조작을 추가하려면 감사되는 Router 명령이 `model_profile.enabled` flag만
-원자적으로 갱신해야 합니다. candidate와 과거 route attempt 계보는 삭제하거나 다시 쓰지 않고 보존합니다.
-그 계약 전에는 화면이 저장되지 않는 클릭을 제공하지 않습니다.
+복원하지 않습니다. 등록 모델은 감사되는 `router.model.enabled.set` 명령으로 `model_profile.enabled` flag만
+원자적으로 갱신합니다. candidate와 과거 route attempt 계보는 삭제하거나 다시 쓰지 않고 보존합니다.
+카탈로그에만 있는 행은 실행 Profile이 없어 계속 읽기 전용 Off입니다.
 
 ## 결과
 

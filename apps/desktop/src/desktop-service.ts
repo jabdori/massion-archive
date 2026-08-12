@@ -1482,6 +1482,8 @@ export interface DesktopService {
   syncProviderModels(endpointId: string): Promise<ProviderModelSyncResult>;
   disableCredential(credentialId: string, expectedVersion: number): Promise<void>;
   registerModel(input: Record<string, unknown>): Promise<void>;
+  /** 등록된 Model Profile만 켜거나 끕니다. API 카탈로그 항목은 Profile이 없어 바꿀 수 없습니다. */
+  setModelEnabled(modelProfileId: string, enabled: boolean): Promise<void>;
   configureRoute(input: Record<string, unknown>): Promise<void>;
   /**
    * 이미 있는 경로의 예산 한도. 지출과 후보는 그대로 두고 한도만 바꿉니다.
@@ -1924,6 +1926,9 @@ export function createApplicationDesktopService(
     },
     async registerModel(input) {
       await command("router.model.register", input);
+    },
+    async setModelEnabled(modelProfileId, enabled) {
+      await client.command("router.model.enabled.set", { modelProfileId, enabled });
     },
     async configureRoute(input) {
       await command("router.route.configure", input);
@@ -3857,6 +3862,13 @@ export function createFixtureDesktopService(): DesktopService {
           verified: input.verified,
           enabled: true,
         });
+      }),
+    setModelEnabled: (modelProfileId, enabled) =>
+      fixturePromise(() => {
+        const catalog = settingsState.catalog as { models: Array<Record<string, unknown>> };
+        const model = catalog.models.find((row) => row.modelProfileId === modelProfileId);
+        if (!model) throw new Error("Fixture Model Profile을 찾을 수 없습니다");
+        model.enabled = enabled;
       }),
     setRouteBudget: (input) =>
       fixturePromise(() => {

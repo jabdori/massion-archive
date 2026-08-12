@@ -1852,6 +1852,83 @@ describe("AgentOS native data flow", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("모델 목록을 확인했습니다.");
   });
 
+  it("등록 모델만 저장되는 On/Off 제어로 바꾼다", async () => {
+    const user = userEvent.setup();
+    const settings = {
+      catalog: {
+        providers: [
+          { providerId: "openrouter", displayName: "OpenRouter", adapterKind: "openai-compatible", enabled: true },
+        ],
+        endpoints: [
+          {
+            endpointId: "endpoint-openrouter",
+            providerId: "openrouter",
+            name: "API",
+            baseUrl: "https://openrouter.ai/api/v1",
+            local: false,
+            enabled: true,
+          },
+        ],
+        models: [
+          {
+            modelProfileId: "registered-profile",
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            modelId: "vendor/registered",
+            routeKind: "chat",
+            verified: true,
+            enabled: true,
+          },
+        ],
+        candidates: [],
+        discoveredModels: [
+          {
+            catalogEntryId: "catalog-openrouter-free",
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            modelId: "vendor/free-model",
+            state: "active",
+          },
+        ],
+        catalogStatuses: [
+          {
+            providerId: "openrouter",
+            endpointId: "endpoint-openrouter",
+            status: "available",
+            activeCount: 2,
+            invalidCount: 0,
+            duplicateCount: 0,
+            lastAttemptedAt: "2026-08-10T04:00:00.000Z",
+          },
+        ],
+      },
+      credentials: [],
+      routes: [],
+      providers: [],
+      accounts: [],
+      quota: [],
+      policy: [],
+    };
+    const setModelEnabled = vi.fn(async (modelProfileId: string, enabled: boolean) => {
+      expect(modelProfileId).toBe("registered-profile");
+      const registered = settings.catalog.models.at(0);
+      if (!registered) throw new Error("등록 모델 fixture가 필요합니다");
+      registered.enabled = enabled;
+    });
+    const loadSettings = vi.fn(async () => structuredClone(settings));
+    render(<App service={service({ loadSettings, setModelEnabled })} />);
+
+    await user.click(screen.getByRole("button", { name: "프로바이더" }));
+    const registered = await screen.findByRole("switch", { name: "vendor/registered", checked: true });
+    await user.click(registered);
+
+    expect(setModelEnabled).toHaveBeenCalledWith("registered-profile", false);
+    expect(await screen.findByRole("switch", { name: "vendor/registered", checked: false })).toBeInTheDocument();
+    expect(screen.getByText("모델을 껐습니다.")).toBeInTheDocument();
+    const catalogOnly = screen.getByText("vendor/free-model").closest("li") as HTMLElement;
+    expect(within(catalogOnly).queryByRole("switch")).not.toBeInTheDocument();
+  });
+
   it("Endpoint별 모델·상태·새로고침을 분리하고 비활성 주소는 읽기 전용으로 둔다", async () => {
     const user = userEvent.setup();
     const syncProviderModels = vi.fn(async () => ({

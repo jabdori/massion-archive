@@ -890,6 +890,9 @@ export interface ApplicationCommandMapV1 {
     readonly payload: { readonly suggestionId: string; readonly expectedRevision: number; readonly reason: string };
   };
   readonly "router.models.sync": { readonly payload: { readonly endpointId: string } };
+  readonly "router.model.enabled.set": {
+    readonly payload: { readonly modelProfileId: string; readonly enabled: boolean };
+  };
   /**
    * 이미 있는 경로의 예산 한도. 지출과 후보는 그대로 두고 한도만 바꿉니다.
    *
