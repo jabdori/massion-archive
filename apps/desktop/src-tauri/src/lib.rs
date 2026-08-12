@@ -23,7 +23,10 @@ const CODEX_LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const CODEX_LOGIN_POLL: Duration = Duration::from_millis(200);
 const BRIDGE_EVENT: &str = "massion://bridge-event";
 const MAIN_WEBVIEW_LABEL: &str = "main";
-const BUNDLED_FRONTEND_URL: &str = "tauri://localhost";
+const BUNDLED_FRONTEND_URL: &str = concat!(
+    "tauri://localhost?asset-revision=",
+    env!("MASSION_FRONTEND_REVISION")
+);
 
 #[derive(Clone, Copy)]
 enum BridgeMethod {
@@ -981,7 +984,7 @@ mod tests {
     fn only_the_first_created_main_webview_in_release_gets_the_bundled_url() {
         assert_eq!(
             webview_created_navigation_target("main", true, false),
-            Some("tauri://localhost")
+            Some(BUNDLED_FRONTEND_URL)
         );
         assert_eq!(webview_created_navigation_target("main", true, true), None);
         assert_eq!(
@@ -992,6 +995,12 @@ mod tests {
             webview_created_navigation_target("main", false, false),
             None
         );
+    }
+
+    #[test]
+    fn bundled_frontend_url_has_a_content_revision() {
+        assert!(BUNDLED_FRONTEND_URL.starts_with("tauri://localhost?asset-revision="));
+        assert_ne!(BUNDLED_FRONTEND_URL, "tauri://localhost?asset-revision=");
     }
 
     #[test]
