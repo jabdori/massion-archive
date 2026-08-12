@@ -307,7 +307,8 @@ function stringArray(value: unknown): readonly string[] | undefined {
 }
 
 function optionalPositiveInteger(value: unknown): number | undefined {
-  if (value === undefined || value === null) return undefined;
+  // OpenRouter는 컨텍스트 길이를 모를 때 0을 보냅니다. 실행 한도로 오인하지 않습니다.
+  if (value === undefined || value === null || value === 0) return undefined;
   if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error("invalid positive integer");
   return Number(value);
 }

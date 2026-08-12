@@ -143,6 +143,27 @@ describe("Provider model discovery 계약", () => {
     expect(result.models[0]).not.toHaveProperty("inputCostMicrosPerMillion");
   });
 
+  it("OpenRouter의 0 컨텍스트 길이는 미상 metadata로 보존한다", async () => {
+    const result = await discoverModels(
+      { adapterKind: "openai-compatible", baseUrl: "https://openrouter.ai/api/v1" },
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            data: [{ id: "provider/unknown-context", context_length: 0, top_provider: { context_length: 0 } }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    expect(result).toEqual({
+      status: "available",
+      models: [{ id: "provider/unknown-context" }],
+      invalidCount: 0,
+      duplicateCount: 0,
+    });
+  });
+
   it("잘못된 행과 충돌 duplicate를 partial로 격리하고 결정적인 모델 목록을 만든다", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
