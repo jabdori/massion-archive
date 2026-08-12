@@ -141,7 +141,7 @@ describe("Strategy Generator", () => {
         estimatedTokens: 1_000,
         input: expect.objectContaining({
           planningContract: expect.stringMatching(
-            /자연어 목표.+코드·설정·문서.+Evidence & Research.+evidence-research.+비완전 목록.+허용 목록.+Evidence & Research 책임만으로 해결할 수 없는.+도메인.+방법론.+현재 Agent에 없어도.+모든 필수 역량.+빈 배열.+동적 배치.+critical.+requiresApproval/su,
+            /자연어 목표.+인사·접수 확인.+requiredCapabilities.+recommendedAgentHandles.+빈 배열.+코드·설정·문서.+Evidence & Research.+evidence-research.+비완전 목록.+허용 목록.+Evidence & Research 책임만으로 해결할 수 없는.+도메인.+방법론.+현재 Agent에 없어도.+모든 필수 역량.+동적 배치.+critical.+requiresApproval/su,
           ),
         }),
       }),

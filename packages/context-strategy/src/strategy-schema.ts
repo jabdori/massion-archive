@@ -77,12 +77,14 @@ export const strategyTaskSchema = z
       .array(shortText)
       .max(50)
       .describe(
-        "코드·설정·문서·제공된 근거 조사 Task에는 evidence-research를 사용하고, 그 밖에는 현재 Agent 보유 여부와 무관하게 불가결한 도메인·방법론 전문성을 구체적으로 나열합니다.",
+        "사용자 제공 요청에만 답하는 인사·접수 확인 Task에는 빈 배열을 사용하고, 코드·설정·문서·제공된 근거 조사 Task에는 evidence-research를 사용합니다. 그 밖에는 현재 Agent 보유 여부와 무관하게 불가결한 도메인·방법론 전문성을 구체적으로 나열합니다.",
       ),
     recommendedAgentHandles: z
       .array(agentHandle)
       .max(20)
-      .describe("모든 필수 역량을 실제로 보유한 현재 Agent만 추천하며, 없으면 빈 배열을 사용합니다."),
+      .describe(
+        "인사·접수 확인 Task에는 빈 배열을 사용합니다. 그 밖에는 모든 필수 역량을 실제로 보유한 현재 Agent만 추천하며, 없으면 빈 배열을 사용합니다.",
+      ),
     parallelizable: z.boolean(),
   })
   .strict();
