@@ -659,6 +659,17 @@ export class AssuranceCheckStore {
     return await this.withBindingLock(lockKey, async () => await this.recordLocked(context, normalized));
   }
 
+  /** 같은 Assurance run의 check 정본을 tenant 경계 안에서 읽습니다. */
+  public async listByRun(context: TenantContext, assuranceRunId: string): Promise<readonly AssuranceCheck[]> {
+    await this.organizations.verifyTenantContext(context);
+    const normalizedRunId = text(assuranceRunId, "Assurance run ID");
+    const [records] = await this.database.query<[CheckRecord[]]>(
+      "SELECT * OMIT id FROM assurance_check WHERE organization_id = $organization_id AND assurance_run_id = $assurance_run_id ORDER BY check_id ASC;",
+      { organization_id: context.organizationId, assurance_run_id: normalizedRunId },
+    );
+    return records.map(checkView);
+  }
+
   private async recordLocked(
     context: TenantContext,
     normalized: Required<RecordAssuranceCheckInput>,

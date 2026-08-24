@@ -25,9 +25,11 @@ function candidate(overrides: Partial<EvaluationCandidate> = {}): EvaluationCand
 }
 
 function receipt(overrides: Partial<EvaluationReceipt> = {}): EvaluationReceipt {
-  return {
+  const value: EvaluationReceipt = {
+    receiptId: "receipt-profile-sol",
     roleKey: "context-strategy",
     modelProfileId: "profile-sol",
+    bundleId: "bundle-1",
     bundleVersion: 1,
     sampleCount: 10,
     qualityScore: 0.9,
@@ -39,6 +41,7 @@ function receipt(overrides: Partial<EvaluationReceipt> = {}): EvaluationReceipt 
     receiptChecksum: "b".repeat(64),
     ...overrides,
   };
+  return value;
 }
 
 describe("모델 평가 추천", () => {
@@ -132,5 +135,75 @@ describe("모델 평가 추천", () => {
 
     expect(result.primary).toBeUndefined();
     expect(result.excluded[0]?.reason).toBe("insufficient-samples");
+  });
+
+  it("같은 평가 bundle의 receipt만 비교하고 선택 근거를 고정한다", () => {
+    const result = recommendModels({
+      roleKey: "assurance",
+      policy: "quality",
+      candidates: [candidate({ modelProfileId: "profile-a" }), candidate({ modelProfileId: "profile-b" })],
+      receipts: [
+        receipt({
+          roleKey: "assurance",
+          modelProfileId: "profile-a",
+          receiptId: "receipt-a-old",
+          bundleId: "bundle-old",
+          bundleVersion: 1,
+          qualityScore: 1,
+        }),
+        receipt({
+          roleKey: "assurance",
+          modelProfileId: "profile-a",
+          receiptId: "receipt-a-shared",
+          bundleId: "bundle-shared",
+          bundleVersion: 2,
+          qualityScore: 0.2,
+        }),
+        receipt({
+          roleKey: "assurance",
+          modelProfileId: "profile-b",
+          receiptId: "receipt-b-shared",
+          bundleId: "bundle-shared",
+          bundleVersion: 2,
+          qualityScore: 0.9,
+        }),
+      ],
+      requirements: {
+        requiresTools: true,
+        requiresStructuredOutput: true,
+        requiresStreaming: true,
+        dataPolicy: "external-allowed",
+      },
+    });
+
+    expect(result.primary?.modelProfileId).toBe("profile-b");
+    expect(result.fallbacks.map((item) => item.modelProfileId)).toEqual(["profile-a"]);
+    expect(result.receiptIds).toEqual(["receipt-a-shared", "receipt-b-shared"]);
+  });
+
+  it("공통 평가 bundle이 없으면 후보를 추천하지 않는다", () => {
+    const result = recommendModels({
+      roleKey: "assurance",
+      policy: "quality",
+      candidates: [candidate({ modelProfileId: "profile-a" }), candidate({ modelProfileId: "profile-b" })],
+      receipts: [
+        receipt({ roleKey: "assurance", modelProfileId: "profile-a", bundleId: "bundle-a" }),
+        receipt({ roleKey: "assurance", modelProfileId: "profile-b", bundleId: "bundle-b" }),
+      ],
+      requirements: {
+        requiresTools: true,
+        requiresStructuredOutput: true,
+        requiresStreaming: true,
+        dataPolicy: "external-allowed",
+      },
+    });
+
+    expect(result.primary).toBeUndefined();
+    expect(result.fallbacks).toEqual([]);
+    expect(result.excluded).toEqual([
+      { modelProfileId: "profile-a", reason: "incomplete-receipt" },
+      { modelProfileId: "profile-b", reason: "incomplete-receipt" },
+    ]);
+    expect(result.receiptIds).toEqual([]);
   });
 });

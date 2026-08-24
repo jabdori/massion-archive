@@ -129,10 +129,37 @@ describe("CLI Application adapter", () => {
     };
     await executeCliInvocation(client, parseCliArguments(["optimization", "policy"]));
     await executeCliInvocation(client, parseCliArguments(["optimization", "recommend"]), {
-      readJson: async () => ({ roleKey: "assurance", candidates: [], receipts: [], requirements: {} }),
+      readJson: async () => ({ roleKey: "assurance", requirements: {} }),
     });
     expect(calls[0]).toEqual(["optimization.policy", {}]);
     expect(calls[1]).toMatchObject({ operation: "optimization.recommend", payload: { roleKey: "assurance" } });
+  });
+
+  it("제거된 최적화 관찰 별칭은 Application command로 전달하지 않는다", async () => {
+    const command = vi.fn();
+    const client: CliApplicationClient = {
+      status: async () => ({}),
+      snapshot: async () => ({}),
+      query: async () => ({}),
+      command,
+      inspectArtifact: async () => ({}),
+      installArtifact: async () => ({}),
+      updateArtifact: async () => ({}),
+    };
+
+    await expect(
+      executeCliInvocation(client, {
+        command: "optimization",
+        subcommand: "observe",
+        arguments: [],
+        output: "human",
+        detach: false,
+        wait: false,
+        retryBlocked: false,
+        newAccount: false,
+      }),
+    ).rejects.toThrow("CLI 실행 adapter가 아직 정의되지 않았습니다: optimization observe");
+    expect(command).not.toHaveBeenCalled();
   });
 
   it("구독 실행 계보를 공개 질의 경계로만 조회한다", async () => {

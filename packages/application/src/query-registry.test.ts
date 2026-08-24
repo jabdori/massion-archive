@@ -1586,6 +1586,7 @@ describe("ApplicationQueryRegistry", () => {
               organizationId: context.organizationId,
               roleKey: "assurance",
               modelProfileId: "profile-1",
+              bundleId: "bundle-1",
               bundleVersion: 1,
               sampleCount: 1,
               qualityScore: 0.9,
@@ -1608,7 +1609,333 @@ describe("ApplicationQueryRegistry", () => {
     const receipts = await registry.query(context, ["optimization:read"], "optimization.receipts", {});
     expect(JSON.stringify(policy)).not.toContain("prompt-secret");
     expect(JSON.stringify(receipts)).not.toContain("credential-secret");
+    expect(receipts.data).toEqual([expect.objectContaining({ bundleId: "bundle-1" })]);
     expect(policy.data).toEqual([expect.objectContaining({ policyVersionId: "policy-1", checksum: "a".repeat(64) })]);
+  });
+
+  it("Assurance 계보는 Runtime check의 durable Route Attempt와 system adapter를 안전하게 투영한다", async () => {
+    const listAttemptLineagesByExecution = vi.fn(async (_context: TenantContext, executionId: string) => {
+      if (executionId !== "execution-assurance-check") throw new Error("예상하지 않은 실행 ID");
+      return [
+        {
+          attemptId: "attempt-assurance-first",
+          executionId,
+          modelProfileId: "profile-assurance-first",
+          status: "failed" as const,
+          placementReceipt: {
+            workId: "query-work",
+            taskId: "query-task",
+            taskAxis: "code-understanding" as const,
+            reasoningDifficulty: "high" as const,
+            selectionBasis: "task-axis-evidence-available" as const,
+            axisEvidence: {
+              bundleId: "bundle-assurance",
+              bundleVersion: 1,
+              receiptIds: ["receipt-assurance"],
+              rankedModelProfileIds: ["profile-assurance-first"],
+            },
+          },
+          explanation: "explanation-secret",
+          credentialId: "credential-secret",
+          usage: { inputTokens: 91 },
+        },
+        {
+          attemptId: "attempt-assurance-fallback",
+          executionId,
+          modelProfileId: "profile-assurance-fallback",
+          fallbackFromAttemptId: "attempt-assurance-first",
+          status: "succeeded" as const,
+          placementReceipt: {
+            workId: "query-work",
+            taskId: "query-task",
+            taskAxis: "code-understanding" as const,
+            reasoningDifficulty: "high" as const,
+            selectionBasis: "task-axis-evidence-available" as const,
+            axisEvidence: {
+              bundleId: "bundle-assurance",
+              bundleVersion: 1,
+              receiptIds: ["receipt-assurance"],
+              rankedModelProfileIds: ["profile-assurance-first"],
+            },
+          },
+          explanation: "explanation-secret",
+        },
+      ];
+    });
+    const registry = new ApplicationQueryRegistry();
+    registerApplicationQueries(registry, {
+      readModel: {
+        ...readModel,
+        executions: async () => [
+          {
+            organizationId: context.organizationId,
+            executionId: "execution-assurance-check",
+            workId: "query-work",
+            taskId: "query-task",
+            agentHandle: "assurance",
+            modelRoute: "assurance-balanced",
+            status: "succeeded",
+            inputTokens: 12,
+            outputTokens: 8,
+            costMicros: 20,
+            prompt: "prompt-secret",
+          },
+        ],
+      },
+      assurance: {
+        get: async () => ({
+          assuranceRunId: "assurance-run-public",
+          organizationId: context.organizationId,
+          workId: "query-work",
+          status: "passed",
+          verifierExecutionId: "verifier-execution-secret",
+          snapshotHash: "snapshot-secret",
+          createdByUserId: "creator-secret",
+        }),
+      } as never,
+      assuranceChecks: {
+        listByRun: async () => [
+          {
+            checkId: "check-runtime",
+            organizationId: context.organizationId,
+            workId: "query-work",
+            assuranceRunId: "assurance-run-public",
+            criterionId: "criterion-runtime",
+            kind: "inspection",
+            executorHandle: "assurance",
+            executorExecutionId: "execution-assurance-check",
+            commandKey: "command-secret",
+            inputHash: "input-hash-secret",
+            outputHash: "output-hash-secret",
+            outputSummary: "output-summary-secret",
+            artifactVersionIds: ["artifact-secret"],
+            evidenceBriefIds: ["brief-secret"],
+            metricObservationIds: ["metric-secret"],
+            humanAttestationIds: ["human-secret"],
+            status: "passed",
+          },
+          {
+            checkId: "check-system",
+            organizationId: context.organizationId,
+            workId: "query-work",
+            assuranceRunId: "assurance-run-public",
+            criterionId: "criterion-system",
+            kind: "command",
+            systemAdapterId: "adapter-public",
+            commandKey: "command-secret",
+            inputHash: "input-hash-secret",
+            outputHash: "output-hash-secret",
+            outputSummary: "output-summary-secret",
+            artifactVersionIds: ["artifact-secret"],
+            evidenceBriefIds: ["brief-secret"],
+            metricObservationIds: ["metric-secret"],
+            humanAttestationIds: ["human-secret"],
+            status: "passed",
+          },
+        ],
+      } as never,
+      router: { listAttemptLineagesByExecution } as never,
+    });
+
+    const result = await registry.query(context, ["assurance:read"], "assurance.lineage.get", {
+      workId: "query-work",
+      assuranceRunId: "assurance-run-public",
+    });
+
+    expect(result.data).toEqual({
+      run: { assuranceRunId: "assurance-run-public", workId: "query-work", status: "passed" },
+      checks: [
+        {
+          checkId: "check-runtime",
+          criterionId: "criterion-runtime",
+          status: "passed",
+          executorHandle: "assurance",
+          runtime: { executionId: "execution-assurance-check", taskId: "query-task", status: "succeeded" },
+          routeSelections: [
+            {
+              attemptId: "attempt-assurance-first",
+              modelProfileId: "profile-assurance-first",
+              status: "failed",
+              placementReceipt: {
+                taskAxis: "code-understanding",
+                reasoningDifficulty: "high",
+                selectionBasis: "task-axis-evidence-available",
+                axisEvidence: {
+                  bundleId: "bundle-assurance",
+                  bundleVersion: 1,
+                  receiptIds: ["receipt-assurance"],
+                  rankedModelProfileIds: ["profile-assurance-first"],
+                },
+              },
+            },
+            {
+              attemptId: "attempt-assurance-fallback",
+              modelProfileId: "profile-assurance-fallback",
+              fallbackFromAttemptId: "attempt-assurance-first",
+              status: "succeeded",
+              placementReceipt: {
+                taskAxis: "code-understanding",
+                reasoningDifficulty: "high",
+                selectionBasis: "task-axis-evidence-available",
+                axisEvidence: {
+                  bundleId: "bundle-assurance",
+                  bundleVersion: 1,
+                  receiptIds: ["receipt-assurance"],
+                  rankedModelProfileIds: ["profile-assurance-first"],
+                },
+              },
+            },
+          ],
+        },
+        {
+          checkId: "check-system",
+          criterionId: "criterion-system",
+          status: "passed",
+          systemAdapterId: "adapter-public",
+          routeSelections: [],
+        },
+      ],
+    });
+    expect(listAttemptLineagesByExecution).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result.data)).not.toMatch(
+      /secret|hash|summary|artifact|brief|metric|human|credential|explanation|usage|prompt/iu,
+    );
+  });
+
+  it("Assurance 계보는 권한·payload·Work 및 fallback 불일치를 fail-closed한다", async () => {
+    const runtimeCheck = {
+      checkId: "check-guard",
+      organizationId: context.organizationId,
+      workId: "query-work",
+      assuranceRunId: "assurance-run-guard",
+      criterionId: "criterion-guard",
+      kind: "inspection" as const,
+      executorHandle: "assurance",
+      executorExecutionId: "execution-assurance-guard",
+      commandKey: "safe",
+      inputHash: "safe",
+      artifactVersionIds: [],
+      evidenceBriefIds: [],
+      metricObservationIds: [],
+      humanAttestationIds: [],
+      status: "passed" as const,
+    };
+    const register = (
+      input: {
+        readonly runWorkId?: string;
+        readonly checkWorkId?: string;
+        readonly attempts?: readonly unknown[];
+        readonly check?: Record<string, unknown>;
+        readonly executionAgentHandle?: string;
+      } = {},
+    ) => {
+      const registry = new ApplicationQueryRegistry();
+      registerApplicationQueries(registry, {
+        readModel: {
+          ...readModel,
+          executions: async () => [
+            {
+              organizationId: context.organizationId,
+              executionId: "execution-assurance-guard",
+              workId: "query-work",
+              taskId: "query-task",
+              agentHandle: input.executionAgentHandle ?? "assurance",
+              modelRoute: "assurance-balanced",
+              status: "succeeded",
+              inputTokens: 0,
+              outputTokens: 0,
+              costMicros: 0,
+            },
+          ],
+        },
+        assurance: {
+          get: async () => ({
+            assuranceRunId: "assurance-run-guard",
+            organizationId: context.organizationId,
+            workId: input.runWorkId ?? "query-work",
+            status: "passed",
+          }),
+        } as never,
+        assuranceChecks: {
+          listByRun: async () => [
+            { ...runtimeCheck, ...input.check, workId: input.checkWorkId ?? runtimeCheck.workId },
+          ],
+        } as never,
+        router: {
+          listAttemptLineagesByExecution: async () =>
+            input.attempts ?? [
+              {
+                attemptId: "attempt-guard",
+                executionId: "execution-assurance-guard",
+                modelProfileId: "profile-guard",
+                fallbackFromAttemptId: "missing-parent",
+                status: "failed",
+              },
+            ],
+        } as never,
+      });
+      return registry;
+    };
+
+    await expect(
+      register().query(context, [], "assurance.lineage.get", {
+        workId: "query-work",
+        assuranceRunId: "assurance-run-guard",
+      }),
+    ).rejects.toMatchObject({ category: "authorization" });
+    await expect(
+      register().query(context, ["assurance:read"], "assurance.lineage.get", {
+        workId: "query-work",
+        assuranceRunId: "assurance-run-guard",
+        unknown: true,
+      }),
+    ).rejects.toThrow("알 수 없는 필드");
+    await expect(
+      register({ runWorkId: "other-work" }).query(context, ["assurance:read"], "assurance.lineage.get", {
+        workId: "query-work",
+        assuranceRunId: "assurance-run-guard",
+      }),
+    ).rejects.toThrow("Assurance run 계보");
+    await expect(
+      register({ checkWorkId: "other-work" }).query(context, ["assurance:read"], "assurance.lineage.get", {
+        workId: "query-work",
+        assuranceRunId: "assurance-run-guard",
+      }),
+    ).rejects.toThrow("Assurance check 계보");
+    await expect(
+      register().query(context, ["assurance:read"], "assurance.lineage.get", {
+        workId: "query-work",
+        assuranceRunId: "assurance-run-guard",
+      }),
+    ).rejects.toThrow("fallback Route Attempt가 없습니다");
+    await expect(
+      register({ check: { systemAdapterId: "adapter-guard" } }).query(
+        context,
+        ["assurance:read"],
+        "assurance.lineage.get",
+        {
+          workId: "query-work",
+          assuranceRunId: "assurance-run-guard",
+        },
+      ),
+    ).rejects.toThrow("system adapter와 Runtime 실행이 동시에 존재합니다");
+    await expect(
+      register({ check: { executorHandle: undefined } }).query(context, ["assurance:read"], "assurance.lineage.get", {
+        workId: "query-work",
+        assuranceRunId: "assurance-run-guard",
+      }),
+    ).rejects.toThrow("Runtime 실행자 handle이 일치하지 않습니다");
+    await expect(
+      register({ executionAgentHandle: "different-agent" }).query(
+        context,
+        ["assurance:read"],
+        "assurance.lineage.get",
+        {
+          workId: "query-work",
+          assuranceRunId: "assurance-run-guard",
+        },
+      ),
+    ).rejects.toThrow("Runtime 실행자 handle이 일치하지 않습니다");
   });
 
   it("웹 운영 화면용 구성원·개인 기억·감사·session을 필요한 범위로 조회한다", async () => {

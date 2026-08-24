@@ -27,6 +27,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object")
     return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(",")}}`;
@@ -56,6 +57,20 @@ function validateCase(value: EvaluationCase, bundle: EvaluationBundle): void {
   checksum(value.environmentChecksum, "environment");
   text(value.expectedOutcome, "expected outcome", 4096);
   if (value.prompt !== undefined) text(value.prompt, "prompt", 16_384);
+  if ((value.taskAxis === undefined) !== (value.reasoningDifficulty === undefined)) {
+    throw new Error("export case의 작업 축과 추론 난이도는 함께 필요합니다");
+  }
+  if (
+    value.taskAxis !== undefined &&
+    !["code-generation", "code-understanding", "planning-design", "review-critique", "summary-records"].includes(
+      value.taskAxis,
+    )
+  ) {
+    throw new Error("export case 작업 축이 유효하지 않습니다");
+  }
+  if (value.reasoningDifficulty !== undefined && !["low", "medium", "high"].includes(value.reasoningDifficulty)) {
+    throw new Error("export case 추론 난이도가 유효하지 않습니다");
+  }
 }
 
 function unsigned(value: EvaluationExport): Omit<EvaluationExport, "checksum"> {

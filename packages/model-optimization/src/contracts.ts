@@ -1,5 +1,9 @@
 import type { OptimizationRoleKey, EvaluationDataPolicy, EvaluationPolicy } from "./scoring.js";
 
+export type EvaluationTaskAxis =
+  "code-generation" | "code-understanding" | "planning-design" | "review-critique" | "summary-records";
+export type EvaluationReasoningDifficulty = "low" | "medium" | "high";
+
 export interface OptimizationModelProfile {
   readonly modelProfileId: string;
   readonly modelId: string;
@@ -21,6 +25,9 @@ export interface EvaluationCase {
   readonly environmentChecksum: string;
   readonly prompt?: string;
   readonly expectedOutcome: string;
+  /** 기존 평가 묶음은 이 분류 없이도 읽히며 역할 baseline으로만 사용합니다. */
+  readonly taskAxis?: EvaluationTaskAxis;
+  readonly reasoningDifficulty?: EvaluationReasoningDifficulty;
 }
 
 export interface EvaluationBundle {
@@ -53,6 +60,7 @@ export interface StoredEvaluationReceipt {
   readonly organizationId: string;
   readonly roleKey: OptimizationRoleKey;
   readonly modelProfileId: string;
+  readonly bundleId: string;
   readonly bundleVersion: number;
   readonly sampleCount: number;
   readonly qualityScore: number;

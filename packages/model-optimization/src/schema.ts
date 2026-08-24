@@ -192,3 +192,80 @@ DEFINE INDEX optimization_batch_command ON optimization_batch FIELDS organizatio
 DEFINE INDEX optimization_recovery_command ON optimization_recovery FIELDS organization_id, command_id UNIQUE;
 `,
 );
+
+/**
+ * 기존 receipt는 생성 당시의 run만 가리켜, 서로 다른 평가 묶음의 점수를 한 추천에서 섞을 수 있었습니다.
+ * run의 tenant·역할·profile·version 계보가 완전한 경우에만 bundle ID를 한 번 보강하고 다시 immutable로 잠급니다.
+ */
+export const MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION = defineMigration(
+  "0126-model-optimization-receipt-bundle-lineage",
+  `
+DEFINE FIELD bundle_id ON optimization_receipt TYPE option<string>;
+REMOVE EVENT optimization_receipt_immutable ON TABLE optimization_receipt;
+UPDATE optimization_receipt SET bundle_id = {
+  LET $organization_id = organization_id;
+  LET $run_id = run_id;
+  LET $role_key = role_key;
+  LET $model_profile_id = model_profile_id;
+  LET $bundle_version = bundle_version;
+  LET $runs = (
+    SELECT VALUE bundle_id FROM optimization_run
+    WHERE organization_id = $organization_id
+      AND run_id = $run_id
+      AND role_key = $role_key
+      AND model_profile_id = $model_profile_id
+      AND bundle_version = $bundle_version
+  );
+  IF array::len($runs) != 1 {
+    THROW 'Optimization receipt의 evaluation run bundle 계보가 유효하지 않습니다';
+  };
+  RETURN array::first($runs);
+} RETURN NONE;
+DEFINE FIELD OVERWRITE bundle_id ON optimization_receipt TYPE string ASSERT string::len($value) > 0;
+DEFINE EVENT optimization_receipt_immutable ON TABLE optimization_receipt
+WHEN $event IN ['UPDATE', 'DELETE']
+THEN { THROW 'Optimization receipt는 immutable입니다'; };
+`,
+);
+
+/**
+ * 축별 점수는 새 평가 실행에서만 생성합니다. 과거 case·receipt를 추정해 backfill하면
+ * 당시 실행 결과에 없던 작업 성격을 사실처럼 만들게 되므로, 없는 근거는 역할 baseline으로 남깁니다.
+ */
+export const MODEL_OPTIMIZATION_TASK_AXIS_SCORE_MIGRATION = defineMigration(
+  "0127-model-optimization-task-axis-score",
+  `
+DEFINE FIELD task_axis ON optimization_case TYPE option<string>
+  ASSERT $value = NONE OR $value IN ['code-generation', 'code-understanding', 'planning-design', 'review-critique', 'summary-records'];
+DEFINE FIELD reasoning_difficulty ON optimization_case TYPE option<string>
+  ASSERT $value = NONE OR $value IN ['low', 'medium', 'high'];
+
+DEFINE TABLE optimization_receipt_axis_score SCHEMAFULL PERMISSIONS NONE;
+DEFINE FIELD score_id ON optimization_receipt_axis_score TYPE string;
+DEFINE FIELD organization_id ON optimization_receipt_axis_score TYPE string;
+DEFINE FIELD receipt_id ON optimization_receipt_axis_score TYPE string;
+DEFINE FIELD run_id ON optimization_receipt_axis_score TYPE string;
+DEFINE FIELD role_key ON optimization_receipt_axis_score TYPE string;
+DEFINE FIELD model_profile_id ON optimization_receipt_axis_score TYPE string;
+DEFINE FIELD bundle_id ON optimization_receipt_axis_score TYPE string;
+DEFINE FIELD bundle_version ON optimization_receipt_axis_score TYPE int ASSERT $value >= 1;
+DEFINE FIELD task_axis ON optimization_receipt_axis_score TYPE string
+  ASSERT $value IN ['code-generation', 'code-understanding', 'planning-design', 'review-critique', 'summary-records'];
+DEFINE FIELD reasoning_difficulty ON optimization_receipt_axis_score TYPE string
+  ASSERT $value IN ['low', 'medium', 'high'];
+DEFINE FIELD sample_count ON optimization_receipt_axis_score TYPE int ASSERT $value >= 1;
+DEFINE FIELD quality_score ON optimization_receipt_axis_score TYPE float ASSERT $value >= 0 AND $value <= 1;
+DEFINE FIELD latency_ms ON optimization_receipt_axis_score TYPE float ASSERT $value >= 0;
+DEFINE FIELD cost_micros ON optimization_receipt_axis_score TYPE float ASSERT $value >= 0;
+DEFINE FIELD privacy_allowed ON optimization_receipt_axis_score TYPE bool;
+DEFINE FIELD completed ON optimization_receipt_axis_score TYPE bool;
+DEFINE FIELD score_checksum ON optimization_receipt_axis_score TYPE string ASSERT string::len($value) = 64;
+DEFINE FIELD created_at ON optimization_receipt_axis_score TYPE datetime;
+DEFINE INDEX optimization_receipt_axis_score_id ON optimization_receipt_axis_score FIELDS organization_id, score_id UNIQUE;
+DEFINE INDEX optimization_receipt_axis_score_receipt_axis ON optimization_receipt_axis_score FIELDS organization_id, receipt_id, task_axis, reasoning_difficulty UNIQUE;
+DEFINE INDEX optimization_receipt_axis_score_lookup ON optimization_receipt_axis_score FIELDS organization_id, role_key, bundle_id, bundle_version, task_axis, reasoning_difficulty, model_profile_id;
+DEFINE EVENT optimization_receipt_axis_score_immutable ON TABLE optimization_receipt_axis_score
+WHEN $event IN ['UPDATE', 'DELETE']
+THEN { THROW 'Optimization receipt axis score는 immutable입니다'; };
+`,
+);

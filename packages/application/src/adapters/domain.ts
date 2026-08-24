@@ -14,11 +14,9 @@ import type { AgentRunner } from "@massion/runtime";
 import {
   isOptimizationRoleKey,
   type EvaluationPolicy,
-  type EvaluationReceipt,
   type ModelRecommendationRecord,
   type ModelOptimizationStore,
   type OptimizationBatchService,
-  type OptimizationModelProfile,
   type OptimizationRoleKey,
 } from "@massion/model-optimization";
 import {
@@ -115,7 +113,7 @@ export interface ApplicationDomainDependencies {
     >;
     readonly batches: Pick<
       OptimizationBatchService,
-      "approveRecommendation" | "createBatch" | "activateBatch" | "recordObservation" | "recover"
+      "approveRecommendation" | "createBatch" | "activateBatch" | "recover"
     >;
   };
   readonly subscriptionAccounts?: SubscriptionAccountCommands;
@@ -368,7 +366,9 @@ function domainError(error: unknown, correlationId: string): never {
     });
   }
   if (
-    /candidate batch|shadow 동의|최소 표본|개선 폭|승격 게이트|되돌려진 batch|production learning 동의/iu.test(message)
+    /candidate batch|shadow 동의|최소 표본|개선 폭|승격 게이트|되돌려진 batch|현재 활성 batch|production learning 동의/iu.test(
+      message,
+    )
   ) {
     throw new ApplicationError({
       category: "policy",
@@ -2424,56 +2424,25 @@ function optimizationPolicy(value: unknown): EvaluationPolicy {
   return candidate as EvaluationPolicy;
 }
 
-function optimizationCandidate(value: unknown): OptimizationModelProfile {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("모델 후보가 object여야 합니다");
-  const candidate = value as Record<string, unknown>;
-  return {
-    modelProfileId: string(candidate.modelProfileId, "modelProfileId"),
-    modelId: string(candidate.modelId, "modelId"),
-    routeId: string(candidate.routeId, "routeId"),
-    providerId: string(candidate.providerId, "providerId"),
-    verified: boolean(candidate.verified, "verified"),
-    supportsStructuredOutput: boolean(candidate.supportsStructuredOutput, "supportsStructuredOutput"),
-    supportsTools: boolean(candidate.supportsTools, "supportsTools"),
-    supportsStreaming: boolean(candidate.supportsStreaming, "supportsStreaming"),
-    dataPolicy:
-      candidate.dataPolicy === "local-private"
-        ? "local-private"
-        : candidate.dataPolicy === "external-allowed"
-          ? "external-allowed"
-          : (() => {
-              throw new Error("dataPolicy가 유효하지 않습니다");
-            })(),
-  };
+function optimizationTaskAxis(value: unknown) {
+  const candidate = string(value, "taskAxis");
+  if (
+    !new Set(["code-generation", "code-understanding", "planning-design", "review-critique", "summary-records"]).has(
+      candidate,
+    )
+  ) {
+    throw new Error("지원하지 않는 평가 taskAxis입니다");
+  }
+  return candidate as
+    "code-generation" | "code-understanding" | "planning-design" | "review-critique" | "summary-records";
 }
 
-function optimizationCandidates(value: unknown): readonly OptimizationModelProfile[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length === 0 || value.length > 128)
-    throw new Error("모델 후보 목록이 유효하지 않습니다");
-  return value.map(optimizationCandidate);
-}
-
-function optimizationReceipts(value: unknown): readonly EvaluationReceipt[] {
-  if (!Array.isArray(value) || (value.length > 0 && value.length > 1_024))
-    throw new Error("모델 receipt 목록이 유효하지 않습니다");
-  return value.map((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("모델 receipt가 object여야 합니다");
-    const receipt = item as Record<string, unknown>;
-    return {
-      roleKey: optimizationRole(receipt.roleKey),
-      modelProfileId: string(receipt.modelProfileId, "modelProfileId"),
-      bundleVersion: integer(receipt.bundleVersion, "bundleVersion", 1),
-      sampleCount: integer(receipt.sampleCount, "sampleCount", 0),
-      qualityScore: Number(receipt.qualityScore),
-      latencyMs: Number(receipt.latencyMs),
-      costMicros: Number(receipt.costMicros),
-      privacyAllowed: boolean(receipt.privacyAllowed, "privacyAllowed"),
-      completed: boolean(receipt.completed, "completed"),
-      inputChecksum: string(receipt.inputChecksum, "inputChecksum"),
-      receiptChecksum: string(receipt.receiptChecksum, "receiptChecksum"),
-    };
-  });
+function optimizationReasoningDifficulty(value: unknown) {
+  const candidate = string(value, "reasoningDifficulty");
+  if (!new Set(["low", "medium", "high"]).has(candidate)) {
+    throw new Error("지원하지 않는 평가 reasoningDifficulty입니다");
+  }
+  return candidate as "low" | "medium" | "high";
 }
 
 function optimizationRequirements(value: unknown) {
@@ -2566,6 +2535,12 @@ function registerOptimization(registry: ApplicationCommandRegistry, dependencies
               environmentChecksum: string(evaluationCase.environmentChecksum, "environmentChecksum"),
               ...(evaluationCase.prompt === undefined ? {} : { prompt: string(evaluationCase.prompt, "prompt") }),
               expectedOutcome: string(evaluationCase.expectedOutcome, "expectedOutcome"),
+              ...(evaluationCase.taskAxis === undefined
+                ? {}
+                : { taskAxis: optimizationTaskAxis(evaluationCase.taskAxis) }),
+              ...(evaluationCase.reasoningDifficulty === undefined
+                ? {}
+                : { reasoningDifficulty: optimizationReasoningDifficulty(evaluationCase.reasoningDifficulty) }),
             };
           })
         : (() => {
@@ -2627,57 +2602,6 @@ function registerOptimization(registry: ApplicationCommandRegistry, dependencies
   });
 
   register(registry, {
-    operation: "optimization.evaluation.start",
-    requiredScopes: ["optimization:write"],
-    allowedRoles: ["owner", "admin", "member"],
-    recovery: "replay-domain",
-    validate: (value) =>
-      payload(
-        value,
-        ["roleKey", "bundleId", "modelProfileId", "runtimeVersion", "inputChecksum", "mode"],
-        ["roleKey", "bundleId", "modelProfileId", "runtimeVersion", "inputChecksum"],
-      ),
-    async handle(context, command, value) {
-      const run = await optimization.evaluations.startEvaluation(context, {
-        commandId: command.commandId,
-        roleKey: optimizationRole(value.roleKey),
-        bundleId: string(value.bundleId, "bundleId"),
-        modelProfileId: string(value.modelProfileId, "modelProfileId"),
-        runtimeVersion: string(value.runtimeVersion, "runtimeVersion"),
-        inputChecksum: string(value.inputChecksum, "inputChecksum"),
-        ...(value.mode === undefined ? {} : { mode: value.mode as "standard" | "shadow" }),
-      });
-      return result(command, { resource: { type: "OptimizationRun", id: run.runId }, data: run });
-    },
-  });
-
-  register(registry, {
-    operation: "optimization.evaluation.complete",
-    requiredScopes: ["optimization:write"],
-    allowedRoles: ["owner", "admin", "member"],
-    recovery: "replay-domain",
-    validate: (value) =>
-      payload(
-        value,
-        ["runId", "sampleCount", "qualityScore", "latencyMs", "costMicros", "privacyAllowed", "completed"],
-        ["runId", "sampleCount", "qualityScore", "latencyMs", "costMicros", "privacyAllowed", "completed"],
-      ),
-    async handle(context, command, value) {
-      const receipt = await optimization.evaluations.completeEvaluation(context, {
-        commandId: command.commandId,
-        runId: string(value.runId, "runId"),
-        sampleCount: integer(value.sampleCount, "sampleCount", 1),
-        qualityScore: Number(value.qualityScore),
-        latencyMs: Number(value.latencyMs),
-        costMicros: Number(value.costMicros),
-        privacyAllowed: boolean(value.privacyAllowed, "privacyAllowed"),
-        completed: boolean(value.completed, "completed"),
-      });
-      return result(command, { resource: { type: "OptimizationReceipt", id: receipt.receiptId }, data: receipt });
-    },
-  });
-
-  register(registry, {
     operation: "optimization.evaluation.execute",
     requiredScopes: ["optimization:write"],
     allowedRoles: ["owner", "admin", "member"],
@@ -2708,17 +2632,11 @@ function registerOptimization(registry: ApplicationCommandRegistry, dependencies
     allowedRoles: ["owner", "admin"],
     recovery: "replay-domain",
     validate: (value) =>
-      payload(
-        value,
-        ["roleKey", "candidates", "receipts", "requirements", "manualModelProfileId"],
-        ["roleKey", "receipts", "requirements"],
-      ),
+      payload(value, ["roleKey", "requirements", "manualModelProfileId"], ["roleKey", "requirements"]),
     async handle(context, command, value) {
       const recommendation = await optimization.evaluations.recommend(context, {
         commandId: command.commandId,
         roleKey: optimizationRole(value.roleKey),
-        candidates: optimizationCandidates(value.candidates),
-        receipts: optimizationReceipts(value.receipts),
         requirements: optimizationRequirements(value.requirements),
         ...(value.manualModelProfileId === undefined
           ? {}
@@ -2828,35 +2746,6 @@ function registerOptimization(registry: ApplicationCommandRegistry, dependencies
       return result(command, {
         resource: { type: "OptimizationBatch", id: batch.batchId, revision: batch.version },
         data: batch,
-      });
-    },
-  });
-
-  register(registry, {
-    operation: "optimization.observation.record",
-    requiredScopes: ["optimization:write"],
-    allowedRoles: ["owner", "admin", "member"],
-    recovery: "replay-domain",
-    validate: (value) =>
-      payload(
-        value,
-        ["batchId", "sampleCount", "qualityScore", "latencyMs", "costMicros", "status", "source"],
-        ["batchId", "sampleCount", "qualityScore", "latencyMs", "costMicros", "status"],
-      ),
-    async handle(context, command, value) {
-      const observation = await optimization.batches.recordObservation(context, {
-        commandId: command.commandId,
-        batchId: string(value.batchId, "batchId"),
-        sampleCount: integer(value.sampleCount, "sampleCount", 1),
-        qualityScore: Number(value.qualityScore),
-        latencyMs: Number(value.latencyMs),
-        costMicros: Number(value.costMicros),
-        status: value.status as "healthy" | "degraded",
-        ...(value.source === undefined ? {} : { source: value.source as "evaluation" | "production" }),
-      });
-      return result(command, {
-        resource: { type: "OptimizationObservation", id: observation.observationId },
-        data: observation,
       });
     },
   });

@@ -424,6 +424,98 @@ describe("Model Route simulation과 reservation", () => {
     expect(JSON.parse(reserved.attempt.explanation_json)).toMatchObject({
       request: expect.stringContaining('"placementReceipt"'),
     });
+    await expect(
+      database.query(
+        "UPDATE route_attempt SET explanation_json = '{\"tampered\":true}' WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
+        { organization_id: context.organizationId, attempt_id: reserved.attempt.attempt_id },
+      ),
+    ).rejects.toThrow(/read.?only|readonly/iu);
+  });
+
+  it("축별 근거는 활성 batch의 같은 후보 집합만 재정렬한다", async () => {
+    const created = await route();
+    const alternate = (
+      await router.registerModel(context, {
+        commandId: crypto.randomUUID(),
+        providerId: "openai",
+        endpointId: endpoint.endpoint_id,
+        modelId: "gpt-coding-axis",
+        routeKind: "chat",
+        contextWindow: 128_000,
+        supportsTools: true,
+        supportsStructuredOutput: true,
+        supportsVision: false,
+        supportsStreaming: true,
+        equivalenceGroup: "coding-balanced",
+        evalScore: 0.9,
+        inputCostMicrosPerMillion: 1_000_000,
+        outputCostMicrosPerMillion: 1_000_000,
+        verified: true,
+      })
+    ).profile;
+    await router.addCandidate(context, {
+      commandId: crypto.randomUUID(),
+      routeId: created.route_id,
+      modelProfileId: alternate.model_profile_id,
+      priority: 2,
+    });
+    await database.query(
+      "CREATE optimization_batch CONTENT { batch_id: 'optimization-batch-axis-1', organization_id: $organization_id, role_key: 'assurance', version: 1, status: 'active', primary_model_profile_id: $primary_profile_id, fallback_model_profile_ids: [$fallback_profile_id], checksum: $checksum }; CREATE optimization_active_pointer CONTENT { pointer_id: 'optimization-pointer-axis-1', organization_id: $organization_id, role_key: 'assurance', batch_id: 'optimization-batch-axis-1', batch_version: 1, checksum: $checksum };",
+      {
+        organization_id: context.organizationId,
+        primary_profile_id: profile.model_profile_id,
+        fallback_profile_id: alternate.model_profile_id,
+        checksum: "a".repeat(64),
+      },
+    );
+    const request = {
+      commandId: crypto.randomUUID(),
+      executionId: "execution-axis-1",
+      optimizationBatchId: "optimization-batch-axis-1",
+      workId: "work-axis-1",
+      taskId: "task-axis-1",
+      preferredModelProfileIds: [alternate.model_profile_id, profile.model_profile_id],
+      placementReceipt: {
+        workId: "work-axis-1",
+        taskId: "task-axis-1",
+        taskAxis: "code-understanding" as const,
+        reasoningDifficulty: "high" as const,
+        selectionBasis: "task-axis-evidence-available" as const,
+        axisEvidence: {
+          bundleId: "bundle-axis-1",
+          bundleVersion: 1,
+          receiptIds: ["receipt-axis-alternate", "receipt-axis-primary"],
+          rankedModelProfileIds: [alternate.model_profile_id, profile.model_profile_id],
+        },
+      },
+      routeName: created.name,
+      estimatedTokens: 100,
+      estimatedCostMicros: 1_000,
+    };
+    await expect(router.reserve(context, request)).resolves.toMatchObject({
+      profile: { model_profile_id: alternate.model_profile_id },
+    });
+    await expect(
+      router.reserve(context, {
+        ...request,
+        commandId: crypto.randomUUID(),
+        preferredModelProfileIds: [profile.model_profile_id, alternate.model_profile_id],
+      }),
+    ).rejects.toThrow("Optimization Batch의 선호 순서");
+    await expect(
+      router.reserve(context, {
+        ...request,
+        commandId: crypto.randomUUID(),
+        preferredModelProfileIds: [alternate.model_profile_id, "foreign-profile"],
+        placementReceipt: {
+          ...request.placementReceipt,
+          axisEvidence: {
+            ...request.placementReceipt.axisEvidence,
+            rankedModelProfileIds: [alternate.model_profile_id, "foreign-profile"],
+          },
+        },
+      }),
+    ).rejects.toThrow("Optimization Batch의 선호 순서");
   });
 
   it("Task placement 계보는 strict하고 같은 command의 다른 receipt를 거부한다", async () => {
@@ -476,6 +568,25 @@ describe("Model Route simulation과 reservation", () => {
           taskId: "task-placement-1",
           taskAxis: "unsupported-axis",
           selectionBasis: "role-baseline-task-signal-missing",
+        },
+      }),
+    ).rejects.toThrow("Task placement 계보");
+    await expect(
+      router.reserve(context, {
+        ...request,
+        commandId: crypto.randomUUID(),
+        placementReceipt: {
+          workId: "work-placement-1",
+          taskId: "task-placement-1",
+          taskAxis: "code-understanding",
+          reasoningDifficulty: "high",
+          selectionBasis: "task-axis-evidence-available",
+          axisEvidence: {
+            bundleId: "bundle-placement-1",
+            bundleVersion: 1,
+            receiptIds: ["receipt-placement-1"],
+            rankedModelProfileIds: [profile.model_profile_id, profile.model_profile_id],
+          },
         },
       }),
     ).rejects.toThrow("Task placement 계보");
@@ -567,6 +678,105 @@ describe("Model Route simulation과 reservation", () => {
       actualCostMicros: 0,
     });
     await expect(router.readReservedAttemptByExecution(context, "execution-recovery-1")).resolves.toBeUndefined();
+  });
+
+  it("같은 실행의 immutable Route Attempt 스냅샷만 순서·fallback·Task placement와 함께 tenant에 공개한다", async () => {
+    const created = await route();
+    await database.query(
+      "CREATE optimization_batch CONTENT { batch_id: 'optimization-batch-lineage-1', organization_id: $organization_id, role_key: 'assurance', version: 1, status: 'active', primary_model_profile_id: $profile_id, fallback_model_profile_ids: [], checksum: $checksum }; CREATE optimization_active_pointer CONTENT { pointer_id: 'optimization-pointer-lineage-1', organization_id: $organization_id, role_key: 'assurance', batch_id: 'optimization-batch-lineage-1', batch_version: 1, checksum: $checksum };",
+      {
+        organization_id: context.organizationId,
+        profile_id: profile.model_profile_id,
+        checksum: "c".repeat(64),
+      },
+    );
+    const executionId = "execution-lineage-public-1";
+    const placementReceipt = {
+      workId: "work-lineage-public-1",
+      taskId: "task-lineage-public-1",
+      taskAxis: "code-understanding" as const,
+      reasoningDifficulty: "high" as const,
+      selectionBasis: "role-baseline-task-axis-evidence-unavailable" as const,
+    };
+    const request = {
+      executionId,
+      optimizationBatchId: "optimization-batch-lineage-1",
+      workId: placementReceipt.workId,
+      taskId: placementReceipt.taskId,
+      preferredModelProfileIds: [profile.model_profile_id],
+      placementReceipt,
+      routeName: created.name,
+      estimatedTokens: 100,
+      estimatedCostMicros: 1_000,
+    };
+    const first = await router.reserve(context, { ...request, commandId: crypto.randomUUID() });
+    await router.reportFailure(context, {
+      commandId: crypto.randomUUID(),
+      attemptId: first.attempt.attempt_id,
+      signal: { kind: "http", statusCode: 401 },
+      emittedTokens: 0,
+      sideEffectsStarted: false,
+      actualInputTokens: 0,
+      actualOutputTokens: 0,
+      actualCostMicros: 0,
+    });
+    const second = await router.reserve(context, {
+      ...request,
+      commandId: crypto.randomUUID(),
+      fallbackFromAttemptId: first.attempt.attempt_id,
+    });
+
+    const expected = [
+      {
+        attemptId: first.attempt.attempt_id,
+        executionId,
+        modelProfileId: profile.model_profile_id,
+        status: "failed",
+        placementReceipt,
+      },
+      {
+        attemptId: second.attempt.attempt_id,
+        executionId,
+        modelProfileId: profile.model_profile_id,
+        fallbackFromAttemptId: first.attempt.attempt_id,
+        status: "reserved",
+        placementReceipt,
+      },
+    ];
+    await expect(router.listAttemptLineagesByExecution(context, executionId)).resolves.toEqual(expected);
+
+    const member = await identity.registerPersonalUser({
+      email: `lineage-member-${crypto.randomUUID()}@example.com`,
+      displayName: "Lineage Member",
+    });
+    await organizations.addMember(context, member.user.user_id, "member");
+    const memberContext = await organizations.resolveTenantContext(member.user.user_id, context.organizationId);
+    await expect(router.listAttemptLineagesByExecution(memberContext, executionId)).resolves.toEqual(expected);
+
+    const outsider = await identity.registerPersonalUser({
+      email: `lineage-outsider-${crypto.randomUUID()}@example.com`,
+      displayName: "Lineage Outsider",
+    });
+    const outsiderContext = await organizations.resolveTenantContext(
+      outsider.user.user_id,
+      outsider.organization.organization_id,
+    );
+    await expect(router.listAttemptLineagesByExecution(outsiderContext, executionId)).rejects.toThrow(
+      "Route Attempt 실행 계보",
+    );
+  });
+
+  it("Route Attempt 실행 계보는 손상된 immutable 스냅샷과 유효하지 않은 실행 ID를 fail-closed한다", async () => {
+    await database.query(
+      "CREATE route_attempt CONTENT { attempt_id: $attempt_id, organization_id: $organization_id, route_id: 'route-lineage-malformed', candidate_id: 'candidate-lineage-malformed', model_profile_id: 'profile-lineage-malformed', credential_id: 'credential-lineage-malformed', credential_secret_version: 1, command_id: 'command-lineage-malformed', execution_id: 'execution-lineage-malformed', status: 'succeeded', selection_sequence: 1, estimated_tokens: 0, reserved_cost_micros: 0, explanation_json: '{}', created_at: time::now(), updated_at: time::now() };",
+      { attempt_id: crypto.randomUUID(), organization_id: context.organizationId },
+    );
+
+    await expect(router.listAttemptLineagesByExecution(context, "execution-lineage-malformed")).rejects.toThrow(
+      "설명 스냅샷",
+    );
+    await expect(router.listAttemptLineagesByExecution(context, " \n")).rejects.toThrow("실행 ID");
+    await expect(router.listAttemptLineagesByExecution(context, "execution\0lineage")).rejects.toThrow("실행 ID");
   });
 
   it("새 계보 필드가 없는 reservation은 기존 경로대로 동작한다", async () => {

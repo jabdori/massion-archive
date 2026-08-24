@@ -422,13 +422,12 @@ describe("Massion routed model factory", () => {
       execution_id: "execution-lineage-1",
       optimization_batch_id: "optimization-batch-1",
     });
-    Object.assign(router, {
-      readReservedAttemptByExecution: async (tenant: TenantContext, executionId: string) => {
-        const attempt = await router.readAttempt(tenant, lease.attemptId);
-        return attempt.execution_id === executionId && attempt.status === "reserved" ? attempt : undefined;
-      },
-    });
     const originalAttempt = await router.readAttempt(context, lease.attemptId);
+    let recoveredAttempt: typeof originalAttempt | undefined = originalAttempt;
+    Object.assign(router, {
+      readReservedAttemptByExecution: async (_tenant: TenantContext, executionId: string) =>
+        executionId === "execution-lineage-1" ? recoveredAttempt : undefined,
+    });
     const mismatchedExplanation = JSON.parse(originalAttempt.explanation_json) as {
       request: string;
       explanation: unknown;
@@ -437,23 +436,8 @@ describe("Massion routed model factory", () => {
       ...(JSON.parse(mismatchedExplanation.request) as Record<string, unknown>),
       optimizationBatchId: "different-batch",
     });
-    await database.query(
-      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
-      {
-        organization_id: context.organizationId,
-        attempt_id: lease.attemptId,
-        explanation_json: JSON.stringify(mismatchedExplanation),
-      },
-    );
+    recoveredAttempt = { ...originalAttempt, explanation_json: JSON.stringify(mismatchedExplanation) };
     await expect(factory.recoverReservedSelection(context, "execution-lineage-1")).rejects.toThrow("batch 계보");
-    await database.query(
-      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
-      {
-        organization_id: context.organizationId,
-        attempt_id: lease.attemptId,
-        explanation_json: originalAttempt.explanation_json,
-      },
-    );
     const mismatchedPlacement = JSON.parse(originalAttempt.explanation_json) as {
       request: string;
       explanation: unknown;
@@ -468,14 +452,7 @@ describe("Massion routed model factory", () => {
         selectionBasis: "role-baseline-task-axis-evidence-unavailable",
       },
     });
-    await database.query(
-      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
-      {
-        organization_id: context.organizationId,
-        attempt_id: lease.attemptId,
-        explanation_json: JSON.stringify(mismatchedPlacement),
-      },
-    );
+    recoveredAttempt = { ...originalAttempt, explanation_json: JSON.stringify(mismatchedPlacement) };
     await expect(factory.recoverReservedSelection(context, "execution-lineage-1")).rejects.toThrow(
       "Task placement 계보",
     );
@@ -493,25 +470,11 @@ describe("Massion routed model factory", () => {
       selectionBasis: "role-baseline-task-axis-evidence-unavailable",
     };
     injectedPlacement.request = JSON.stringify(injectedRequest);
-    await database.query(
-      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
-      {
-        organization_id: context.organizationId,
-        attempt_id: lease.attemptId,
-        explanation_json: JSON.stringify(injectedPlacement),
-      },
-    );
+    recoveredAttempt = { ...originalAttempt, explanation_json: JSON.stringify(injectedPlacement) };
     await expect(factory.recoverReservedSelection(context, "execution-lineage-1")).rejects.toThrow(
       "Task placement 계보",
     );
-    await database.query(
-      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
-      {
-        organization_id: context.organizationId,
-        attempt_id: lease.attemptId,
-        explanation_json: originalAttempt.explanation_json,
-      },
-    );
+    recoveredAttempt = originalAttempt;
     const recovered = await factory.recoverReservedSelection(context, "execution-lineage-1");
     expect(recovered).toMatchObject({
       attemptId: lease.attemptId,
@@ -534,6 +497,7 @@ describe("Massion routed model factory", () => {
       inputTokens: 0,
       outputTokens: 0,
     });
+    recoveredAttempt = undefined;
     await expect(factory.recoverReservedSelection(context, "execution-lineage-1")).resolves.toBeUndefined();
   });
 
@@ -549,12 +513,6 @@ describe("Massion routed model factory", () => {
       estimatedTokens: 100,
       estimatedCostMicros: 1_000,
     });
-    Object.assign(router, {
-      readReservedAttemptByExecution: async (tenant: TenantContext, executionId: string) => {
-        const attempt = await router.readAttempt(tenant, lease.attemptId);
-        return attempt.execution_id === executionId && attempt.status === "reserved" ? attempt : undefined;
-      },
-    });
     const attempt = await router.readAttempt(context, lease.attemptId);
     const explanation = JSON.parse(attempt.explanation_json) as { request: string; explanation: unknown };
     explanation.request = JSON.stringify({
@@ -565,14 +523,12 @@ describe("Massion routed model factory", () => {
         selectionBasis: "role-baseline-task-signal-missing",
       },
     });
-    await database.query(
-      "UPDATE route_attempt SET explanation_json = $explanation_json WHERE organization_id = $organization_id AND attempt_id = $attempt_id;",
-      {
-        organization_id: context.organizationId,
-        attempt_id: lease.attemptId,
-        explanation_json: JSON.stringify(explanation),
-      },
-    );
+    Object.assign(router, {
+      readReservedAttemptByExecution: async (_tenant: TenantContext, executionId: string) =>
+        executionId === "execution-unbatched-placement-1"
+          ? { ...attempt, explanation_json: JSON.stringify(explanation) }
+          : undefined,
+    });
 
     await expect(factory.recoverReservedSelection(context, "execution-unbatched-placement-1")).rejects.toThrow(
       "Task placement 계보",

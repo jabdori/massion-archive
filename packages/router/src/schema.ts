@@ -348,5 +348,13 @@ DEFINE FIELD last_successful_at ON provider_model_catalog_sync TYPE option<datet
 DEFINE FIELD created_at ON provider_model_catalog_sync TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at ON provider_model_catalog_sync TYPE datetime;
 DEFINE INDEX provider_model_catalog_sync_endpoint ON provider_model_catalog_sync FIELDS organization_id, endpoint_id UNIQUE;
+  `,
+);
+
+// prettier-ignore -- migration SQL의 공백도 checksum에 포함됩니다.
+export const ROUTE_ATTEMPT_EXPLANATION_SNAPSHOT_MIGRATION = defineMigration(
+  "0128-route-attempt-explanation-snapshot",
+  `
+DEFINE FIELD OVERWRITE explanation_json ON route_attempt TYPE string READONLY;
 `,
 );

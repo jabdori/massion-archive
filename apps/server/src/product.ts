@@ -287,6 +287,7 @@ export function modelPreferenceFromActiveBatch(
   roleKey: string | undefined,
   batch: OptimizationBatch | undefined,
   placementReceipt?: TaskPlacementReceipt,
+  profileIds?: readonly string[],
 ):
   | {
       readonly profileIds: readonly string[];
@@ -297,20 +298,46 @@ export function modelPreferenceFromActiveBatch(
   if (!roleKey || !isOptimizationRoleKey(roleKey) || !batch || batch.status !== "active" || batch.roleKey !== roleKey) {
     return undefined;
   }
-  const profileIds = [
+  const baselineProfileIds = [
     ...(batch.primaryModelProfileId ? [batch.primaryModelProfileId] : []),
     ...batch.fallbackModelProfileIds,
   ];
-  return profileIds.length > 0
-    ? { profileIds, batchId: batch.batchId, ...(placementReceipt === undefined ? {} : { placementReceipt }) }
+  const selectedProfileIds = profileIds ?? baselineProfileIds;
+  return selectedProfileIds.length > 0
+    ? {
+        profileIds: selectedProfileIds,
+        batchId: batch.batchId,
+        ...(placementReceipt === undefined ? {} : { placementReceipt }),
+      }
     : undefined;
 }
 
 export function placementReceiptForTask(
   task: Pick<WorkTask, "work_id" | "task_id" | "task_axis" | "reasoning_difficulty">,
+  axisSelection?: {
+    readonly modelProfileIds: readonly string[];
+    readonly receiptIds: readonly string[];
+    readonly bundleId: string;
+    readonly bundleVersion: number;
+  },
 ): TaskPlacementReceipt {
   if (task.task_axis === undefined || task.reasoning_difficulty === undefined) {
     return { workId: task.work_id, taskId: task.task_id, selectionBasis: "role-baseline-task-signal-missing" };
+  }
+  if (axisSelection !== undefined) {
+    return {
+      workId: task.work_id,
+      taskId: task.task_id,
+      taskAxis: task.task_axis,
+      reasoningDifficulty: task.reasoning_difficulty,
+      selectionBasis: "task-axis-evidence-available",
+      axisEvidence: {
+        bundleId: axisSelection.bundleId,
+        bundleVersion: axisSelection.bundleVersion,
+        receiptIds: axisSelection.receiptIds,
+        rankedModelProfileIds: axisSelection.modelProfileIds,
+      },
+    };
   }
   return {
     workId: task.work_id,
@@ -528,20 +555,38 @@ export async function createMassionDaemon(
     );
     const optimizationEvaluations = await ModelOptimizationStore.create(database, organizations, {
       modelCatalog: async (context) => {
-        const [models, routes] = await Promise.all([router.listModels(context), router.listRoutes(context)]);
-        return models.map((model) => {
-          const route = routes.find((candidate) => candidate.equivalence_group === model.equivalence_group);
-          return {
-            modelProfileId: model.model_profile_id,
-            modelId: model.model_id,
-            routeId: route?.route_id ?? model.endpoint_id,
-            providerId: model.provider_id,
-            verified: model.verified && model.enabled,
-            supportsStructuredOutput: model.supports_structured_output,
-            supportsTools: model.supports_tools,
-            supportsStreaming: model.supports_streaming,
-            dataPolicy: route?.data_policy ?? "external-allowed",
-          };
+        const [models, routes, candidates] = await Promise.all([
+          router.listModels(context),
+          router.listRoutes(context),
+          router.listCandidates(context),
+        ]);
+        const linkedCandidates = new Set(
+          candidates
+            .filter((candidate) => candidate.enabled)
+            .map((candidate) => `${candidate.route_id}\0${candidate.model_profile_id}`),
+        );
+        return models.flatMap((model) => {
+          if (!model.verified || !model.enabled) return [];
+          const route = routes.find(
+            (candidate) =>
+              candidate.enabled &&
+              candidate.equivalence_group === model.equivalence_group &&
+              linkedCandidates.has(`${candidate.route_id}\0${model.model_profile_id}`),
+          );
+          if (!route) return [];
+          return [
+            {
+              modelProfileId: model.model_profile_id,
+              modelId: model.model_id,
+              routeId: route.route_id,
+              providerId: model.provider_id,
+              verified: true,
+              supportsStructuredOutput: model.supports_structured_output,
+              supportsTools: model.supports_tools,
+              supportsStreaming: model.supports_streaming,
+              dataPolicy: route.data_policy,
+            },
+          ];
         });
       },
       executor: {
@@ -694,13 +739,28 @@ export async function createMassionDaemon(
           if (!input.agentHandle || !isOptimizationRoleKey(input.agentHandle)) return undefined;
           const active = await optimizationBatches.getActiveBatch(context, input.agentHandle);
           const baseline = modelPreferenceFromActiveBatch(input.agentHandle, active);
-          if (!baseline || input.taskId === undefined) return baseline;
+          if (!active || !baseline || input.taskId === undefined) return baseline;
           if (input.workId === undefined) throw new Error("Task placement에는 Work ID가 필요합니다");
           const task = (await works.listTasks(context, input.workId)).find(
             (candidate) => candidate.task_id === input.taskId,
           );
           if (!task) throw new Error("모델 선택 Task가 같은 Work에 없습니다");
-          return modelPreferenceFromActiveBatch(input.agentHandle, active, placementReceiptForTask(task));
+          if (task.task_axis === undefined || task.reasoning_difficulty === undefined) {
+            return modelPreferenceFromActiveBatch(input.agentHandle, active, placementReceiptForTask(task));
+          }
+          const axisSelection = await optimizationEvaluations.selectTaskAxisModels(context, {
+            roleKey: input.agentHandle,
+            recommendationId: active.recommendationId,
+            modelProfileIds: baseline.profileIds,
+            taskAxis: task.task_axis,
+            reasoningDifficulty: task.reasoning_difficulty,
+          });
+          return modelPreferenceFromActiveBatch(
+            input.agentHandle,
+            active,
+            placementReceiptForTask(task, axisSelection),
+            axisSelection?.modelProfileIds,
+          );
         },
       },
     );
@@ -1376,6 +1436,8 @@ export async function createMassionDaemon(
           messages: async (timelineContext, workId, roomId) =>
             await works.listMessages(timelineContext, workId, roomId),
         },
+        assurance,
+        assuranceChecks,
         assuranceBindings,
         extension: extensionGateway,
         growth,

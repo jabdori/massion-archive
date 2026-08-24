@@ -27,6 +27,19 @@ describe("Application model optimization operations", () => {
     });
     context = await organizations.resolveTenantContext(owner.user.user_id, owner.organization.organization_id);
     evaluations = await ModelOptimizationStore.create(database, organizations, {
+      modelCatalog: async () => [
+        {
+          modelProfileId: "profile-1",
+          modelId: "model-1",
+          routeId: "route-1",
+          providerId: "provider-1",
+          verified: true,
+          supportsStructuredOutput: true,
+          supportsTools: true,
+          supportsStreaming: true,
+          dataPolicy: "external-allowed",
+        },
+      ],
       executor: {
         execute: async () => ({
           qualityScore: 0.9,
@@ -63,34 +76,6 @@ describe("Application model optimization operations", () => {
     const recommendation = await evaluations.recommend(context, {
       commandId: "optimization-approval-recommendation",
       roleKey: "assurance",
-      candidates: [
-        {
-          modelProfileId: "profile-governed",
-          modelId: "model-governed",
-          routeId: "route-governed",
-          providerId: "provider-governed",
-          verified: true,
-          supportsStructuredOutput: true,
-          supportsTools: true,
-          supportsStreaming: true,
-          dataPolicy: "external-allowed",
-        },
-      ],
-      receipts: [
-        {
-          roleKey: "assurance",
-          modelProfileId: "profile-governed",
-          bundleVersion: 1,
-          sampleCount: 3,
-          qualityScore: 0.9,
-          latencyMs: 10,
-          costMicros: 1,
-          privacyAllowed: true,
-          completed: true,
-          inputChecksum: "a".repeat(64),
-          receiptChecksum: "b".repeat(64),
-        },
-      ],
       requirements: {
         requiresTools: false,
         requiresStructuredOutput: false,
@@ -162,6 +147,72 @@ describe("Application model optimization operations", () => {
     expect(authorize).toHaveBeenCalledTimes(2);
   });
 
+  it("추천 command가 호출자가 넣은 후보 메타데이터를 거부한다", async () => {
+    await expect(
+      registry.dispatch(context, ["optimization:write"], {
+        schemaVersion: "massion.application.v1",
+        commandId: "optimization-forged-receipt-command",
+        correlationId: "optimization-forged-receipt-correlation",
+        operation: "optimization.recommend",
+        payload: {
+          roleKey: "assurance",
+          requirements: {
+            requiresTools: false,
+            requiresStructuredOutput: false,
+            requiresStreaming: false,
+            dataPolicy: "external-allowed",
+          },
+          candidates: [
+            {
+              modelProfileId: "forged-profile",
+              verified: true,
+              dataPolicy: "local-private",
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ category: "validation", operatorCode: "APP_COMMAND_VALIDATION" });
+  });
+
+  it("추천 command가 호출자가 넣은 receipt 점수를 거부한다", async () => {
+    await expect(
+      registry.dispatch(context, ["optimization:write"], {
+        schemaVersion: "massion.application.v1",
+        commandId: "optimization-forged-receipt-command",
+        correlationId: "optimization-forged-receipt-correlation",
+        operation: "optimization.recommend",
+        payload: {
+          roleKey: "assurance",
+          requirements: {
+            requiresTools: false,
+            requiresStructuredOutput: false,
+            requiresStreaming: false,
+            dataPolicy: "external-allowed",
+          },
+          receipts: [],
+        },
+      }),
+    ).rejects.toMatchObject({ category: "validation", operatorCode: "APP_COMMAND_VALIDATION" });
+  });
+
+  it("호출자가 임의 평가·관찰 점수를 기록하는 legacy operation을 거부한다", async () => {
+    for (const operation of [
+      "optimization.evaluation.start",
+      "optimization.evaluation.complete",
+      "optimization.observation.record",
+    ]) {
+      await expect(
+        registry.dispatch(context, ["optimization:write"], {
+          schemaVersion: "massion.application.v1",
+          commandId: `optimization-forged-${operation}`,
+          correlationId: `optimization-forged-${operation}-correlation`,
+          operation,
+          payload: {},
+        }),
+      ).rejects.toMatchObject({ category: "validation", operatorCode: "APP_OPERATION_UNKNOWN" });
+    }
+  });
+
   it("정책과 평가 bundle을 Application operation으로 tenant 격리해 생성한다", async () => {
     const envelope = (commandId: string, operation: string, payload: unknown) => ({
       schemaVersion: "massion.application.v1",
@@ -185,24 +236,29 @@ describe("Application model optimization operations", () => {
         }),
       ),
     ).resolves.toMatchObject({ outcome: "succeeded", resource: { type: "OptimizationPolicy" } });
-    await expect(
-      registry.dispatch(
-        context,
-        ["optimization:write"],
-        envelope("optimization-bundle", "optimization.bundle.create", {
-          roleKey: "assurance",
-          runtimeVersion: "runtime-1",
-          cases: [
-            {
-              promptChecksum: "a".repeat(64),
-              toolsChecksum: "b".repeat(64),
-              environmentChecksum: "c".repeat(64),
-              expectedOutcome: "pass",
-            },
-          ],
-        }),
-      ),
-    ).resolves.toMatchObject({ outcome: "succeeded", resource: { type: "OptimizationBundle", revision: 1 } });
+    const bundle = await registry.dispatch(
+      context,
+      ["optimization:write"],
+      envelope("optimization-bundle", "optimization.bundle.create", {
+        roleKey: "assurance",
+        runtimeVersion: "runtime-1",
+        cases: [
+          {
+            promptChecksum: "a".repeat(64),
+            toolsChecksum: "b".repeat(64),
+            environmentChecksum: "c".repeat(64),
+            expectedOutcome: "pass",
+            taskAxis: "code-understanding",
+            reasoningDifficulty: "high",
+          },
+        ],
+      }),
+    );
+    expect(bundle).toMatchObject({ outcome: "succeeded", resource: { type: "OptimizationBundle", revision: 1 } });
+    const bundleId = (bundle.data as { readonly bundleId: string }).bundleId;
+    await expect(evaluations.listBundleCases(context, bundleId)).resolves.toEqual([
+      expect.objectContaining({ taskAxis: "code-understanding", reasoningDifficulty: "high" }),
+    ]);
   });
 
   it("평가 실행 operation은 저장된 bundle을 실제 evaluator port로 전달한다", async () => {
@@ -311,6 +367,35 @@ describe("Application model optimization operations", () => {
         correlationId: "optimization-gate-correlation",
         operation: "optimization.batch.activate",
         payload: { batchId: "candidate-batch" },
+      }),
+    ).rejects.toMatchObject({
+      category: "policy",
+      operatorCode: "APP_OPTIMIZATION_POLICY_GATE",
+    });
+  });
+
+  it("현재 활성 batch가 아닌 observation 복구는 구조화된 정책 오류로 반환한다", async () => {
+    const recoveryRegistry = new ApplicationCommandRegistry(
+      await ApplicationCommandStore.create(database, await OrganizationService.create(database)),
+    );
+    registerApplicationDomainCommands(recoveryRegistry, {
+      optimization: {
+        evaluations: {} as never,
+        batches: {
+          recover: async () => {
+            throw new Error("현재 활성 batch의 observation만 복구할 수 있습니다");
+          },
+        } as never,
+      },
+    });
+
+    await expect(
+      recoveryRegistry.dispatch(context, ["optimization:write"], {
+        schemaVersion: "massion.application.v1",
+        commandId: "optimization-stale-observation-command",
+        correlationId: "optimization-stale-observation-correlation",
+        operation: "optimization.recover",
+        payload: { observationId: "stale-observation" },
       }),
     ).rejects.toMatchObject({
       category: "policy",

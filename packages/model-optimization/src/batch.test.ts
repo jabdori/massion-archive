@@ -44,7 +44,7 @@ describe("모델 최적화 batch lifecycle", () => {
     );
     for (const receipt of receipts) {
       await database.query(
-        "CREATE optimization_receipt CONTENT { receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_version: 1, sample_count: 1, quality_score: 0.9, latency_ms: 10, cost_micros: 1, privacy_allowed: true, completed: true, input_checksum: $input_checksum, receipt_checksum: $receipt_checksum, command_id: $command_id, request_hash: $request_hash, created_at: time::now() };",
+        "CREATE optimization_receipt CONTENT { receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_id: 'bundle-test', bundle_version: 1, sample_count: 1, quality_score: 0.9, latency_ms: 10, cost_micros: 1, privacy_allowed: true, completed: true, input_checksum: $input_checksum, receipt_checksum: $receipt_checksum, command_id: $command_id, request_hash: $request_hash, created_at: time::now() };",
         {
           receipt_id: receipt.receiptId,
           run_id: `run-${receipt.receiptId}`,
@@ -247,7 +247,7 @@ describe("모델 최적화 batch lifecycle", () => {
 
   it("shadow 동의가 없는 정책에서는 shadow batch를 만들지 않는다", async () => {
     await database.query(
-      "CREATE optimization_policy_version CONTENT { policy_version_id: 'policy-shadow-off', organization_id: $organization_id, version: 1, policy: 'quality', auto_optimize: false, production_learning: false, shadow_enabled: false, minimum_sample_count: 1, improvement_threshold: 0, status: 'active', checksum: $checksum, governance_decision_id: 'decision-shadow-off', command_id: 'policy-shadow-off-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-shadow-off', organization_id: $organization_id, role_key: 'assurance', policy_version_id: 'policy-shadow-off', primary_model_profile_id: 'profile-shadow-off', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-shadow-off'], status: 'approved', checksum: $checksum2, command_id: 'recommendation-shadow-off-command', request_hash: $request_hash2, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_receipt CONTENT { receipt_id: 'receipt-shadow-off', run_id: 'run-shadow-off', organization_id: $organization_id, role_key: 'assurance', model_profile_id: 'profile-shadow-off', bundle_version: 1, sample_count: 1, quality_score: 0.9, latency_ms: 10, cost_micros: 1, privacy_allowed: true, completed: true, input_checksum: $checksum3, receipt_checksum: $checksum4, command_id: 'receipt-shadow-off-command', request_hash: $request_hash3, created_at: time::now() };",
+      "CREATE optimization_policy_version CONTENT { policy_version_id: 'policy-shadow-off', organization_id: $organization_id, version: 1, policy: 'quality', auto_optimize: false, production_learning: false, shadow_enabled: false, minimum_sample_count: 1, improvement_threshold: 0, status: 'active', checksum: $checksum, governance_decision_id: 'decision-shadow-off', command_id: 'policy-shadow-off-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-shadow-off', organization_id: $organization_id, role_key: 'assurance', policy_version_id: 'policy-shadow-off', primary_model_profile_id: 'profile-shadow-off', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-shadow-off'], status: 'approved', checksum: $checksum2, command_id: 'recommendation-shadow-off-command', request_hash: $request_hash2, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_receipt CONTENT { receipt_id: 'receipt-shadow-off', run_id: 'run-shadow-off', organization_id: $organization_id, role_key: 'assurance', model_profile_id: 'profile-shadow-off', bundle_id: 'bundle-test', bundle_version: 1, sample_count: 1, quality_score: 0.9, latency_ms: 10, cost_micros: 1, privacy_allowed: true, completed: true, input_checksum: $checksum3, receipt_checksum: $checksum4, command_id: 'receipt-shadow-off-command', request_hash: $request_hash3, created_at: time::now() };",
       {
         organization_id: context.organizationId,
         checksum: "a".repeat(64),
@@ -329,6 +329,33 @@ describe("모델 최적화 batch lifecycle", () => {
         status: "degraded",
       }),
     ).rejects.toThrow("같은 commandId");
+    await database.query("REMOVE EVENT optimization_observation_immutable ON TABLE optimization_observation;");
+    await database.query(
+      "UPDATE optimization_observation SET expires_at = $expires_at WHERE organization_id = $organization_id AND observation_id = $observation_id;",
+      {
+        organization_id: context.organizationId,
+        observation_id: observation.observationId,
+        expires_at: new Date(Date.now() - 1_000),
+      },
+    );
+    await expect(
+      batches.recover(context, {
+        commandId: "recovery-expired",
+        observationId: observation.observationId,
+      }),
+    ).rejects.toThrow("만료된 observation으로 복구할 수 없습니다");
+    expect(await batches.getActiveBatch(context, "growth")).toMatchObject({
+      batchId: newBatch.batchId,
+      status: "active",
+    });
+    await database.query(
+      "UPDATE optimization_observation SET expires_at = $expires_at WHERE organization_id = $organization_id AND observation_id = $observation_id;",
+      {
+        organization_id: context.organizationId,
+        observation_id: observation.observationId,
+        expires_at: new Date(Date.now() + 60_000),
+      },
+    );
     const recovery = await batches.recover(context, {
       commandId: "recovery-1",
       observationId: observation.observationId,
@@ -352,9 +379,68 @@ describe("모델 최적화 batch lifecycle", () => {
     });
   });
 
+  it("현재 활성 batch가 아닌 observation으로 최신 pointer를 되돌리지 않는다", async () => {
+    await seedPromotionGate("policy-current", [
+      { receiptId: "receipt-current-old", profileId: "profile-current-old", roleKey: "growth" },
+      { receiptId: "receipt-current-middle", profileId: "profile-current-middle", roleKey: "growth" },
+      { receiptId: "receipt-current-new", profileId: "profile-current-new", roleKey: "growth" },
+    ]);
+    await database.query(
+      "CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-current-old', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-current', primary_model_profile_id: 'profile-current-old', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-current-old'], status: 'approved', checksum: $checksum1, command_id: 'recommendation-current-old-command', request_hash: $request_hash1, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-current-middle', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-current', primary_model_profile_id: 'profile-current-middle', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-current-middle'], status: 'approved', checksum: $checksum2, command_id: 'recommendation-current-middle-command', request_hash: $request_hash2, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-current-new', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-current', primary_model_profile_id: 'profile-current-new', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-current-new'], status: 'approved', checksum: $checksum3, command_id: 'recommendation-current-new-command', request_hash: $request_hash3, created_by_user_id: $user_id, created_at: time::now() };",
+      {
+        organization_id: context.organizationId,
+        checksum1: "a".repeat(64),
+        request_hash1: "b".repeat(64),
+        checksum2: "c".repeat(64),
+        request_hash2: "d".repeat(64),
+        checksum3: "e".repeat(64),
+        request_hash3: "f".repeat(64),
+        user_id: context.userId,
+      },
+    );
+    const oldBatch = await batches.createBatch(context, {
+      commandId: "batch-current-old",
+      recommendationId: "recommendation-current-old",
+      status: "active",
+    });
+    await batches.activateBatch(context, { commandId: "activate-current-old", batchId: oldBatch.batchId });
+    const middleBatch = await batches.createBatch(context, {
+      commandId: "batch-current-middle",
+      recommendationId: "recommendation-current-middle",
+      status: "limited",
+    });
+    await batches.activateBatch(context, { commandId: "activate-current-middle", batchId: middleBatch.batchId });
+    const observation = await batches.recordObservation(context, {
+      commandId: "observation-current-middle",
+      batchId: middleBatch.batchId,
+      sampleCount: 10,
+      qualityScore: 0.2,
+      latencyMs: 1_000,
+      costMicros: 100,
+      status: "degraded",
+    });
+    const newBatch = await batches.createBatch(context, {
+      commandId: "batch-current-new",
+      recommendationId: "recommendation-current-new",
+      status: "limited",
+    });
+    await batches.activateBatch(context, { commandId: "activate-current-new", batchId: newBatch.batchId });
+
+    await expect(
+      batches.recover(context, {
+        commandId: "recovery-current-mismatch",
+        observationId: observation.observationId,
+      }),
+    ).rejects.toThrow("현재 활성 batch");
+    expect(await batches.getActiveBatch(context, "growth")).toMatchObject({
+      batchId: newBatch.batchId,
+      status: "active",
+    });
+  });
+
   it("정책이 요구한 최소 표본을 채우지 못한 추천은 제한 batch로 승격하지 않는다", async () => {
     await database.query(
-      "CREATE optimization_policy_version CONTENT { policy_version_id: 'policy-gated', organization_id: $organization_id, version: 1, policy: 'quality', auto_optimize: false, production_learning: false, shadow_enabled: true, minimum_sample_count: 3, improvement_threshold: 0.1, status: 'active', checksum: $checksum, governance_decision_id: 'decision-gated', command_id: 'policy-gated-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-gated', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-gated', primary_model_profile_id: 'profile-gated', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-gated'], status: 'approved', checksum: $checksum2, command_id: 'recommendation-gated-command', request_hash: $request_hash2, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_receipt CONTENT { receipt_id: 'receipt-gated', run_id: 'run-gated', organization_id: $organization_id, role_key: 'growth', model_profile_id: 'profile-gated', bundle_version: 1, sample_count: 1, quality_score: 0.9, latency_ms: 100, cost_micros: 10, privacy_allowed: true, completed: true, input_checksum: $checksum3, receipt_checksum: $checksum4, command_id: 'receipt-gated-command', request_hash: $request_hash3, created_at: time::now() };",
+      "CREATE optimization_policy_version CONTENT { policy_version_id: 'policy-gated', organization_id: $organization_id, version: 1, policy: 'quality', auto_optimize: false, production_learning: false, shadow_enabled: true, minimum_sample_count: 3, improvement_threshold: 0.1, status: 'active', checksum: $checksum, governance_decision_id: 'decision-gated', command_id: 'policy-gated-command', request_hash: $request_hash, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_recommendation CONTENT { recommendation_id: 'recommendation-gated', organization_id: $organization_id, role_key: 'growth', policy_version_id: 'policy-gated', primary_model_profile_id: 'profile-gated', fallback_model_profile_ids: [], excluded_json: '[]', receipt_ids: ['receipt-gated'], status: 'approved', checksum: $checksum2, command_id: 'recommendation-gated-command', request_hash: $request_hash2, created_by_user_id: $user_id, created_at: time::now() }; CREATE optimization_receipt CONTENT { receipt_id: 'receipt-gated', run_id: 'run-gated', organization_id: $organization_id, role_key: 'growth', model_profile_id: 'profile-gated', bundle_id: 'bundle-test', bundle_version: 1, sample_count: 1, quality_score: 0.9, latency_ms: 100, cost_micros: 10, privacy_allowed: true, completed: true, input_checksum: $checksum3, receipt_checksum: $checksum4, command_id: 'receipt-gated-command', request_hash: $request_hash3, created_at: time::now() };",
       {
         organization_id: context.organizationId,
         checksum: "a".repeat(64),

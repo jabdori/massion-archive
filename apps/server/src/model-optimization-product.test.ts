@@ -99,6 +99,45 @@ describe("Massion server model optimization product boundary", () => {
     });
   });
 
+  it("축별 평가 근거가 있으면 순위와 receipt 계보를 함께 남긴다", () => {
+    const receipt = (
+      productModule as unknown as {
+        placementReceiptForTask?: (
+          task: Record<string, unknown>,
+          selection: Record<string, unknown>,
+        ) => Record<string, unknown>;
+      }
+    ).placementReceiptForTask;
+    expect(
+      receipt?.(
+        {
+          work_id: "work-axis-1",
+          task_id: "task-axis-1",
+          task_axis: "code-understanding",
+          reasoning_difficulty: "high",
+        },
+        {
+          modelProfileIds: ["profile-specialist", "profile-generalist"],
+          receiptIds: ["receipt-specialist", "receipt-generalist"],
+          bundleId: "bundle-axis-1",
+          bundleVersion: 2,
+        },
+      ),
+    ).toEqual({
+      workId: "work-axis-1",
+      taskId: "task-axis-1",
+      taskAxis: "code-understanding",
+      reasoningDifficulty: "high",
+      selectionBasis: "task-axis-evidence-available",
+      axisEvidence: {
+        bundleId: "bundle-axis-1",
+        bundleVersion: 2,
+        receiptIds: ["receipt-specialist", "receipt-generalist"],
+        rankedModelProfileIds: ["profile-specialist", "profile-generalist"],
+      },
+    });
+  });
+
   it("서버 bootstrap부터 실제 로컬 모델 평가·receipt·추천까지 연결한다", async () => {
     const modelServer = createServer((_request, response) => {
       response.setHeader("content-type", "application/json");
@@ -213,6 +252,21 @@ describe("Massion server model optimization product boundary", () => {
         requestBudgetMicros: 1_000_000,
         totalBudgetMicros: 10_000_000,
       });
+      await command("router.route.configure", {
+        name: "evaluation-aaa-decoy",
+        routeKind: "chat",
+        credentialPolicy: "round-robin",
+        dataPolicy: "external-allowed",
+        equivalenceGroup: "evaluation-model",
+        minEvalScore: 0,
+        requireTools: false,
+        requireStructuredOutput: false,
+        requireVision: false,
+        requireStreaming: false,
+        maxContextTokens: 32_000,
+        requestBudgetMicros: 1_000_000,
+        totalBudgetMicros: 10_000_000,
+      });
       await command("router.candidate.add", {
         routeId: route.data.routeId,
         modelProfileId: model.data.modelProfileId,
@@ -266,20 +320,6 @@ describe("Massion server model optimization product boundary", () => {
 
       const recommendation = await command("optimization.recommend", {
         roleKey: "assurance",
-        candidates: [
-          {
-            modelProfileId: model.data.modelProfileId,
-            modelId: model.data.modelId,
-            routeId: route.data.routeId,
-            providerId: "local-evaluation",
-            verified: true,
-            supportsStructuredOutput: true,
-            supportsTools: true,
-            supportsStreaming: true,
-            dataPolicy: "external-allowed",
-          },
-        ],
-        receipts: [receipt.data],
         requirements: {
           requiresTools: false,
           requiresStructuredOutput: false,

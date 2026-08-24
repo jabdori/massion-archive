@@ -5,6 +5,7 @@ import { applyMigrations, type MassionDatabase, type QueryExecutor } from "@mass
 
 import {
   isOptimizationRoleKey,
+  rankEvaluationCandidates,
   recommendModels,
   type EvaluationReceipt,
   type EvaluationRequirements,
@@ -17,7 +18,9 @@ import type {
   CompleteEvaluationInput,
   EvaluationBundle,
   EvaluationCase,
+  EvaluationReasoningDifficulty,
   EvaluationRun,
+  EvaluationTaskAxis,
   ModelRecommendationRecord,
   OptimizationModelProfile,
   OptimizationPolicyVersion,
@@ -25,7 +28,12 @@ import type {
   StoredEvaluationReceipt,
 } from "./contracts.js";
 import type { EvaluationCapabilities, ModelEvaluationExecutionResult, ModelEvaluationExecutor } from "./ports.js";
-import { MODEL_OPTIMIZATION_HARDENING_MIGRATION, MODEL_OPTIMIZATION_MIGRATION } from "./schema.js";
+import {
+  MODEL_OPTIMIZATION_HARDENING_MIGRATION,
+  MODEL_OPTIMIZATION_MIGRATION,
+  MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION,
+  MODEL_OPTIMIZATION_TASK_AXIS_SCORE_MIGRATION,
+} from "./schema.js";
 import { createEvaluationExport, validateEvaluationExport, type EvaluationExport } from "./transfer.js";
 
 export type { OptimizationModelProfile } from "./contracts.js";
@@ -70,6 +78,7 @@ interface ReceiptRecord {
   readonly organization_id: string;
   readonly role_key: OptimizationRoleKey;
   readonly model_profile_id: string;
+  readonly bundle_id: string;
   readonly bundle_version: number;
   readonly sample_count: number;
   readonly quality_score: number;
@@ -81,6 +90,26 @@ interface ReceiptRecord {
   readonly receipt_checksum: string;
   readonly command_id: string;
   readonly request_hash: string;
+}
+
+interface AxisScoreRecord {
+  readonly score_id: string;
+  readonly receipt_id: string;
+  readonly run_id: string;
+  readonly organization_id: string;
+  readonly role_key: OptimizationRoleKey;
+  readonly model_profile_id: string;
+  readonly bundle_id: string;
+  readonly bundle_version: number;
+  readonly task_axis: EvaluationTaskAxis;
+  readonly reasoning_difficulty: EvaluationReasoningDifficulty;
+  readonly sample_count: number;
+  readonly quality_score: number;
+  readonly latency_ms: number;
+  readonly cost_micros: number;
+  readonly privacy_allowed: boolean;
+  readonly completed: boolean;
+  readonly score_checksum: string;
 }
 
 interface PolicyRecord {
@@ -124,6 +153,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(",")}}`;
@@ -147,6 +177,26 @@ function assertChecksum(value: unknown, label: string): asserts value is string 
 
 function assertRole(value: string): asserts value is OptimizationRoleKey {
   if (!isOptimizationRoleKey(value)) throw new Error(`지원하지 않는 최적화 역할입니다: ${value}`);
+}
+
+function assertTaskAxis(value: unknown): asserts value is EvaluationTaskAxis {
+  if (
+    !new Set<EvaluationTaskAxis>([
+      "code-generation",
+      "code-understanding",
+      "planning-design",
+      "review-critique",
+      "summary-records",
+    ]).has(value as EvaluationTaskAxis)
+  ) {
+    throw new Error("평가 작업 축이 유효하지 않습니다");
+  }
+}
+
+function assertReasoningDifficulty(value: unknown): asserts value is EvaluationReasoningDifficulty {
+  if (!new Set<EvaluationReasoningDifficulty>(["low", "medium", "high"]).has(value as EvaluationReasoningDifficulty)) {
+    throw new Error("평가 추론 난이도가 유효하지 않습니다");
+  }
 }
 
 function bundleView(record: BundleRecord): EvaluationBundle {
@@ -184,6 +234,7 @@ function receiptView(record: ReceiptRecord): StoredEvaluationReceipt {
     organizationId: record.organization_id,
     roleKey: record.role_key,
     modelProfileId: record.model_profile_id,
+    bundleId: record.bundle_id,
     bundleVersion: record.bundle_version,
     sampleCount: record.sample_count,
     qualityScore: record.quality_score,
@@ -231,8 +282,10 @@ function recommendationView(record: RecommendationRecord): ModelRecommendationRe
 
 function scoreReceipt(record: StoredEvaluationReceipt): EvaluationReceipt {
   return {
+    receiptId: record.receiptId,
     roleKey: record.roleKey,
     modelProfileId: record.modelProfileId,
+    bundleId: record.bundleId,
     bundleVersion: record.bundleVersion,
     sampleCount: record.sampleCount,
     qualityScore: record.qualityScore,
@@ -255,8 +308,6 @@ export interface CreateBundleInput {
 export interface RecommendInput {
   readonly commandId: string;
   readonly roleKey: OptimizationRoleKey;
-  readonly candidates: readonly OptimizationModelProfile[];
-  readonly receipts: readonly EvaluationReceipt[];
   readonly requirements: EvaluationRequirements;
   readonly manualModelProfileId?: string;
 }
@@ -287,6 +338,32 @@ export interface ExecuteEvaluationInput {
   readonly inputChecksum?: string;
 }
 
+export interface SelectTaskAxisModelsInput {
+  readonly roleKey: OptimizationRoleKey;
+  readonly recommendationId: string;
+  readonly modelProfileIds: readonly string[];
+  readonly taskAxis: EvaluationTaskAxis;
+  readonly reasoningDifficulty: EvaluationReasoningDifficulty;
+}
+
+export interface TaskAxisModelSelection {
+  readonly modelProfileIds: readonly string[];
+  readonly receiptIds: readonly string[];
+  readonly bundleId: string;
+  readonly bundleVersion: number;
+}
+
+interface AxisScoreInput {
+  readonly taskAxis: EvaluationTaskAxis;
+  readonly reasoningDifficulty: EvaluationReasoningDifficulty;
+  readonly sampleCount: number;
+  readonly qualityScore: number;
+  readonly latencyMs: number;
+  readonly costMicros: number;
+  readonly privacyAllowed: boolean;
+  readonly completed: boolean;
+}
+
 export class ModelOptimizationStore {
   private constructor(
     private readonly database: MassionDatabase,
@@ -299,7 +376,12 @@ export class ModelOptimizationStore {
     organizations: OrganizationService,
     options: ModelOptimizationStoreOptions = {},
   ): Promise<ModelOptimizationStore> {
-    await applyMigrations(database, [MODEL_OPTIMIZATION_MIGRATION, MODEL_OPTIMIZATION_HARDENING_MIGRATION]);
+    await applyMigrations(database, [
+      MODEL_OPTIMIZATION_MIGRATION,
+      MODEL_OPTIMIZATION_HARDENING_MIGRATION,
+      MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION,
+      MODEL_OPTIMIZATION_TASK_AXIS_SCORE_MIGRATION,
+    ]);
     return new ModelOptimizationStore(database, organizations, options);
   }
 
@@ -309,12 +391,23 @@ export class ModelOptimizationStore {
     assertRole(input.roleKey);
     assertText(input.runtimeVersion, "runtime version");
     if (input.cases.length < 1 || input.cases.length > 128) throw new Error("평가 case 수가 유효하지 않습니다");
+    const hasPlacementSignal = input.cases.map(
+      (item) => item.taskAxis !== undefined || item.reasoningDifficulty !== undefined,
+    );
+    if (hasPlacementSignal.some(Boolean) && !hasPlacementSignal.every(Boolean)) {
+      throw new Error("평가 bundle의 작업 축과 추론 난이도는 모든 case에 함께 필요합니다");
+    }
     for (const item of input.cases) {
       assertChecksum(item.promptChecksum, "prompt");
       assertChecksum(item.toolsChecksum, "tools");
       assertChecksum(item.environmentChecksum, "environment");
       if (item.prompt !== undefined) assertText(item.prompt, "평가 prompt", 16_384);
       assertText(item.expectedOutcome, "expected outcome", 4_096);
+      if ((item.taskAxis === undefined) !== (item.reasoningDifficulty === undefined)) {
+        throw new Error("평가 case의 작업 축과 추론 난이도는 함께 필요합니다");
+      }
+      if (item.taskAxis !== undefined) assertTaskAxis(item.taskAxis);
+      if (item.reasoningDifficulty !== undefined) assertReasoningDifficulty(item.reasoningDifficulty);
     }
     const requestHash = digest({ ...input, roleKey: input.roleKey });
     return await this.database.transaction(async (tx) => {
@@ -341,7 +434,7 @@ export class ModelOptimizationStore {
         const caseId = randomUUID();
         caseIds.push(caseId);
         await tx.query(
-          "CREATE optimization_case CONTENT { case_id: $case_id, organization_id: $organization_id, role_key: $role_key, version: $version, prompt_checksum: $prompt_checksum, tools_checksum: $tools_checksum, environment_checksum: $environment_checksum, prompt: $prompt, expected_outcome: $expected_outcome, created_at: time::now() };",
+          "CREATE optimization_case CONTENT { case_id: $case_id, organization_id: $organization_id, role_key: $role_key, version: $version, prompt_checksum: $prompt_checksum, tools_checksum: $tools_checksum, environment_checksum: $environment_checksum, prompt: $prompt, expected_outcome: $expected_outcome, task_axis: $task_axis, reasoning_difficulty: $reasoning_difficulty, created_at: time::now() };",
           {
             case_id: caseId,
             organization_id: context.organizationId,
@@ -352,11 +445,22 @@ export class ModelOptimizationStore {
             environment_checksum: item.environmentChecksum,
             prompt: item.prompt,
             expected_outcome: item.expectedOutcome,
+            task_axis: item.taskAxis,
+            reasoning_difficulty: item.reasoningDifficulty,
           },
         );
       }
       const bundleId = randomUUID();
-      const checksum = digest({ roleKey: input.roleKey, version, runtimeVersion: input.runtimeVersion, caseIds });
+      const checksum = digest({
+        roleKey: input.roleKey,
+        version,
+        runtimeVersion: input.runtimeVersion,
+        caseIds,
+        cases: input.cases.map((item) => ({
+          taskAxis: item.taskAxis,
+          reasoningDifficulty: item.reasoningDifficulty,
+        })),
+      });
       const [created] = await tx.query<[BundleRecord[]]>(
         "CREATE optimization_bundle CONTENT { bundle_id: $bundle_id, organization_id: $organization_id, role_key: $role_key, version: $version, case_ids: $case_ids, runtime_version: $runtime_version, checksum: $checksum, status: 'active', command_id: $command_id, request_hash: $request_hash, created_at: time::now() } RETURN AFTER;",
         {
@@ -429,6 +533,14 @@ export class ModelOptimizationStore {
     context: TenantContext,
     input: CompleteEvaluationInput,
   ): Promise<StoredEvaluationReceipt> {
+    return await this.completeEvaluationWithAxisScores(context, input);
+  }
+
+  private async completeEvaluationWithAxisScores(
+    context: TenantContext,
+    input: CompleteEvaluationInput,
+    axisScores: readonly AxisScoreInput[] = [],
+  ): Promise<StoredEvaluationReceipt> {
     await this.organizations.verifyTenantContext(context);
     assertText(input.commandId, "명령 식별자");
     assertText(input.runId, "평가 run 식별자");
@@ -465,6 +577,7 @@ export class ModelOptimizationStore {
       if (run.status !== "running") throw new Error("running 상태의 평가 run만 완료할 수 있습니다");
       const receiptChecksum = digest({
         runId: run.run_id,
+        bundleId: run.bundle_id,
         sampleCount: input.sampleCount,
         qualityScore: input.qualityScore,
         latencyMs: input.latencyMs,
@@ -473,13 +586,14 @@ export class ModelOptimizationStore {
         completed: input.completed,
       });
       const [created] = await tx.query<[ReceiptRecord[]]>(
-        "CREATE optimization_receipt CONTENT { receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_version: $bundle_version, sample_count: $sample_count, quality_score: $quality_score, latency_ms: $latency_ms, cost_micros: $cost_micros, privacy_allowed: $privacy_allowed, completed: $completed, input_checksum: $input_checksum, receipt_checksum: $receipt_checksum, command_id: $command_id, request_hash: $request_hash, created_at: time::now() } RETURN AFTER; UPDATE optimization_run SET status = 'completed', updated_at = time::now() WHERE organization_id = $organization_id AND run_id = $run_id;",
+        "CREATE optimization_receipt CONTENT { receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_id: $bundle_id, bundle_version: $bundle_version, sample_count: $sample_count, quality_score: $quality_score, latency_ms: $latency_ms, cost_micros: $cost_micros, privacy_allowed: $privacy_allowed, completed: $completed, input_checksum: $input_checksum, receipt_checksum: $receipt_checksum, command_id: $command_id, request_hash: $request_hash, created_at: time::now() } RETURN AFTER;",
         {
           receipt_id: randomUUID(),
           run_id: run.run_id,
           organization_id: context.organizationId,
           role_key: run.role_key,
           model_profile_id: run.model_profile_id,
+          bundle_id: run.bundle_id,
           bundle_version: run.bundle_version,
           sample_count: input.sampleCount,
           quality_score: input.qualityScore,
@@ -494,6 +608,48 @@ export class ModelOptimizationStore {
         },
       );
       if (!created[0]) throw new Error("평가 receipt 생성 결과가 없습니다");
+      for (const score of axisScores) {
+        const scoreChecksum = digest({
+          receiptId: created[0].receipt_id,
+          runId: run.run_id,
+          bundleId: run.bundle_id,
+          bundleVersion: run.bundle_version,
+          taskAxis: score.taskAxis,
+          reasoningDifficulty: score.reasoningDifficulty,
+          sampleCount: score.sampleCount,
+          qualityScore: score.qualityScore,
+          latencyMs: score.latencyMs,
+          costMicros: score.costMicros,
+          privacyAllowed: score.privacyAllowed,
+          completed: score.completed,
+        });
+        await tx.query(
+          "CREATE optimization_receipt_axis_score CONTENT { score_id: $score_id, receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_id: $bundle_id, bundle_version: $bundle_version, task_axis: $task_axis, reasoning_difficulty: $reasoning_difficulty, sample_count: $sample_count, quality_score: $quality_score, latency_ms: $latency_ms, cost_micros: $cost_micros, privacy_allowed: $privacy_allowed, completed: $completed, score_checksum: $score_checksum, created_at: time::now() };",
+          {
+            score_id: randomUUID(),
+            receipt_id: created[0].receipt_id,
+            run_id: run.run_id,
+            organization_id: context.organizationId,
+            role_key: run.role_key,
+            model_profile_id: run.model_profile_id,
+            bundle_id: run.bundle_id,
+            bundle_version: run.bundle_version,
+            task_axis: score.taskAxis,
+            reasoning_difficulty: score.reasoningDifficulty,
+            sample_count: score.sampleCount,
+            quality_score: score.qualityScore,
+            latency_ms: score.latencyMs,
+            cost_micros: score.costMicros,
+            privacy_allowed: score.privacyAllowed,
+            completed: score.completed,
+            score_checksum: scoreChecksum,
+          },
+        );
+      }
+      await tx.query(
+        "UPDATE optimization_run SET status = 'completed', updated_at = time::now() WHERE organization_id = $organization_id AND run_id = $run_id;",
+        { organization_id: context.organizationId, run_id: run.run_id },
+      );
       return receiptView(created[0]);
     });
   }
@@ -567,7 +723,10 @@ export class ModelOptimizationStore {
       approval: false,
       organizationMutation: false,
     };
-    const results: ModelEvaluationExecutionResult[] = [];
+    const executions: Array<{
+      readonly evaluationCase: EvaluationCase;
+      readonly result: ModelEvaluationExecutionResult;
+    }> = [];
     try {
       for (const evaluationCase of cases) {
         const result = await executor.execute({
@@ -583,23 +742,29 @@ export class ModelOptimizationStore {
           capabilities,
         });
         this.assertExecutionResult(result);
-        results.push(result);
+        executions.push({ evaluationCase, result });
       }
     } catch (error) {
       await this.markRunFailed(context, run.runId);
       throw error;
     }
+    const results = executions.map((execution) => execution.result);
     const sampleCount = results.length;
-    return await this.completeEvaluation(context, {
-      commandId: `${input.commandId}:receipt`,
-      runId: run.runId,
-      sampleCount,
-      qualityScore: results.reduce((total, result) => total + result.qualityScore, 0) / sampleCount,
-      latencyMs: results.reduce((total, result) => total + result.latencyMs, 0) / sampleCount,
-      costMicros: results.reduce((total, result) => total + result.costMicros, 0),
-      privacyAllowed: results.every((result) => result.privacyAllowed),
-      completed: results.every((result) => result.completed),
-    });
+    const axisScores = this.axisScores(executions);
+    return await this.completeEvaluationWithAxisScores(
+      context,
+      {
+        commandId: `${input.commandId}:receipt`,
+        runId: run.runId,
+        sampleCount,
+        qualityScore: results.reduce((total, result) => total + result.qualityScore, 0) / sampleCount,
+        latencyMs: results.reduce((total, result) => total + result.latencyMs, 0) / sampleCount,
+        costMicros: results.reduce((total, result) => total + result.costMicros, 0),
+        privacyAllowed: results.every((result) => result.privacyAllowed),
+        completed: results.every((result) => result.completed),
+      },
+      axisScores,
+    );
   }
 
   public async configurePolicy(
@@ -709,19 +874,8 @@ export class ModelOptimizationStore {
       status: "active" as const,
       checksum: digest("implicit-default"),
     };
-    const candidates =
-      input.candidates.length > 0 || !this.options.modelCatalog
-        ? input.candidates
-        : await this.options.modelCatalog(context);
-    const scored: ModelRecommendation = recommendModels({
-      roleKey: input.roleKey,
-      policy: policy.policy,
-      candidates,
-      receipts: input.receipts,
-      requirements: input.requirements,
-      ...(input.manualModelProfileId ? { manualModelProfileId: input.manualModelProfileId } : {}),
-      minimumSampleCount: policy.minimumSampleCount,
-    });
+    if (!this.options.modelCatalog) throw new Error("정본 모델 catalog가 구성되지 않았습니다");
+    const candidates = await this.options.modelCatalog(context);
     const requestHash = digest(input);
     return await this.database.transaction(async (tx) => {
       const repeated = await this.command<RecommendationRecord>(
@@ -735,15 +889,20 @@ export class ModelOptimizationStore {
           throw new Error("같은 commandId에 다른 모델 추천을 사용할 수 없습니다");
         return recommendationView(repeated);
       }
-      const profileIds = [
-        scored.primary?.modelProfileId,
-        ...scored.fallbacks.map((candidate) => candidate.modelProfileId),
-      ].filter((value): value is string => value !== undefined);
       const [receipts] = await tx.query<[ReceiptRecord[]]>(
-        "SELECT * OMIT id FROM optimization_receipt WHERE organization_id = $organization_id AND role_key = $role_key AND model_profile_id IN $profile_ids ORDER BY created_at DESC;",
-        { organization_id: context.organizationId, role_key: input.roleKey, profile_ids: profileIds },
+        "SELECT * OMIT id FROM optimization_receipt WHERE organization_id = $organization_id AND role_key = $role_key ORDER BY created_at DESC;",
+        { organization_id: context.organizationId, role_key: input.roleKey },
       );
-      const receiptIds = receipts.map((receipt) => receipt.receipt_id);
+      const scored: ModelRecommendation = recommendModels({
+        roleKey: input.roleKey,
+        policy: policy.policy,
+        candidates,
+        receipts: receipts.map((receipt) => scoreReceipt(receiptView(receipt))),
+        requirements: input.requirements,
+        ...(input.manualModelProfileId ? { manualModelProfileId: input.manualModelProfileId } : {}),
+        minimumSampleCount: policy.minimumSampleCount,
+      });
+      const receiptIds = scored.receiptIds;
       const recommendationChecksum = digest({
         roleKey: input.roleKey,
         policyVersionId: policy.policyVersionId,
@@ -789,6 +948,152 @@ export class ModelOptimizationStore {
     return records.map(receiptView);
   }
 
+  public async selectTaskAxisModels(
+    context: TenantContext,
+    input: SelectTaskAxisModelsInput,
+  ): Promise<TaskAxisModelSelection | undefined> {
+    await this.organizations.verifyTenantContext(context);
+    assertRole(input.roleKey);
+    assertText(input.recommendationId, "추천 식별자");
+    assertTaskAxis(input.taskAxis);
+    assertReasoningDifficulty(input.reasoningDifficulty);
+    if (!input.modelProfileIds.length || new Set(input.modelProfileIds).size !== input.modelProfileIds.length)
+      return undefined;
+    for (const modelProfileId of input.modelProfileIds) assertText(modelProfileId, "model profile 식별자");
+    if (!this.options.modelCatalog) return undefined;
+    const candidates = await this.options.modelCatalog(context);
+    const profiles = input.modelProfileIds.map((modelProfileId) =>
+      candidates.find((candidate) => candidate.modelProfileId === modelProfileId),
+    );
+    if (profiles.some((profile) => !profile?.verified)) return undefined;
+    const profilesById = new Map(
+      profiles
+        .filter((profile): profile is OptimizationModelProfile => profile !== undefined)
+        .map((profile) => [profile.modelProfileId, profile]),
+    );
+    const [recommendations] = await this.database.query<[RecommendationRecord[]]>(
+      "SELECT * OMIT id FROM optimization_recommendation WHERE organization_id = $organization_id AND recommendation_id = $recommendation_id LIMIT 1;",
+      { organization_id: context.organizationId, recommendation_id: input.recommendationId },
+    );
+    const recommendation = recommendations[0];
+    const recommendationModelProfileIds = [
+      recommendation?.primary_model_profile_id,
+      ...(recommendation?.fallback_model_profile_ids ?? []),
+    ].filter((modelProfileId): modelProfileId is string => modelProfileId !== undefined);
+    const requestedModelProfileIds = new Set(input.modelProfileIds);
+    if (
+      !recommendation ||
+      recommendation.role_key !== input.roleKey ||
+      recommendation.status !== "approved" ||
+      recommendation.receipt_ids.length !== input.modelProfileIds.length ||
+      new Set(recommendation.receipt_ids).size !== recommendation.receipt_ids.length ||
+      recommendationModelProfileIds.length !== input.modelProfileIds.length ||
+      new Set(recommendationModelProfileIds).size !== recommendationModelProfileIds.length ||
+      recommendationModelProfileIds.some((modelProfileId) => !requestedModelProfileIds.has(modelProfileId))
+    ) {
+      return undefined;
+    }
+    const [policies] = await this.database.query<[PolicyRecord[]]>(
+      "SELECT * OMIT id FROM optimization_policy_version WHERE organization_id = $organization_id AND policy_version_id = $policy_version_id LIMIT 1;",
+      { organization_id: context.organizationId, policy_version_id: recommendation.policy_version_id },
+    );
+    const policy = policies[0];
+    if (!policy || policy.policy === "manual") return undefined;
+    const [receipts] = await this.database.query<[ReceiptRecord[]]>(
+      "SELECT * OMIT id FROM optimization_receipt WHERE organization_id = $organization_id AND receipt_id IN $receipt_ids;",
+      { organization_id: context.organizationId, receipt_ids: recommendation.receipt_ids },
+    );
+    const receiptsById = new Map(receipts.map((receipt) => [receipt.receipt_id, receipt]));
+    if (
+      receipts.length !== recommendation.receipt_ids.length ||
+      receiptsById.size !== recommendation.receipt_ids.length ||
+      recommendation.receipt_ids.some((receiptId) => !receiptsById.has(receiptId))
+    ) {
+      return undefined;
+    }
+    const [scores] = await this.database.query<[AxisScoreRecord[]]>(
+      "SELECT * OMIT id FROM optimization_receipt_axis_score WHERE organization_id = $organization_id AND receipt_id IN $receipt_ids AND role_key = $role_key AND task_axis = $task_axis AND reasoning_difficulty = $reasoning_difficulty;",
+      {
+        organization_id: context.organizationId,
+        receipt_ids: recommendation.receipt_ids,
+        role_key: input.roleKey,
+        task_axis: input.taskAxis,
+        reasoning_difficulty: input.reasoningDifficulty,
+      },
+    );
+    const recommendationReceiptIds = new Set(recommendation.receipt_ids);
+    const scoreReceiptIds = new Set(scores.map((score) => score.receipt_id));
+    const scoreModelProfileIds = new Set(scores.map((score) => score.model_profile_id));
+    if (
+      scores.length !== input.modelProfileIds.length ||
+      scoreReceiptIds.size !== scores.length ||
+      scoreModelProfileIds.size !== scores.length ||
+      scoreReceiptIds.size !== recommendationReceiptIds.size ||
+      [...scoreReceiptIds].some((receiptId) => !recommendationReceiptIds.has(receiptId))
+    ) {
+      return undefined;
+    }
+    const byProfile = new Map(scores.map((score) => [score.model_profile_id, score]));
+    const orderedScores = input.modelProfileIds.map((modelProfileId) => byProfile.get(modelProfileId));
+    if (orderedScores.some((score) => score === undefined)) return undefined;
+    const selectedScores = orderedScores as AxisScoreRecord[];
+    const first = selectedScores[0];
+    if (
+      !first ||
+      selectedScores.some((score) => {
+        const receipt = receiptsById.get(score.receipt_id);
+        return (
+          !receipt ||
+          receipt.run_id !== score.run_id ||
+          receipt.role_key !== score.role_key ||
+          receipt.model_profile_id !== score.model_profile_id ||
+          receipt.bundle_id !== score.bundle_id ||
+          receipt.bundle_version !== score.bundle_version ||
+          score.bundle_id !== first.bundle_id ||
+          score.bundle_version !== first.bundle_version ||
+          !score.completed ||
+          !score.privacy_allowed ||
+          score.sample_count < policy.minimum_sample_count
+        );
+      })
+    ) {
+      return undefined;
+    }
+    const rankedCandidates: Array<{
+      readonly candidate: OptimizationModelProfile;
+      readonly receipt: EvaluationReceipt;
+    }> = [];
+    for (const score of selectedScores) {
+      const candidate = profilesById.get(score.model_profile_id);
+      if (!candidate) return undefined;
+      rankedCandidates.push({
+        candidate,
+        receipt: {
+          receiptId: score.receipt_id,
+          roleKey: score.role_key,
+          modelProfileId: score.model_profile_id,
+          bundleId: score.bundle_id,
+          bundleVersion: score.bundle_version,
+          sampleCount: score.sample_count,
+          qualityScore: score.quality_score,
+          latencyMs: score.latency_ms,
+          costMicros: score.cost_micros,
+          privacyAllowed: score.privacy_allowed,
+          completed: score.completed,
+          inputChecksum: score.score_checksum,
+          receiptChecksum: score.score_checksum,
+        },
+      });
+    }
+    const ranked = rankEvaluationCandidates(policy.policy, rankedCandidates);
+    return {
+      modelProfileIds: ranked.map((entry) => entry.candidate.modelProfileId),
+      receiptIds: ranked.map((entry) => entry.receipt.receiptId),
+      bundleId: first.bundle_id,
+      bundleVersion: first.bundle_version,
+    };
+  }
+
   public async listRecommendations(
     context: TenantContext,
     roleKey?: OptimizationRoleKey,
@@ -821,6 +1126,8 @@ export class ModelOptimizationStore {
           readonly environment_checksum: string;
           readonly prompt?: string;
           readonly expected_outcome: string;
+          readonly task_axis?: EvaluationTaskAxis;
+          readonly reasoning_difficulty?: EvaluationReasoningDifficulty;
         }>,
       ]
     >(
@@ -836,6 +1143,8 @@ export class ModelOptimizationStore {
       environmentChecksum: item.environment_checksum,
       ...(item.prompt ? { prompt: item.prompt } : {}),
       expectedOutcome: item.expected_outcome,
+      ...(item.task_axis === undefined ? {} : { taskAxis: item.task_axis }),
+      ...(item.reasoning_difficulty === undefined ? {} : { reasoningDifficulty: item.reasoning_difficulty }),
     }));
   }
 
@@ -871,6 +1180,10 @@ export class ModelOptimizationStore {
         environmentChecksum: evaluationCase.environmentChecksum,
         ...(evaluationCase.prompt === undefined ? {} : { prompt: evaluationCase.prompt }),
         expectedOutcome: evaluationCase.expectedOutcome,
+        ...(evaluationCase.taskAxis === undefined ? {} : { taskAxis: evaluationCase.taskAxis }),
+        ...(evaluationCase.reasoningDifficulty === undefined
+          ? {}
+          : { reasoningDifficulty: evaluationCase.reasoningDifficulty }),
       })),
     });
   }
@@ -897,6 +1210,48 @@ export class ModelOptimizationStore {
     ) {
       throw new Error("모델 평가 실행 결과가 유효하지 않습니다");
     }
+  }
+
+  private axisScores(
+    executions: readonly {
+      readonly evaluationCase: EvaluationCase;
+      readonly result: ModelEvaluationExecutionResult;
+    }[],
+  ): readonly AxisScoreInput[] {
+    if (
+      !executions.every(
+        (execution) =>
+          execution.evaluationCase.taskAxis !== undefined && execution.evaluationCase.reasoningDifficulty !== undefined,
+      )
+    ) {
+      return [];
+    }
+    const groups = new Map<string, Array<(typeof executions)[number]>>();
+    for (const execution of executions) {
+      const { taskAxis, reasoningDifficulty } = execution.evaluationCase;
+      if (!taskAxis || !reasoningDifficulty) return [];
+      const key = `${taskAxis}\0${reasoningDifficulty}`;
+      const group = groups.get(key) ?? [];
+      group.push(execution);
+      groups.set(key, group);
+    }
+    return [...groups.values()].map((group) => {
+      const first = group[0];
+      if (!first?.evaluationCase.taskAxis || !first.evaluationCase.reasoningDifficulty) {
+        throw new Error("평가 작업 축 집계가 유효하지 않습니다");
+      }
+      const results = group.map((execution) => execution.result);
+      return {
+        taskAxis: first.evaluationCase.taskAxis,
+        reasoningDifficulty: first.evaluationCase.reasoningDifficulty,
+        sampleCount: results.length,
+        qualityScore: results.reduce((total, result) => total + result.qualityScore, 0) / results.length,
+        latencyMs: results.reduce((total, result) => total + result.latencyMs, 0) / results.length,
+        costMicros: results.reduce((total, result) => total + result.costMicros, 0),
+        privacyAllowed: results.every((result) => result.privacyAllowed),
+        completed: results.every((result) => result.completed),
+      };
+    });
   }
 
   private async markRunFailed(context: TenantContext, runId: string): Promise<void> {

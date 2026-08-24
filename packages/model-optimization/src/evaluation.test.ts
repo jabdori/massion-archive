@@ -1,9 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { IdentityService, OrganizationService, type TenantContext } from "@massion/identity";
-import { createDatabase, type MassionDatabase } from "@massion/storage";
+import { applyMigrations, createDatabase, listAppliedMigrations, type MassionDatabase } from "@massion/storage";
 
 import { ModelOptimizationStore, type ModelEvaluationExecutor, type OptimizationModelProfile } from "./evaluation.js";
+import {
+  MODEL_OPTIMIZATION_HARDENING_MIGRATION,
+  MODEL_OPTIMIZATION_MIGRATION,
+  MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION,
+} from "./schema.js";
 
 const checksum = (letter: string) => letter.repeat(64);
 
@@ -62,7 +67,12 @@ describe("Massion 모델 평가실", () => {
 
     expect(bundle.version).toBe(1);
     expect(run.status).toBe("running");
-    expect(receipt).toMatchObject({ runId: run.runId, modelProfileId: "profile-sol", sampleCount: 10 });
+    expect(receipt).toMatchObject({
+      runId: run.runId,
+      modelProfileId: "profile-sol",
+      bundleId: bundle.bundleId,
+      sampleCount: 10,
+    });
     await expect(
       store.completeEvaluation(context, {
         commandId: "receipt-1",
@@ -108,6 +118,9 @@ describe("Massion 모델 평가실", () => {
       supportsStreaming: true,
       dataPolicy: "external-allowed",
     });
+    store = await ModelOptimizationStore.create(database, organizations, {
+      modelCatalog: async () => [profile("profile-quality")],
+    });
     const bundle = await store.createBundle(context, {
       commandId: "bundle-review",
       roleKey: "assurance",
@@ -129,7 +142,7 @@ describe("Massion 모델 평가실", () => {
       runtimeVersion: "runtime-1",
       inputChecksum: checksum("d"),
     });
-    const receipt = await store.completeEvaluation(context, {
+    await store.completeEvaluation(context, {
       commandId: "receipt-review",
       runId: run.runId,
       sampleCount: 5,
@@ -142,22 +155,6 @@ describe("Massion 모델 평가실", () => {
     const recommendation = await store.recommend(context, {
       commandId: "recommend-review",
       roleKey: "assurance",
-      candidates: [profile("profile-quality")],
-      receipts: [
-        {
-          roleKey: "assurance",
-          modelProfileId: "profile-quality",
-          bundleVersion: 1,
-          sampleCount: receipt.sampleCount,
-          qualityScore: receipt.qualityScore,
-          latencyMs: receipt.latencyMs,
-          costMicros: receipt.costMicros,
-          privacyAllowed: true,
-          completed: true,
-          inputChecksum: receipt.inputChecksum,
-          receiptChecksum: receipt.receiptChecksum,
-        },
-      ],
       requirements: {
         requiresTools: true,
         requiresStructuredOutput: true,
@@ -253,6 +250,245 @@ describe("Massion 모델 평가실", () => {
     ).toBe(true);
   });
 
+  it("축 신호가 완전한 평가 실행은 불변 receipt와 축별 점수를 함께 기록한다", async () => {
+    let profileBVerified = true;
+    store = await ModelOptimizationStore.create(database, organizations, {
+      executor: {
+        execute: async (input) => ({
+          qualityScore: input.modelProfileId === "profile-a" ? 0.4 : 0.9,
+          latencyMs: input.modelProfileId === "profile-a" ? 10 : 20,
+          costMicros: 1,
+          privacyAllowed: true,
+          completed: true,
+        }),
+      },
+      modelCatalog: async () => [
+        {
+          modelProfileId: "profile-a",
+          modelId: "model-a",
+          routeId: "route-a",
+          providerId: "provider",
+          verified: true,
+          supportsStructuredOutput: true,
+          supportsTools: true,
+          supportsStreaming: true,
+          dataPolicy: "external-allowed",
+        },
+        {
+          modelProfileId: "profile-b",
+          modelId: "model-b",
+          routeId: "route-b",
+          providerId: "provider",
+          verified: profileBVerified,
+          supportsStructuredOutput: true,
+          supportsTools: true,
+          supportsStreaming: true,
+          dataPolicy: "external-allowed",
+        },
+      ],
+    });
+    await store.configurePolicy(context, {
+      commandId: "axis-policy",
+      policy: "quality",
+      autoOptimize: true,
+      productionLearning: false,
+      shadowEnabled: false,
+      minimumSampleCount: 1,
+      governanceDecisionId: "axis-decision",
+    });
+    const bundle = await store.createBundle(context, {
+      commandId: "axis-bundle",
+      roleKey: "assurance",
+      runtimeVersion: "runtime-axis",
+      cases: [
+        {
+          promptChecksum: checksum("a"),
+          toolsChecksum: checksum("b"),
+          environmentChecksum: checksum("c"),
+          expectedOutcome: "first",
+          taskAxis: "code-understanding",
+          reasoningDifficulty: "high",
+        },
+      ],
+    });
+    const receiptA = await store.executeEvaluation(context, {
+      commandId: "axis-execute-a",
+      roleKey: "assurance",
+      bundleId: bundle.bundleId,
+      modelProfileId: "profile-a",
+      runtimeVersion: "runtime-axis",
+    });
+    const receiptB = await store.executeEvaluation(context, {
+      commandId: "axis-execute-b",
+      roleKey: "assurance",
+      bundleId: bundle.bundleId,
+      modelProfileId: "profile-b",
+      runtimeVersion: "runtime-axis",
+    });
+    const [scores] = await database.query<
+      [Array<{ readonly receipt_id: string; readonly model_profile_id: string; readonly task_axis: string }>]
+    >(
+      "SELECT receipt_id, model_profile_id, task_axis FROM optimization_receipt_axis_score WHERE organization_id = $organization_id ORDER BY model_profile_id ASC;",
+      { organization_id: context.organizationId },
+    );
+    expect(scores).toEqual([
+      { receipt_id: receiptA.receiptId, model_profile_id: "profile-a", task_axis: "code-understanding" },
+      { receipt_id: receiptB.receiptId, model_profile_id: "profile-b", task_axis: "code-understanding" },
+    ]);
+    const recommendation = await store.recommend(context, {
+      commandId: "axis-recommendation",
+      roleKey: "assurance",
+      requirements: {
+        requiresTools: false,
+        requiresStructuredOutput: false,
+        requiresStreaming: false,
+        dataPolicy: "external-allowed",
+      },
+    });
+    const select = () =>
+      store.selectTaskAxisModels(context, {
+        roleKey: "assurance",
+        recommendationId: recommendation.recommendationId,
+        modelProfileIds: ["profile-a", "profile-b"],
+        taskAxis: "code-understanding",
+        reasoningDifficulty: "high",
+      });
+    expect(recommendation.status).toBe("approved");
+    await expect(select()).resolves.toEqual({
+      modelProfileIds: ["profile-b", "profile-a"],
+      receiptIds: [receiptB.receiptId, receiptA.receiptId],
+      bundleId: bundle.bundleId,
+      bundleVersion: bundle.version,
+    });
+    await expect(
+      database.query(
+        "UPDATE optimization_receipt_axis_score SET quality_score = 0 WHERE organization_id = $organization_id AND receipt_id = $receipt_id;",
+        { organization_id: context.organizationId, receipt_id: receiptA.receiptId },
+      ),
+    ).rejects.toThrow("immutable");
+
+    await database.query("REMOVE EVENT optimization_receipt_immutable ON TABLE optimization_receipt;");
+    for (const [field, value, original] of [
+      ["run_id", "mismatched-run", receiptA.runId],
+      ["role_key", "growth", "assurance"],
+      ["model_profile_id", "mismatched-profile", "profile-a"],
+      ["bundle_id", "mismatched-bundle", bundle.bundleId],
+      ["bundle_version", bundle.version + 1, bundle.version],
+    ] as const) {
+      await database.query(
+        `UPDATE optimization_receipt SET ${field} = $value WHERE organization_id = $organization_id AND receipt_id = $receipt_id;`,
+        { organization_id: context.organizationId, receipt_id: receiptA.receiptId, value },
+      );
+      await expect(select()).resolves.toBeUndefined();
+      await database.query(
+        `UPDATE optimization_receipt SET ${field} = $value WHERE organization_id = $organization_id AND receipt_id = $receipt_id;`,
+        { organization_id: context.organizationId, receipt_id: receiptA.receiptId, value: original },
+      );
+    }
+    await database.query(
+      "UPDATE optimization_recommendation SET status = 'pending-approval' WHERE organization_id = $organization_id AND recommendation_id = $recommendation_id;",
+      { organization_id: context.organizationId, recommendation_id: recommendation.recommendationId },
+    );
+    await expect(select()).resolves.toBeUndefined();
+
+    await database.query(
+      "UPDATE optimization_recommendation SET status = 'rejected' WHERE organization_id = $organization_id AND recommendation_id = $recommendation_id;",
+      { organization_id: context.organizationId, recommendation_id: recommendation.recommendationId },
+    );
+    await expect(select()).resolves.toBeUndefined();
+
+    await database.query(
+      "UPDATE optimization_recommendation SET status = 'approved' WHERE organization_id = $organization_id AND recommendation_id = $recommendation_id;",
+      { organization_id: context.organizationId, recommendation_id: recommendation.recommendationId },
+    );
+    profileBVerified = false;
+    await expect(select()).resolves.toBeUndefined();
+
+    profileBVerified = true;
+    await database.query(
+      "DELETE optimization_receipt WHERE organization_id = $organization_id AND receipt_id = $receipt_id;",
+      { organization_id: context.organizationId, receipt_id: receiptA.receiptId },
+    );
+    await expect(select()).resolves.toBeUndefined();
+  });
+
+  it("축별 점수가 없는 legacy bundle은 선택 API에서 역할 baseline으로 되돌린다", async () => {
+    store = await ModelOptimizationStore.create(database, organizations, {
+      modelCatalog: async () => [
+        {
+          modelProfileId: "profile-legacy",
+          modelId: "model-legacy",
+          routeId: "route-legacy",
+          providerId: "provider",
+          verified: true,
+          supportsStructuredOutput: true,
+          supportsTools: true,
+          supportsStreaming: true,
+          dataPolicy: "external-allowed",
+        },
+      ],
+    });
+    await store.configurePolicy(context, {
+      commandId: "legacy-axis-policy",
+      policy: "quality",
+      autoOptimize: false,
+      productionLearning: false,
+      shadowEnabled: false,
+      minimumSampleCount: 1,
+      governanceDecisionId: "legacy-axis-decision",
+    });
+    const bundle = await store.createBundle(context, {
+      commandId: "legacy-axis-bundle",
+      roleKey: "assurance",
+      runtimeVersion: "runtime-legacy",
+      cases: [
+        {
+          promptChecksum: checksum("a"),
+          toolsChecksum: checksum("b"),
+          environmentChecksum: checksum("c"),
+          expectedOutcome: "pass",
+        },
+      ],
+    });
+    const run = await store.startEvaluation(context, {
+      commandId: "legacy-axis-run",
+      roleKey: "assurance",
+      bundleId: bundle.bundleId,
+      modelProfileId: "profile-legacy",
+      runtimeVersion: "runtime-legacy",
+      inputChecksum: checksum("d"),
+    });
+    await store.completeEvaluation(context, {
+      commandId: "legacy-axis-receipt",
+      runId: run.runId,
+      sampleCount: 1,
+      qualityScore: 0.8,
+      latencyMs: 10,
+      costMicros: 1,
+      privacyAllowed: true,
+      completed: true,
+    });
+    const recommendation = await store.recommend(context, {
+      commandId: "legacy-axis-recommendation",
+      roleKey: "assurance",
+      requirements: {
+        requiresTools: false,
+        requiresStructuredOutput: false,
+        requiresStreaming: false,
+        dataPolicy: "external-allowed",
+      },
+    });
+    await expect(
+      store.selectTaskAxisModels(context, {
+        roleKey: "assurance",
+        recommendationId: recommendation.recommendationId,
+        modelProfileIds: ["profile-legacy"],
+        taskAxis: "code-understanding",
+        reasoningDifficulty: "high",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("후보를 생략하면 연결된 model catalog에서만 추천 후보를 읽는다", async () => {
     const profile: OptimizationModelProfile = {
       modelProfileId: "catalog-profile",
@@ -289,7 +525,7 @@ describe("Massion 모델 평가실", () => {
       runtimeVersion: "runtime-1",
       inputChecksum: checksum("d"),
     });
-    const receipt = await store.completeEvaluation(context, {
+    await store.completeEvaluation(context, {
       commandId: "catalog-receipt",
       runId: run.runId,
       sampleCount: 3,
@@ -302,22 +538,6 @@ describe("Massion 모델 평가실", () => {
     const recommendation = await store.recommend(context, {
       commandId: "catalog-recommendation",
       roleKey: "representative",
-      candidates: [],
-      receipts: [
-        {
-          roleKey: "representative",
-          modelProfileId: profile.modelProfileId,
-          bundleVersion: receipt.bundleVersion,
-          sampleCount: receipt.sampleCount,
-          qualityScore: receipt.qualityScore,
-          latencyMs: receipt.latencyMs,
-          costMicros: receipt.costMicros,
-          privacyAllowed: receipt.privacyAllowed,
-          completed: receipt.completed,
-          inputChecksum: receipt.inputChecksum,
-          receiptChecksum: receipt.receiptChecksum,
-        },
-      ],
       requirements: {
         requiresTools: true,
         requiresStructuredOutput: true,
@@ -383,22 +603,6 @@ describe("Massion 모델 평가실", () => {
     const recommendation = await store.recommend(context, {
       commandId: "recommend-auto",
       roleKey: "assurance",
-      candidates: [profile],
-      receipts: [
-        {
-          roleKey: "assurance",
-          modelProfileId: profile.modelProfileId,
-          bundleVersion: receipt.bundleVersion,
-          sampleCount: receipt.sampleCount,
-          qualityScore: receipt.qualityScore,
-          latencyMs: receipt.latencyMs,
-          costMicros: receipt.costMicros,
-          privacyAllowed: receipt.privacyAllowed,
-          completed: receipt.completed,
-          inputChecksum: receipt.inputChecksum,
-          receiptChecksum: receipt.receiptChecksum,
-        },
-      ],
       requirements: {
         requiresTools: true,
         requiresStructuredOutput: true,
@@ -410,7 +614,144 @@ describe("Massion 모델 평가실", () => {
     expect(recommendation).toMatchObject({
       status: "approved",
       primaryModelProfileId: profile.modelProfileId,
+      receiptIds: [receipt.receiptId],
     });
+  });
+
+  it("추천은 저장된 동일 bundle receipt만 사용한다", async () => {
+    const profile = (modelProfileId: string): OptimizationModelProfile => ({
+      modelProfileId,
+      modelId: modelProfileId,
+      routeId: `route-${modelProfileId}`,
+      providerId: "provider",
+      verified: true,
+      supportsStructuredOutput: true,
+      supportsTools: true,
+      supportsStreaming: true,
+      dataPolicy: "external-allowed",
+    });
+    store = await ModelOptimizationStore.create(database, organizations, {
+      modelCatalog: async () => [profile("profile-a"), profile("profile-b")],
+    });
+    const createReceipt = async (
+      bundleCommandId: string,
+      profileId: string,
+      qualityScore: number,
+    ): Promise<Awaited<ReturnType<typeof store.completeEvaluation>>> => {
+      const bundle = await store.createBundle(context, {
+        commandId: bundleCommandId,
+        roleKey: "assurance",
+        runtimeVersion: "runtime-1",
+        cases: [
+          {
+            promptChecksum: checksum("a"),
+            toolsChecksum: checksum("b"),
+            environmentChecksum: checksum("c"),
+            expectedOutcome: "pass",
+          },
+        ],
+      });
+      const run = await store.startEvaluation(context, {
+        commandId: `${bundleCommandId}-run-${profileId}`,
+        roleKey: "assurance",
+        bundleId: bundle.bundleId,
+        modelProfileId: profileId,
+        runtimeVersion: "runtime-1",
+        inputChecksum: checksum("d"),
+      });
+      return await store.completeEvaluation(context, {
+        commandId: `${bundleCommandId}-receipt-${profileId}`,
+        runId: run.runId,
+        sampleCount: 3,
+        qualityScore,
+        latencyMs: 10,
+        costMicros: 1,
+        privacyAllowed: true,
+        completed: true,
+      });
+    };
+
+    await createReceipt("bundle-old", "profile-a", 1);
+    const sharedA = await createReceipt("bundle-shared", "profile-a", 0.2);
+    const sharedB = await createReceipt("bundle-shared", "profile-b", 0.9);
+    const recommendation = await store.recommend(context, {
+      commandId: "recommend-shared-bundle",
+      roleKey: "assurance",
+      requirements: {
+        requiresTools: true,
+        requiresStructuredOutput: true,
+        requiresStreaming: true,
+        dataPolicy: "external-allowed",
+      },
+    });
+
+    expect(recommendation).toMatchObject({
+      primaryModelProfileId: "profile-b",
+      fallbackModelProfileIds: ["profile-a"],
+      receiptIds: [sharedA.receiptId, sharedB.receiptId].sort(),
+    });
+  });
+
+  it("legacy receipt에 evaluation run bundle 계보를 보강하고 불변으로 다시 잠근다", async () => {
+    await using legacyDatabase = await createDatabase({
+      url: "mem://",
+      namespace: "massion",
+      database: crypto.randomUUID(),
+    });
+    const organizationId = "organization-legacy";
+    await applyMigrations(legacyDatabase, [MODEL_OPTIMIZATION_MIGRATION, MODEL_OPTIMIZATION_HARDENING_MIGRATION]);
+    await legacyDatabase.query(
+      "CREATE optimization_run CONTENT { run_id: 'run-legacy', organization_id: $organization_id, role_key: 'assurance', bundle_id: 'bundle-legacy', bundle_version: 1, model_profile_id: 'profile-legacy', runtime_version: 'runtime-legacy', mode: 'standard', status: 'completed', input_checksum: $checksum, command_id: 'run-command', request_hash: $checksum, created_by_user_id: 'user-legacy', created_at: time::now(), updated_at: time::now() };",
+      { organization_id: organizationId, checksum: checksum("a") },
+    );
+    await legacyDatabase.query(
+      "CREATE optimization_receipt CONTENT { receipt_id: 'receipt-legacy', run_id: 'run-legacy', organization_id: $organization_id, role_key: 'assurance', model_profile_id: 'profile-legacy', bundle_version: 1, sample_count: 3, quality_score: 0.9, latency_ms: 10, cost_micros: 1, privacy_allowed: true, completed: true, input_checksum: $checksum, receipt_checksum: $checksum, command_id: 'receipt-command', request_hash: $checksum, created_at: time::now() };",
+      { organization_id: organizationId, checksum: checksum("a") },
+    );
+
+    await expect(
+      applyMigrations(legacyDatabase, [MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION]),
+    ).resolves.toEqual(["0126-model-optimization-receipt-bundle-lineage"]);
+    await expect(
+      applyMigrations(legacyDatabase, [MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION]),
+    ).resolves.toEqual([]);
+    const [receipts] = await legacyDatabase.query<[Array<{ bundle_id: string }>]>(
+      "SELECT bundle_id FROM optimization_receipt WHERE organization_id = $organization_id AND receipt_id = 'receipt-legacy';",
+      { organization_id: organizationId },
+    );
+    expect(receipts).toEqual([{ bundle_id: "bundle-legacy" }]);
+    await expect(
+      legacyDatabase.query(
+        "UPDATE optimization_receipt SET quality_score = 0.1 WHERE organization_id = $organization_id AND receipt_id = 'receipt-legacy';",
+        { organization_id: organizationId },
+      ),
+    ).rejects.toThrow("immutable");
+    expect((await listAppliedMigrations(legacyDatabase)).map((migration) => migration.migration_id)).toContain(
+      "0126-model-optimization-receipt-bundle-lineage",
+    );
+  });
+
+  it("legacy receipt의 tenant 또는 평가 run 계보가 다르면 migration을 rollback한다", async () => {
+    await using legacyDatabase = await createDatabase({
+      url: "mem://",
+      namespace: "massion",
+      database: crypto.randomUUID(),
+    });
+    await applyMigrations(legacyDatabase, [MODEL_OPTIMIZATION_MIGRATION, MODEL_OPTIMIZATION_HARDENING_MIGRATION]);
+    await legacyDatabase.query(
+      "CREATE optimization_receipt CONTENT { receipt_id: 'receipt-orphan', run_id: 'run-missing', organization_id: 'organization-legacy', role_key: 'assurance', model_profile_id: 'profile-legacy', bundle_version: 1, sample_count: 3, quality_score: 0.9, latency_ms: 10, cost_micros: 1, privacy_allowed: true, completed: true, input_checksum: $checksum, receipt_checksum: $checksum, command_id: 'receipt-command', request_hash: $checksum, created_at: time::now() };",
+      { checksum: checksum("a") },
+    );
+
+    await expect(
+      applyMigrations(legacyDatabase, [MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION]),
+    ).rejects.toThrow("bundle 계보가 유효하지 않습니다");
+    expect((await listAppliedMigrations(legacyDatabase)).map((migration) => migration.migration_id)).not.toContain(
+      "0126-model-optimization-receipt-bundle-lineage",
+    );
+    await expect(
+      legacyDatabase.query("UPDATE optimization_receipt SET quality_score = 0.1 WHERE receipt_id = 'receipt-orphan';"),
+    ).rejects.toThrow("immutable");
   });
 
   it("정책에 실사용 관찰 예산과 보존 기간을 저장하고 범위를 검증한다", async () => {

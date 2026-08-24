@@ -101,6 +101,10 @@ describe("massion CLI parser", () => {
     );
   });
 
+  it("제거된 최적화 관찰 명령을 거부한다", () => {
+    expect(() => parseCliArguments(["optimization", "observe"])).toThrow("optimization subcommand가 유효하지 않습니다");
+  });
+
   it("run의 재현 가능한 상관관계 ID를 명시적으로 파싱하고 다른 command에서는 거부한다", () => {
     expect(
       parseCliArguments(["run", "구독 실행", "--correlation", "8b3a91c5-2fe2-4a3e-9a1e-1d32c32e23e6"]),

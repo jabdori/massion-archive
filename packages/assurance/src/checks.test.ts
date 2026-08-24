@@ -1,7 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import type { OrganizationService, TenantContext } from "@massion/identity";
+import type { MassionDatabase } from "@massion/storage";
 
 import type { HumanAttestation, MetricObservation } from "./contracts.js";
 import {
+  AssuranceCheckStore,
   assertNoCallerVerdict,
   evaluateArtifactEvidenceCheck,
   evaluateHumanAttestationCheck,
@@ -257,6 +261,93 @@ describe("결정론적 Assurance check", () => {
     await expect(runTrustedAssuranceCheckExecutor(new Map(), context, input)).resolves.toMatchObject({
       status: "blocked",
       summary: expect.stringContaining("executor"),
+    });
+  });
+
+  it("같은 run의 Check를 ID 순서로 읽고 다른 tenant에는 노출하지 않는다", async () => {
+    const ownerContext: TenantContext = {
+      organizationId,
+      userId: "owner-1",
+      membershipId: "membership-1",
+      role: "owner",
+    };
+    const otherContext: TenantContext = {
+      organizationId: "organization-2",
+      userId: "owner-2",
+      membershipId: "membership-2",
+      role: "owner",
+    };
+    const records = [
+      {
+        check_id: "check-z",
+        organization_id: organizationId,
+        work_id: workId,
+        assurance_run_id: assuranceRunId,
+        criterion_id: criterionId,
+        kind: "evidence" as const,
+        system_adapter_id: "massion.evidence.v1",
+        command_key: "evidence:z",
+        input_hash: "a".repeat(64),
+        status: "passed" as const,
+        output_hash: "b".repeat(64),
+        artifact_version_ids: [],
+        evidence_brief_ids: [],
+        metric_observation_ids: [],
+        human_attestation_ids: [],
+        created_at: "2026-07-10T12:00:00.000Z",
+        completed_at: "2026-07-10T12:00:00.000Z",
+      },
+      {
+        check_id: "check-a",
+        organization_id: organizationId,
+        work_id: workId,
+        assurance_run_id: assuranceRunId,
+        criterion_id: "criterion-2",
+        kind: "evidence" as const,
+        system_adapter_id: "massion.evidence.v1",
+        command_key: "evidence:a",
+        input_hash: "c".repeat(64),
+        status: "passed" as const,
+        output_hash: "d".repeat(64),
+        artifact_version_ids: [],
+        evidence_brief_ids: [],
+        metric_observation_ids: [],
+        human_attestation_ids: [],
+        created_at: "2026-07-10T12:00:01.000Z",
+        completed_at: "2026-07-10T12:00:01.000Z",
+      },
+    ];
+    const query = vi.fn(async (statement: string, bindings?: Record<string, unknown>) => [
+      records
+        .filter(
+          (record) =>
+            record.organization_id === bindings?.organization_id &&
+            record.assurance_run_id === bindings?.assurance_run_id,
+        )
+        .sort((left, right) =>
+          statement.includes("ORDER BY check_id ASC") ? left.check_id.localeCompare(right.check_id) : 0,
+        ),
+    ]);
+    const verifyTenantContext = vi.fn(async () => undefined);
+    const checks = new AssuranceCheckStore(
+      { query } as unknown as MassionDatabase,
+      { verifyTenantContext } as unknown as OrganizationService,
+    );
+
+    await expect(checks.listByRun(ownerContext, ` ${assuranceRunId} `)).resolves.toMatchObject([
+      { checkId: "check-a", organizationId, assuranceRunId },
+      { checkId: "check-z", organizationId, assuranceRunId },
+    ]);
+    await expect(checks.listByRun(otherContext, assuranceRunId)).resolves.toEqual([]);
+    expect(verifyTenantContext).toHaveBeenCalledWith(ownerContext);
+    expect(verifyTenantContext).toHaveBeenCalledWith(otherContext);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("ORDER BY check_id ASC"), {
+      organization_id: organizationId,
+      assurance_run_id: assuranceRunId,
+    });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("ORDER BY check_id ASC"), {
+      organization_id: otherContext.organizationId,
+      assurance_run_id: assuranceRunId,
     });
   });
 });

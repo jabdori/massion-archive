@@ -27,6 +27,7 @@ import {
   MODEL_PRICING_MIGRATION,
   MODEL_ROUTE_MIGRATION,
   PROVIDER_MODEL_CATALOG_MIGRATION,
+  ROUTE_ATTEMPT_EXPLANATION_SNAPSHOT_MIGRATION,
   ROUTE_ATTEMPT_SIDE_EFFECT_MIGRATION,
   ROUTE_ATTEMPT_LINEAGE_MIGRATION,
   ROUTE_ATTEMPT_SUBSCRIPTION_POLICY_MIGRATION,
@@ -199,6 +200,19 @@ export interface RouteAttemptListItem {
   readonly created_at: unknown;
 }
 
+/**
+ * 같은 실행의 모델 선택 계보를 잇는 축약 Route Attempt 정본입니다.
+ * 예약자·Credential·설명 원문·사용량은 노출하지 않습니다.
+ */
+export interface RouteAttemptExecutionLineageView {
+  readonly attemptId: string;
+  readonly executionId: string;
+  readonly modelProfileId: string;
+  readonly fallbackFromAttemptId?: string;
+  readonly status: RouteAttemptListItem["status"];
+  readonly placementReceipt?: TaskPlacementReceipt;
+}
+
 interface RouteAttemptListRow extends Omit<RouteAttemptListItem, "model_id" | "provider_id"> {
   readonly organization_id: string;
   readonly model_profile_id: string;
@@ -298,7 +312,17 @@ export interface TaskPlacementReceipt {
   readonly taskAxis?:
     "code-generation" | "code-understanding" | "planning-design" | "review-critique" | "summary-records";
   readonly reasoningDifficulty?: "low" | "medium" | "high";
-  readonly selectionBasis: "role-baseline-task-axis-evidence-unavailable" | "role-baseline-task-signal-missing";
+  readonly selectionBasis:
+    | "task-axis-evidence-available"
+    | "role-baseline-task-axis-evidence-unavailable"
+    | "role-baseline-task-signal-missing";
+  /** 축별 평가가 실제로 정렬한 활성 batch 후보와 그 receipt 정본입니다. */
+  readonly axisEvidence?: {
+    readonly bundleId: string;
+    readonly bundleVersion: number;
+    readonly receiptIds: readonly string[];
+    readonly rankedModelProfileIds: readonly string[];
+  };
 }
 
 export interface RouteRequest {
@@ -312,7 +336,7 @@ export interface RouteRequest {
   readonly workId?: string;
   /** Runtime 실행이 선택한 Work Task입니다. Task placement receipt가 있으면 같은 ID여야 합니다. */
   readonly taskId?: string;
-  /** Task 신호를 받았지만 축별 평가 근거가 없어 역할 baseline을 사용한 예약 당시의 사실입니다. */
+  /** Task 신호와 축별 근거로 정한 역할 batch 후보 순서의 예약 당시 사실입니다. */
   readonly placementReceipt?: TaskPlacementReceipt;
   /** 모델 평가실이 활성 배치에서 선택한 선호 model profile 순서입니다. */
   readonly preferredModelProfileIds?: readonly string[];
@@ -432,6 +456,14 @@ function attemptRowOptionalText(value: unknown, label: string): string | undefin
   return value === undefined ? undefined : attemptRowText(value, label);
 }
 
+function routeAttemptExecutionId(value: string): string {
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 256 || /[\0\r\n]/u.test(normalized)) {
+    throw new Error("실행 ID가 유효하지 않습니다");
+  }
+  return normalized;
+}
+
 const TASK_AXES = new Set<string>([
   "code-generation",
   "code-understanding",
@@ -449,6 +481,34 @@ function isReasoningDifficulty(value: unknown): value is NonNullable<TaskPlaceme
   return typeof value === "string" && REASONING_DIFFICULTIES.has(value);
 }
 
+function taskPlacementIds(value: unknown, label: string): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error("Task placement 계보가 유효하지 않습니다");
+  const ids = value.map((item) => attemptRowText(item, label));
+  if (new Set(ids).size !== ids.length) throw new Error("Task placement 계보가 유효하지 않습니다");
+  return ids;
+}
+
+function taskPlacementAxisEvidence(value: unknown): NonNullable<TaskPlacementReceipt["axisEvidence"]> {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Task placement 계보가 유효하지 않습니다");
+  const evidence = value as Record<string, unknown>;
+  const rawBundleVersion = evidence.bundleVersion;
+  const bundleVersion =
+    typeof rawBundleVersion === "number" && Number.isSafeInteger(rawBundleVersion) && rawBundleVersion >= 1
+      ? rawBundleVersion
+      : undefined;
+  if (bundleVersion === undefined) throw new Error("Task placement 계보가 유효하지 않습니다");
+  const receiptIds = taskPlacementIds(evidence.receiptIds, "Task placement receipt ID");
+  const rankedModelProfileIds = taskPlacementIds(evidence.rankedModelProfileIds, "Task placement Model Profile ID");
+  if (receiptIds.length !== rankedModelProfileIds.length) throw new Error("Task placement 계보가 유효하지 않습니다");
+  return {
+    bundleId: attemptRowText(evidence.bundleId, "Task placement 평가 bundle ID"),
+    bundleVersion,
+    receiptIds,
+    rankedModelProfileIds,
+  };
+}
+
 export function taskPlacementReceipt(value: unknown): TaskPlacementReceipt | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -459,15 +519,22 @@ export function taskPlacementReceipt(value: unknown): TaskPlacementReceipt | und
   const taskAxis = receipt.taskAxis;
   const reasoningDifficulty = receipt.reasoningDifficulty;
   const selectionBasis = receipt.selectionBasis;
+  const axisEvidence = receipt.axisEvidence;
+  const hasTaskSignal = taskAxis !== undefined && reasoningDifficulty !== undefined;
+  const hasAxisEvidence = axisEvidence !== undefined;
   if (
     (taskAxis !== undefined && !isTaskAxis(taskAxis)) ||
     (reasoningDifficulty !== undefined && !isReasoningDifficulty(reasoningDifficulty)) ||
-    (selectionBasis !== "role-baseline-task-axis-evidence-unavailable" &&
+    (selectionBasis !== "task-axis-evidence-available" &&
+      selectionBasis !== "role-baseline-task-axis-evidence-unavailable" &&
       selectionBasis !== "role-baseline-task-signal-missing") ||
-    (selectionBasis === "role-baseline-task-axis-evidence-unavailable" &&
-      (taskAxis === undefined || reasoningDifficulty === undefined)) ||
+    ((selectionBasis === "task-axis-evidence-available" ||
+      selectionBasis === "role-baseline-task-axis-evidence-unavailable") &&
+      !hasTaskSignal) ||
+    (selectionBasis === "role-baseline-task-axis-evidence-unavailable" && hasAxisEvidence) ||
     (selectionBasis === "role-baseline-task-signal-missing" &&
-      (taskAxis !== undefined || reasoningDifficulty !== undefined))
+      (taskAxis !== undefined || reasoningDifficulty !== undefined || hasAxisEvidence)) ||
+    (selectionBasis === "task-axis-evidence-available" && !hasAxisEvidence)
   ) {
     throw new Error("Task placement 계보가 유효하지 않습니다");
   }
@@ -477,7 +544,39 @@ export function taskPlacementReceipt(value: unknown): TaskPlacementReceipt | und
     ...(taskAxis === undefined ? {} : { taskAxis }),
     ...(reasoningDifficulty === undefined ? {} : { reasoningDifficulty }),
     selectionBasis,
+    ...(selectionBasis === "task-axis-evidence-available"
+      ? { axisEvidence: taskPlacementAxisEvidence(axisEvidence) }
+      : {}),
   };
+}
+
+function routeAttemptPlacementReceipt(value: unknown): TaskPlacementReceipt | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > 1_000_000) {
+    throw new Error("Route Attempt 설명 스냅샷이 유효하지 않습니다");
+  }
+  let snapshot: unknown;
+  try {
+    snapshot = JSON.parse(value);
+  } catch {
+    throw new Error("Route Attempt 설명 스냅샷이 유효하지 않습니다");
+  }
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    throw new Error("Route Attempt 설명 스냅샷이 유효하지 않습니다");
+  }
+  const rawRequest = (snapshot as Record<string, unknown>).request;
+  if (typeof rawRequest !== "string" || rawRequest.length === 0 || rawRequest.length > 1_000_000) {
+    throw new Error("Route Attempt 설명 스냅샷이 유효하지 않습니다");
+  }
+  let request: unknown;
+  try {
+    request = JSON.parse(rawRequest);
+  } catch {
+    throw new Error("Route Attempt 설명 스냅샷이 유효하지 않습니다");
+  }
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new Error("Route Attempt 설명 스냅샷이 유효하지 않습니다");
+  }
+  return taskPlacementReceipt((request as Record<string, unknown>).placementReceipt);
 }
 
 function attemptRowCount(value: unknown, label: string): number {
@@ -814,6 +913,7 @@ export class ModelRouter {
       ROUTE_ATTEMPT_EXECUTION_LINEAGE_MIGRATION,
       ROUTE_ATTEMPT_OPTIMIZATION_RUN_LINEAGE_MIGRATION,
       PROVIDER_MODEL_CATALOG_MIGRATION,
+      ROUTE_ATTEMPT_EXPLANATION_SNAPSHOT_MIGRATION,
     ]);
     return new ModelRouter(database, organizations, providers, subscriptions);
   }
@@ -1068,6 +1168,57 @@ export class ModelRouter {
     const attempt = await this.attempt(this.database, context.organizationId, normalizedAttemptId);
     await this.requireAttemptActor(this.database, context, attempt);
     return attempt;
+  }
+
+  /**
+   * 같은 실행의 immutable Route Attempt 스냅샷을 tenant 경계 안에서 축약해 읽습니다.
+   * 이 조회는 사용자별 예약 권한을 요구하지 않으며, raw 설명·Credential·사용량은 반환하지 않습니다.
+   */
+  public async listAttemptLineagesByExecution(
+    context: TenantContext,
+    executionId: string,
+  ): Promise<readonly RouteAttemptExecutionLineageView[]> {
+    await this.organizations.verifyTenantContext(context);
+    const normalizedExecutionId = routeAttemptExecutionId(executionId);
+    const [records] = await this.database.query<[unknown[]]>(
+      `SELECT attempt_id, organization_id, execution_id, model_profile_id, fallback_from_attempt_id, status,
+              selection_sequence, explanation_json
+       FROM route_attempt WHERE organization_id = $organization_id AND execution_id = $execution_id
+       ORDER BY selection_sequence ASC, attempt_id ASC;`,
+      { organization_id: context.organizationId, execution_id: normalizedExecutionId },
+    );
+    if (records.length === 0) throw new Error("Route Attempt 실행 계보를 찾을 수 없습니다");
+    return records.map((value): RouteAttemptExecutionLineageView => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new Error("Route Attempt 실행 계보가 유효하지 않습니다");
+      }
+      const row = value as Record<string, unknown>;
+      if (row.organization_id !== context.organizationId) {
+        throw new Error("Route Attempt 실행 계보의 조직이 일치하지 않습니다");
+      }
+      const rowExecutionId = attemptRowOptionalText(row.execution_id, "실행 ID");
+      if (rowExecutionId !== normalizedExecutionId) {
+        throw new Error("Route Attempt 실행 계보가 요청 실행과 일치하지 않습니다");
+      }
+      const status = row.status;
+      if (status !== "reserved" && status !== "succeeded" && status !== "failed" && status !== "interrupted") {
+        throw new Error("Route Attempt 실행 계보의 상태가 유효하지 않습니다");
+      }
+      if (!Number.isSafeInteger(row.selection_sequence) || (row.selection_sequence as number) < 1) {
+        throw new Error("Route Attempt 실행 계보의 선택 순서가 유효하지 않습니다");
+      }
+      const placementReceipt = routeAttemptPlacementReceipt(row.explanation_json);
+      return {
+        attemptId: attemptRowText(row.attempt_id, "시도 ID"),
+        executionId: normalizedExecutionId,
+        modelProfileId: attemptRowText(row.model_profile_id, "모델 프로필 ID"),
+        ...(row.fallback_from_attempt_id === undefined
+          ? {}
+          : { fallbackFromAttemptId: attemptRowText(row.fallback_from_attempt_id, "fallback 원본 ID") }),
+        status,
+        ...(placementReceipt === undefined ? {} : { placementReceipt }),
+      };
+    });
   }
 
   public async readReservedAttemptByExecution(
@@ -1679,6 +1830,7 @@ export class ModelRouter {
     excludedAttemptKeys?: ReadonlySet<string>,
   ): Promise<RouteSimulation> {
     const route = await this.routeByName(executor, context.organizationId, request.routeName);
+    const placementReceipt = taskPlacementReceipt(request.placementReceipt);
     const requestedExecutionKind: unknown = request.requiredExecutionKind;
     if (
       requestedExecutionKind !== undefined &&
@@ -1745,11 +1897,22 @@ export class ModelRouter {
         ...(typeof batch.primary_model_profile_id === "string" ? [batch.primary_model_profile_id] : []),
         ...(batch.fallback_model_profile_ids as string[]),
       ];
+      const sameBatchProfileSet =
+        batchProfileIds.length === preferences.length &&
+        batchProfileIds.every((profileId) => preferences.includes(profileId));
+      const baselineOrder =
+        sameBatchProfileSet && batchProfileIds.every((profileId, index) => preferences[index] === profileId);
+      const axisEvidence =
+        placementReceipt?.selectionBasis === "task-axis-evidence-available" ? placementReceipt.axisEvidence : undefined;
+      const evidenceOrder =
+        axisEvidence !== undefined &&
+        axisEvidence.rankedModelProfileIds.length === preferences.length &&
+        axisEvidence.rankedModelProfileIds.every((profileId, index) => preferences[index] === profileId);
       if (
         batchProfileIds.length === 0 ||
         new Set(batchProfileIds).size !== batchProfileIds.length ||
-        batchProfileIds.length !== preferences.length ||
-        batchProfileIds.some((profileId, index) => preferences[index] !== profileId)
+        !sameBatchProfileSet ||
+        (axisEvidence === undefined ? !baselineOrder : !evidenceOrder)
       ) {
         throw new Error("Optimization Batch의 선호 순서가 Router 요청과 일치하지 않습니다");
       }

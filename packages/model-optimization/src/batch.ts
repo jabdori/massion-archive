@@ -11,7 +11,12 @@ import type {
   OptimizationRecoveryEvent,
 } from "./contracts.js";
 import type { OptimizationRoleKey } from "./scoring.js";
-import { MODEL_OPTIMIZATION_HARDENING_MIGRATION, MODEL_OPTIMIZATION_MIGRATION } from "./schema.js";
+import {
+  MODEL_OPTIMIZATION_HARDENING_MIGRATION,
+  MODEL_OPTIMIZATION_MIGRATION,
+  MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION,
+  MODEL_OPTIMIZATION_TASK_AXIS_SCORE_MIGRATION,
+} from "./schema.js";
 
 interface RecommendationRecord {
   readonly recommendation_id: string;
@@ -185,7 +190,12 @@ export class OptimizationBatchService {
     database: MassionDatabase,
     organizations: OrganizationService,
   ): Promise<OptimizationBatchService> {
-    await applyMigrations(database, [MODEL_OPTIMIZATION_MIGRATION, MODEL_OPTIMIZATION_HARDENING_MIGRATION]);
+    await applyMigrations(database, [
+      MODEL_OPTIMIZATION_MIGRATION,
+      MODEL_OPTIMIZATION_HARDENING_MIGRATION,
+      MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION,
+      MODEL_OPTIMIZATION_TASK_AXIS_SCORE_MIGRATION,
+    ]);
     return new OptimizationBatchService(database, organizations);
   }
 
@@ -559,6 +569,11 @@ export class OptimizationBatchService {
       const observation = observations[0];
       if (!observation) throw new Error("최적화 observation을 찾을 수 없습니다");
       if (observation.status !== "degraded") throw new Error("degraded observation만 복구할 수 있습니다");
+      if (observation.expires_at !== undefined) {
+        const expiresAt = new Date(String(observation.expires_at)).getTime();
+        if (!Number.isFinite(expiresAt) || expiresAt <= Date.now())
+          throw new Error("만료된 observation으로 복구할 수 없습니다");
+      }
       const [currentRecords] = await tx.query<[BatchRecord[]]>(
         "SELECT * OMIT id FROM optimization_batch WHERE organization_id = $organization_id AND batch_id = $batch_id LIMIT 1;",
         { organization_id: context.organizationId, batch_id: observation.batch_id },
@@ -571,6 +586,13 @@ export class OptimizationBatchService {
       );
       const parent = parentRecords[0];
       if (!parent) throw new Error("이전 healthy batch를 찾을 수 없습니다");
+      const [pointers] = await tx.query<[PointerRecord[]]>(
+        "SELECT batch_id FROM optimization_active_pointer WHERE organization_id = $organization_id AND role_key = $role_key LIMIT 1;",
+        { organization_id: context.organizationId, role_key: current.role_key },
+      );
+      if (pointers[0]?.batch_id !== current.batch_id) {
+        throw new Error("현재 활성 batch의 observation만 복구할 수 있습니다");
+      }
       await tx.query(
         "UPDATE optimization_batch SET status = 'reverted' WHERE organization_id = $organization_id AND batch_id = $batch_id; UPDATE optimization_batch SET status = 'active' WHERE organization_id = $organization_id AND batch_id = $parent_batch_id; UPDATE optimization_active_pointer SET batch_id = $parent_batch_id, batch_version = $parent_version, checksum = $parent_checksum, updated_at = time::now() WHERE organization_id = $organization_id AND role_key = $role_key;",
         {

@@ -2,7 +2,13 @@ import { createHash } from "node:crypto";
 import { posix } from "node:path";
 
 import type { ExtensionGateway } from "@massion/extension-host";
-import type { AssuranceBindingStore } from "@massion/assurance";
+import type {
+  AssuranceBindingStore,
+  AssuranceCheck,
+  AssuranceCheckStore,
+  AssuranceRun,
+  AssuranceRunGateway,
+} from "@massion/assurance";
 import {
   normalizeRepositoryPath,
   type EvidenceRepository,
@@ -13,7 +19,7 @@ import {
 import type { GrowthGateway, GrowthSuggestionDetails } from "@massion/growth";
 import type { EmergencyControl } from "@massion/governance";
 import type { MembershipRole, OrganizationService, TenantContext } from "@massion/identity";
-import type { ModelRouter, ProviderService } from "@massion/router";
+import { taskPlacementReceipt, type ModelRouter, type ProviderService } from "@massion/router";
 import {
   isOptimizationRoleKey,
   type ModelOptimizationStore,
@@ -87,6 +93,8 @@ export interface ApplicationQueryDependencies {
   };
   readonly snapshot?: CollaborationGraphSnapshotProjector;
   readonly runtime?: Pick<RuntimeExecutionStore, "listEvents" | "getRecovery" | "listByCorrelation">;
+  readonly assurance?: Pick<AssuranceRunGateway, "get">;
+  readonly assuranceChecks?: Pick<AssuranceCheckStore, "listByRun">;
   readonly assuranceBindings?: Pick<AssuranceBindingStore, "get" | "getActive">;
   readonly extension?: Pick<ExtensionGateway, "list">;
   readonly growth?: Pick<
@@ -140,7 +148,10 @@ export interface ApplicationQueryDependencies {
     ProviderService,
     "listProviders" | "listEndpoints" | "listCredentials" | "listModelCatalog"
   >;
-  readonly router?: Pick<ModelRouter, "listModels" | "listRoutes" | "listCandidates" | "listAttempts" | "readAttempt">;
+  readonly router?: Pick<
+    ModelRouter,
+    "listModels" | "listRoutes" | "listCandidates" | "listAttempts" | "readAttempt" | "listAttemptLineagesByExecution"
+  >;
   readonly status?: (context: TenantContext) => Promise<unknown>;
   readonly subscriptionAccounts?: SubscriptionAccountQueries;
   readonly subscriptionConnectors?: SubscriptionConnectorQueries;
@@ -926,6 +937,7 @@ const OPTIMIZATION_RECEIPT_FIELDS = [
   "organizationId",
   "roleKey",
   "modelProfileId",
+  "bundleId",
   "bundleVersion",
   "sampleCount",
   "qualityScore",
@@ -1134,6 +1146,224 @@ function publicExecution(execution: ApplicationExecutionSource) {
     ...(execution.autonomyRevision === undefined ? {} : { autonomyRevision: execution.autonomyRevision }),
     ...(execution.createdAt === undefined ? {} : { createdAt: execution.createdAt }),
     ...(execution.updatedAt === undefined ? {} : { updatedAt: execution.updatedAt }),
+  };
+}
+
+const ASSURANCE_RUN_LINEAGE_STATUSES = new Set<string>([
+  "planned",
+  "running",
+  "passed",
+  "failed",
+  "blocked",
+  "cancelled",
+]);
+const ASSURANCE_CHECK_LINEAGE_STATUSES = new Set<string>([
+  "pending",
+  "running",
+  "passed",
+  "failed",
+  "blocked",
+  "cancelled",
+]);
+const ROUTE_ATTEMPT_LINEAGE_STATUSES = new Set<string>(["reserved", "succeeded", "failed", "interrupted"]);
+const RUNTIME_EXECUTION_LINEAGE_STATUSES = new Set<string>([
+  "queued",
+  "running",
+  "suspended",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "interrupted",
+  "blocked_model_unavailable",
+]);
+
+function assuranceLineageId(value: unknown, label: string): string {
+  if (typeof value !== "string") throw new Error(`Assurance 계보의 ${label}가 유효하지 않습니다`);
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 256 || /[\0\r\n]/u.test(normalized)) {
+    throw new Error(`Assurance 계보의 ${label}가 유효하지 않습니다`);
+  }
+  return normalized;
+}
+
+function assuranceLineageOptionalId(value: unknown, label: string): string | undefined {
+  return value === undefined ? undefined : assuranceLineageId(value, label);
+}
+
+function assuranceLineageStatus(value: unknown, statuses: ReadonlySet<string>, label: string): string {
+  if (typeof value !== "string" || !statuses.has(value)) {
+    throw new Error(`Assurance 계보의 ${label}가 유효하지 않습니다`);
+  }
+  return value;
+}
+
+type AssuranceRouteSelectionView = {
+  readonly attemptId: string;
+  readonly modelProfileId: string;
+  readonly status: "reserved" | "succeeded" | "failed" | "interrupted";
+  readonly fallbackFromAttemptId?: string;
+  readonly placementReceipt?: {
+    readonly taskAxis?:
+      "code-generation" | "code-understanding" | "planning-design" | "review-critique" | "summary-records";
+    readonly reasoningDifficulty?: "low" | "medium" | "high";
+    readonly selectionBasis:
+      | "task-axis-evidence-available"
+      | "role-baseline-task-axis-evidence-unavailable"
+      | "role-baseline-task-signal-missing";
+    readonly axisEvidence?: {
+      readonly bundleId: string;
+      readonly bundleVersion: number;
+      readonly receiptIds: readonly string[];
+      readonly rankedModelProfileIds: readonly string[];
+    };
+  };
+};
+
+function assurancePlacementReceiptView(
+  value: unknown,
+  workId: string,
+  taskId: string | undefined,
+): AssuranceRouteSelectionView["placementReceipt"] {
+  const receipt = taskPlacementReceipt(value);
+  if (receipt === undefined) return undefined;
+  if (receipt.workId !== workId || taskId === undefined || receipt.taskId !== taskId) {
+    throw new Error("Assurance 계보의 Task placement receipt가 Runtime 실행과 일치하지 않습니다");
+  }
+  return {
+    ...(receipt.taskAxis === undefined ? {} : { taskAxis: receipt.taskAxis }),
+    ...(receipt.reasoningDifficulty === undefined ? {} : { reasoningDifficulty: receipt.reasoningDifficulty }),
+    selectionBasis: receipt.selectionBasis,
+    ...(receipt.axisEvidence === undefined
+      ? {}
+      : {
+          axisEvidence: {
+            bundleId: receipt.axisEvidence.bundleId,
+            bundleVersion: receipt.axisEvidence.bundleVersion,
+            receiptIds: receipt.axisEvidence.receiptIds,
+            rankedModelProfileIds: receipt.axisEvidence.rankedModelProfileIds,
+          },
+        }),
+  };
+}
+
+function assuranceExecutionForLineage(
+  executions: readonly ApplicationExecutionSource[],
+  executionId: string,
+  organizationId: string,
+  workId: string,
+): ApplicationExecutionSource {
+  const matched = executions.filter((execution) => execution.executionId === executionId);
+  if (matched.length !== 1 || !matched[0]) {
+    throw new Error("Assurance 계보의 Runtime 실행이 하나로 확정되지 않습니다");
+  }
+  const execution = matched[0];
+  if (execution.organizationId !== organizationId || execution.workId !== workId) {
+    throw new Error("Assurance 계보의 Runtime 실행 Work가 일치하지 않습니다");
+  }
+  return execution;
+}
+
+async function assuranceRouteSelections(
+  context: TenantContext,
+  router: Pick<ModelRouter, "listAttemptLineagesByExecution">,
+  execution: ApplicationExecutionSource,
+  workId: string,
+): Promise<readonly AssuranceRouteSelectionView[]> {
+  const executionId = assuranceLineageId(execution.executionId, "Runtime 실행 ID");
+  const taskId = assuranceLineageOptionalId(execution.taskId, "Runtime Task ID");
+  const rawAttempts: unknown = await router.listAttemptLineagesByExecution(context, executionId);
+  if (!Array.isArray(rawAttempts) || rawAttempts.length === 0) {
+    throw new Error("Assurance 계보의 Route Attempt가 없습니다");
+  }
+  const projected = rawAttempts.map((rawAttempt): AssuranceRouteSelectionView => {
+    if (!rawAttempt || typeof rawAttempt !== "object" || Array.isArray(rawAttempt)) {
+      throw new Error("Assurance 계보의 Route Attempt가 유효하지 않습니다");
+    }
+    const attempt = rawAttempt as Record<string, unknown>;
+    const attemptExecutionId = assuranceLineageId(attempt.executionId, "Route Attempt 실행 ID");
+    if (attemptExecutionId !== executionId) {
+      throw new Error("Assurance 계보의 Route Attempt 실행이 Runtime 실행과 일치하지 않습니다");
+    }
+    const placementReceipt = assurancePlacementReceiptView(attempt.placementReceipt, workId, taskId);
+    return {
+      attemptId: assuranceLineageId(attempt.attemptId, "Route Attempt ID"),
+      modelProfileId: assuranceLineageId(attempt.modelProfileId, "Model Profile ID"),
+      status: assuranceLineageStatus(
+        attempt.status,
+        ROUTE_ATTEMPT_LINEAGE_STATUSES,
+        "Route Attempt 상태",
+      ) as AssuranceRouteSelectionView["status"],
+      ...(attempt.fallbackFromAttemptId === undefined
+        ? {}
+        : { fallbackFromAttemptId: assuranceLineageId(attempt.fallbackFromAttemptId, "fallback Route Attempt ID") }),
+      ...(placementReceipt === undefined ? {} : { placementReceipt }),
+    };
+  });
+  const indexesByAttemptId = new Map<string, number>();
+  for (const [index, attempt] of projected.entries()) {
+    if (indexesByAttemptId.has(attempt.attemptId)) {
+      throw new Error("Assurance 계보의 Route Attempt ID가 중복됐습니다");
+    }
+    indexesByAttemptId.set(attempt.attemptId, index);
+  }
+  for (const [index, attempt] of projected.entries()) {
+    if (attempt.fallbackFromAttemptId === undefined) continue;
+    const parentIndex = indexesByAttemptId.get(attempt.fallbackFromAttemptId);
+    if (parentIndex === undefined) {
+      throw new Error("Assurance 계보의 fallback Route Attempt가 없습니다");
+    }
+    if (parentIndex >= index) {
+      throw new Error("Assurance 계보의 fallback Route Attempt 순서가 유효하지 않습니다");
+    }
+    const visited = new Set<string>();
+    let ancestor: AssuranceRouteSelectionView | undefined = attempt;
+    while (ancestor?.fallbackFromAttemptId !== undefined) {
+      if (visited.has(ancestor.attemptId)) {
+        throw new Error("Assurance 계보의 fallback Route Attempt에 순환이 있습니다");
+      }
+      visited.add(ancestor.attemptId);
+      const ancestorIndex = indexesByAttemptId.get(ancestor.fallbackFromAttemptId);
+      ancestor = ancestorIndex === undefined ? undefined : projected[ancestorIndex];
+    }
+  }
+  return projected;
+}
+
+function assuranceRunLineageView(run: AssuranceRun, organizationId: string, workId: string) {
+  const assuranceRunId = assuranceLineageId(run.assuranceRunId, "Assurance run ID");
+  if (run.organizationId !== organizationId || run.workId !== workId) {
+    throw new Error("Assurance run 계보의 Work 또는 조직이 일치하지 않습니다");
+  }
+  return {
+    assuranceRunId,
+    workId,
+    status: assuranceLineageStatus(
+      run.status,
+      ASSURANCE_RUN_LINEAGE_STATUSES,
+      "Assurance run 상태",
+    ) as AssuranceRun["status"],
+  };
+}
+
+function assertAssuranceCheckLineage(
+  check: AssuranceCheck,
+  organizationId: string,
+  assuranceRunId: string,
+  workId: string,
+): { readonly checkId: string; readonly criterionId: string; readonly status: AssuranceCheck["status"] } {
+  const checkId = assuranceLineageId(check.checkId, "Assurance check ID");
+  const criterionId = assuranceLineageId(check.criterionId, "Assurance criterion ID");
+  if (check.organizationId !== organizationId || check.assuranceRunId !== assuranceRunId || check.workId !== workId) {
+    throw new Error("Assurance check 계보의 Run·Work 또는 조직이 일치하지 않습니다");
+  }
+  return {
+    checkId,
+    criterionId,
+    status: assuranceLineageStatus(
+      check.status,
+      ASSURANCE_CHECK_LINEAGE_STATUSES,
+      "Assurance check 상태",
+    ) as AssuranceCheck["status"],
   };
 }
 
@@ -2615,6 +2845,89 @@ export function registerApplicationQueries(
           text(value.planVersionId, "planVersionId"),
         );
         return active ? assuranceBindingView(active) : undefined;
+      },
+    });
+  }
+  if (dependencies.assurance && dependencies.assuranceChecks && dependencies.router) {
+    registry.register({
+      operation: "assurance.lineage.get",
+      requiredScopes: ["assurance:read"],
+      allowedRoles: EVERY_ROLE,
+      validate: (value) => object(value, ["workId", "assuranceRunId"]),
+      handle: async (context, value) => {
+        const workId = assuranceLineageId(value.workId, "Work ID");
+        const assuranceRunId = assuranceLineageId(value.assuranceRunId, "Assurance run ID");
+        const assurance = dependencies.assurance as NonNullable<ApplicationQueryDependencies["assurance"]>;
+        const assuranceChecks = dependencies.assuranceChecks as NonNullable<
+          ApplicationQueryDependencies["assuranceChecks"]
+        >;
+        const router = dependencies.router as Pick<ModelRouter, "listAttemptLineagesByExecution">;
+        const [run, checks, executions] = await Promise.all([
+          assurance.get(context, assuranceRunId),
+          assuranceChecks.listByRun(context, assuranceRunId),
+          dependencies.readModel.executions(context),
+        ]);
+        const safeRun = assuranceRunLineageView(run, context.organizationId, workId);
+        if (safeRun.assuranceRunId !== assuranceRunId) {
+          throw new Error("Assurance run 계보가 요청 ID와 일치하지 않습니다");
+        }
+        const checksById = new Set<string>();
+        const projectedChecks = await Promise.all(
+          checks.map(async (check) => {
+            const safeCheck = assertAssuranceCheckLineage(
+              check,
+              context.organizationId,
+              safeRun.assuranceRunId,
+              workId,
+            );
+            if (checksById.has(safeCheck.checkId)) throw new Error("Assurance check 계보의 ID가 중복됐습니다");
+            checksById.add(safeCheck.checkId);
+            const executorExecutionId = assuranceLineageOptionalId(check.executorExecutionId, "check 실행 ID");
+            const systemAdapterId = assuranceLineageOptionalId(check.systemAdapterId, "system adapter ID");
+            const executorHandle = assuranceLineageOptionalId(check.executorHandle, "executor handle");
+            if (systemAdapterId !== undefined && executorExecutionId !== undefined) {
+              throw new Error("Assurance check 계보의 system adapter와 Runtime 실행이 동시에 존재합니다");
+            }
+            if (systemAdapterId !== undefined || executorExecutionId === undefined) {
+              return {
+                checkId: safeCheck.checkId,
+                criterionId: safeCheck.criterionId,
+                status: safeCheck.status,
+                ...(executorHandle === undefined ? {} : { executorHandle }),
+                ...(systemAdapterId === undefined ? {} : { systemAdapterId }),
+                routeSelections: [] as const,
+              };
+            }
+            const execution = assuranceExecutionForLineage(
+              executions,
+              executorExecutionId,
+              context.organizationId,
+              workId,
+            );
+            if (executorHandle === undefined || executorHandle !== execution.agentHandle) {
+              throw new Error("Assurance check 계보의 Runtime 실행자 handle이 일치하지 않습니다");
+            }
+            return {
+              checkId: safeCheck.checkId,
+              criterionId: safeCheck.criterionId,
+              status: safeCheck.status,
+              executorHandle,
+              runtime: {
+                executionId: executorExecutionId,
+                ...(execution.taskId === undefined
+                  ? {}
+                  : { taskId: assuranceLineageId(execution.taskId, "Runtime Task ID") }),
+                status: assuranceLineageStatus(
+                  execution.status,
+                  RUNTIME_EXECUTION_LINEAGE_STATUSES,
+                  "Runtime 실행 상태",
+                ),
+              },
+              routeSelections: await assuranceRouteSelections(context, router, execution, workId),
+            };
+          }),
+        );
+        return { run: safeRun, checks: projectedChecks };
       },
     });
   }

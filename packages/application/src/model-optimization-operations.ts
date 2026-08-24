@@ -7,14 +7,11 @@ export const MODEL_OPTIMIZATION_OPERATIONS = [
   "optimization.bundle.create",
   "optimization.bundle.export",
   "optimization.bundle.import",
-  "optimization.evaluation.start",
   "optimization.evaluation.execute",
-  "optimization.evaluation.complete",
   "optimization.recommend",
   "optimization.recommendation.approve",
   "optimization.batch.create",
   "optimization.batch.activate",
-  "optimization.observation.record",
   "optimization.recover",
 ] as const;
 

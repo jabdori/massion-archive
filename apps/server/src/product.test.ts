@@ -1138,6 +1138,8 @@ describe("Massion server product", () => {
           requiredCapabilities: ["quant-analysis"],
           recommendedAgentHandles: [],
           parallelizable: false,
+          taskAxis: "code-generation",
+          reasoningDifficulty: "medium",
         },
       ],
       evidenceRequests: [],
@@ -2104,6 +2106,8 @@ describe("Massion server product", () => {
           requiredCapabilities: [],
           recommendedAgentHandles: ["delivery-coordination"],
           parallelizable: false,
+          taskAxis: "code-generation",
+          reasoningDifficulty: "medium",
         },
       ],
       evidenceRequests: [],
@@ -2290,6 +2294,8 @@ describe("Massion server product", () => {
           requiredCapabilities: ["backend-engineering"],
           recommendedAgentHandles: ["software-engineering.backend-specialist"],
           parallelizable: false,
+          reasoningDifficulty: "medium",
+          taskAxis: "code-generation",
         },
       ],
       evidenceRequests: [],
@@ -2571,6 +2577,83 @@ describe("Massion server product", () => {
         command("router.model.enabled.set", { modelProfileId: model.data.modelProfileId, enabled: true }),
       ).resolves.toMatchObject({ data: { modelProfileId: model.data.modelProfileId, enabled: true } });
 
+      await command("optimization.policy.configure", {
+        policy: "quality",
+        autoOptimize: true,
+        productionLearning: false,
+        shadowEnabled: false,
+        minimumSampleCount: 3,
+        improvementThreshold: 0,
+        governanceDecisionId: "software-product-axis-policy-decision-0001",
+      });
+      const axisBundle = await command("optimization.bundle.create", {
+        roleKey: "software-engineering.backend-specialist",
+        runtimeVersion: "software-product-axis-runtime-1",
+        cases: [
+          {
+            prompt: "완료라고 답해주세요.",
+            promptChecksum: "a".repeat(64),
+            toolsChecksum: "b".repeat(64),
+            environmentChecksum: "c".repeat(64),
+            expectedOutcome: "완료",
+            taskAxis: "code-generation",
+            reasoningDifficulty: "medium",
+          },
+          {
+            prompt: "완료라고 답해주세요.",
+            promptChecksum: "d".repeat(64),
+            toolsChecksum: "e".repeat(64),
+            environmentChecksum: "f".repeat(64),
+            expectedOutcome: "완료",
+            taskAxis: "code-generation",
+            reasoningDifficulty: "medium",
+          },
+          {
+            prompt: "완료라고 답해주세요.",
+            promptChecksum: "1".repeat(64),
+            toolsChecksum: "2".repeat(64),
+            environmentChecksum: "3".repeat(64),
+            expectedOutcome: "완료",
+            taskAxis: "code-generation",
+            reasoningDifficulty: "medium",
+          },
+        ],
+      });
+      const axisBundleId = axisBundle.data.bundleId;
+      if (typeof axisBundleId !== "string") throw new Error("작업 축 평가 bundle을 찾을 수 없습니다");
+      const axisReceipt = await command("optimization.evaluation.execute", {
+        roleKey: "software-engineering.backend-specialist",
+        bundleId: axisBundleId,
+        modelProfileId: model.data.modelProfileId,
+        runtimeVersion: "software-product-axis-runtime-1",
+      });
+      const axisReceiptId = axisReceipt.data.receiptId;
+      if (typeof axisReceiptId !== "string") throw new Error("작업 축 평가 receipt를 찾을 수 없습니다");
+      const axisRecommendation = await command("optimization.recommend", {
+        roleKey: "software-engineering.backend-specialist",
+        requirements: {
+          requiresTools: false,
+          requiresStructuredOutput: false,
+          requiresStreaming: false,
+          dataPolicy: "external-allowed",
+        },
+      });
+      expect(axisRecommendation.data).toMatchObject({
+        primaryModelProfileId: model.data.modelProfileId,
+        status: "approved",
+      });
+      const axisRecommendationId = axisRecommendation.data.recommendationId;
+      if (typeof axisRecommendationId !== "string") throw new Error("작업 축 모델 추천을 찾을 수 없습니다");
+      const axisBatch = await command("optimization.batch.create", {
+        recommendationId: axisRecommendationId,
+        status: "limited",
+      });
+      const axisBatchId = axisBatch.data.batchId;
+      if (typeof axisBatchId !== "string") throw new Error("작업 축 모델 batch를 찾을 수 없습니다");
+      await expect(command("optimization.batch.activate", { batchId: axisBatchId })).resolves.toMatchObject({
+        data: { batchId: axisBatchId, status: "active" },
+      });
+
       const organizations = await OrganizationService.create(database);
       const repositories = await RepositoryStore.create(database, organizations);
       const indexes = await IndexStore.create(database, organizations);
@@ -2675,6 +2758,94 @@ describe("Massion server product", () => {
         completedRun = (await client.query("run.get", { runId: accepted.data.runId })) as typeof completedRun;
       }
       expect(completedRun.data.status).toBe("completed");
+      const workExecutions = (await client.query("work.executions", { workId: completedRun.data.workId })) as {
+        readonly data: readonly {
+          readonly executionId: string;
+          readonly taskId?: string;
+          readonly agentHandle: string;
+          readonly status: string;
+        }[];
+      };
+      const specialistExecution = workExecutions.data.find(
+        (execution) =>
+          execution.agentHandle === "software-engineering.backend-specialist" && execution.status === "succeeded",
+      );
+      if (!specialistExecution?.taskId) throw new Error("작업 축 Delivery 실행 계보를 찾을 수 없습니다");
+      const specialistEvents = (await client.query("runtime.execution.events", {
+        executionId: specialistExecution.executionId,
+      })) as {
+        readonly data: readonly { readonly type: string }[];
+      };
+      expect(specialistEvents.data.filter((event) => event.type === "model.route.selected")).toHaveLength(1);
+      const [specialistAttempts] = await database.query<
+        [
+          {
+            readonly execution_id?: string;
+            readonly optimization_batch_id?: string;
+            readonly model_profile_id: string;
+            readonly explanation_json: string;
+            readonly selection_sequence: number;
+            readonly attempt_id: string;
+          }[],
+        ]
+      >(
+        "SELECT execution_id, optimization_batch_id, model_profile_id, explanation_json, selection_sequence, attempt_id FROM route_attempt WHERE organization_id = $organization_id AND execution_id = $execution_id ORDER BY selection_sequence ASC, attempt_id ASC;",
+        {
+          organization_id: initialized.context.organizationId,
+          execution_id: specialistExecution.executionId,
+        },
+      );
+      expect(specialistAttempts).toHaveLength(1);
+      const specialistAttempt = specialistAttempts[0];
+      if (!specialistAttempt) throw new Error("작업 축 Route Attempt를 찾을 수 없습니다");
+      expect(specialistAttempt).toMatchObject({
+        execution_id: specialistExecution.executionId,
+        optimization_batch_id: axisBatchId,
+        model_profile_id: model.data.modelProfileId,
+      });
+      const explanationSnapshot = JSON.parse(specialistAttempt.explanation_json) as { readonly request?: string };
+      const routeRequest = explanationSnapshot.request
+        ? (JSON.parse(explanationSnapshot.request) as Record<string, unknown>)
+        : {};
+      const placementReceipt = {
+        workId: completedRun.data.workId,
+        taskId: specialistExecution.taskId,
+        taskAxis: "code-generation",
+        reasoningDifficulty: "medium",
+        selectionBasis: "task-axis-evidence-available",
+        axisEvidence: {
+          bundleId: axisBundleId,
+          bundleVersion: 1,
+          receiptIds: [axisReceiptId],
+          rankedModelProfileIds: [model.data.modelProfileId],
+        },
+      };
+      expect(routeRequest.placementReceipt).toEqual(placementReceipt);
+      const [routeSelectedEvents] = await database.query<
+        [
+          {
+            readonly event_type: string;
+            readonly payload_json: string;
+            readonly sequence: number;
+          }[],
+        ]
+      >(
+        "SELECT event_type, payload_json, sequence FROM runtime_event WHERE organization_id = $organization_id AND execution_id = $execution_id AND event_type = 'model.route.selected' ORDER BY sequence ASC;",
+        {
+          organization_id: initialized.context.organizationId,
+          execution_id: specialistExecution.executionId,
+        },
+      );
+      expect(routeSelectedEvents).toHaveLength(1);
+      const routeSelectedEvent = routeSelectedEvents[0];
+      if (!routeSelectedEvent) throw new Error("Model Route 선택 사건을 찾을 수 없습니다");
+      expect(JSON.parse(routeSelectedEvent.payload_json)).toMatchObject({
+        executionId: specialistExecution.executionId,
+        attemptId: specialistAttempt.attempt_id,
+        modelProfileId: model.data.modelProfileId,
+        batchId: axisBatchId,
+        placementReceipt,
+      });
       const [artifacts, verifications, records] = (await Promise.all([
         client.query("work.artifacts", { workId: completedRun.data.workId }),
         client.query("work.verifications", { workId: completedRun.data.workId }),
@@ -2687,6 +2858,7 @@ describe("Massion server product", () => {
             readonly workId: string;
             readonly passed: boolean;
             readonly evidenceArtifactVersionIds: readonly string[];
+            readonly assuranceRunId?: string;
           }[];
         },
         {
@@ -2701,6 +2873,106 @@ describe("Massion server product", () => {
         (candidate) => candidate.workId === completedRun.data.workId && candidate.passed,
       );
       if (!verification) throw new Error("완료된 Work의 독립 Assurance 검증을 찾을 수 없습니다");
+      if (!verification.assuranceRunId) throw new Error("완료된 Work의 Assurance run 계보를 찾을 수 없습니다");
+      const assuranceLineage = (await client.query("assurance.lineage.get", {
+        workId: completedRun.data.workId,
+        assuranceRunId: verification.assuranceRunId,
+      })) as {
+        readonly data: {
+          readonly run: { readonly assuranceRunId: string; readonly workId: string; readonly status: string };
+          readonly checks: readonly {
+            readonly checkId: string;
+            readonly criterionId: string;
+            readonly status: string;
+            readonly executorHandle?: string;
+            readonly systemAdapterId?: string;
+            readonly runtime?: { readonly executionId: string; readonly taskId?: string; readonly status: string };
+            readonly routeSelections: readonly {
+              readonly attemptId: string;
+              readonly modelProfileId: string;
+              readonly status: string;
+              readonly fallbackFromAttemptId?: string;
+              readonly placementReceipt?: {
+                readonly taskAxis?: string;
+                readonly reasoningDifficulty?: string;
+                readonly selectionBasis: string;
+                readonly axisEvidence?: {
+                  readonly bundleId: string;
+                  readonly bundleVersion: number;
+                  readonly receiptIds: readonly string[];
+                  readonly rankedModelProfileIds: readonly string[];
+                };
+              };
+            }[];
+          }[];
+        };
+      };
+      expect(assuranceLineage.data.run).toEqual({
+        assuranceRunId: verification.assuranceRunId,
+        workId: completedRun.data.workId,
+        status: "passed",
+      });
+      expect(assuranceLineage.data.checks.length).toBeGreaterThan(0);
+      for (const check of assuranceLineage.data.checks) {
+        expect(
+          Object.keys(check).every((key) =>
+            [
+              "checkId",
+              "criterionId",
+              "status",
+              "executorHandle",
+              "systemAdapterId",
+              "runtime",
+              "routeSelections",
+            ].includes(key),
+          ),
+        ).toBe(true);
+        expect(typeof check.checkId).toBe("string");
+        expect(typeof check.criterionId).toBe("string");
+        expect(typeof check.status).toBe("string");
+        expect((check.systemAdapterId !== undefined) !== (check.runtime !== undefined)).toBe(true);
+        if (check.systemAdapterId !== undefined) {
+          expect(check.routeSelections).toEqual([]);
+          continue;
+        }
+        if (!check.runtime) throw new Error("Runtime Assurance check의 실행 계보가 없습니다");
+        expect(Object.keys(check.runtime).every((key) => ["executionId", "taskId", "status"].includes(key))).toBe(true);
+        expect(check.runtime.executionId).toEqual(expect.any(String));
+        expect(check.runtime.status).toEqual(expect.any(String));
+        for (const selection of check.routeSelections) {
+          expect(
+            Object.keys(selection).every((key) =>
+              ["attemptId", "modelProfileId", "status", "fallbackFromAttemptId", "placementReceipt"].includes(key),
+            ),
+          ).toBe(true);
+          expect(selection).toMatchObject({
+            attemptId: expect.any(String),
+            modelProfileId: expect.any(String),
+          });
+          expect(["reserved", "succeeded", "failed", "interrupted"]).toContain(selection.status);
+          if (selection.fallbackFromAttemptId !== undefined)
+            expect(selection.fallbackFromAttemptId).toEqual(expect.any(String));
+          if (selection.placementReceipt !== undefined) {
+            expect(
+              Object.keys(selection.placementReceipt).every((key) =>
+                ["taskAxis", "reasoningDifficulty", "selectionBasis", "axisEvidence"].includes(key),
+              ),
+            ).toBe(true);
+            expect(selection.placementReceipt.selectionBasis).toEqual(expect.any(String));
+            if (selection.placementReceipt.axisEvidence !== undefined) {
+              expect(
+                Object.keys(selection.placementReceipt.axisEvidence).every((key) =>
+                  ["bundleId", "bundleVersion", "receiptIds", "rankedModelProfileIds"].includes(key),
+                ),
+              ).toBe(true);
+            }
+          }
+        }
+      }
+      expect(JSON.stringify(assuranceLineage.data)).not.toMatch(
+        /"(?:credential|explanation|prompt|inputHash|outputHash|outputSummary|artifact|evidence)/iu,
+      );
+      expect(JSON.stringify(assuranceLineage.data)).not.toMatch(/secret/iu);
       const evidenceArtifactVersionId = verification.evidenceArtifactVersionIds.find((artifactVersionId) =>
         artifacts.data.some(
           (artifact) =>
@@ -2800,6 +3072,8 @@ describe("Massion server product", () => {
           requiredCapabilities: [],
           recommendedAgentHandles: ["delivery-coordination"],
           parallelizable: false,
+          taskAxis: "code-generation",
+          reasoningDifficulty: "medium",
         },
       ],
       evidenceRequests: [],
