@@ -301,11 +301,19 @@ describe("Massion server model optimization product boundary", () => {
         ],
       });
       expect(bundle.outcome).toBe("succeeded");
+      const preflight = (await client.query("optimization.evaluation.preflight", {
+        roleKey: "assurance",
+        bundleId: bundle.data.bundleId,
+        modelProfileId: model.data.modelProfileId,
+        runtimeVersion: "server-test-runtime",
+      })) as { readonly data: readonly [{ readonly checksum: string; readonly expectedCallCount: number }] };
+      expect(preflight.data[0]).toMatchObject({ expectedCallCount: 3 });
       const receipt = await command("optimization.evaluation.execute", {
         roleKey: "assurance",
         bundleId: bundle.data.bundleId,
         modelProfileId: model.data.modelProfileId,
         runtimeVersion: "server-test-runtime",
+        preflightChecksum: preflight.data[0].checksum,
       });
       expect(receipt).toMatchObject({
         outcome: "succeeded",
@@ -315,6 +323,15 @@ describe("Massion server model optimization product boundary", () => {
           sampleCount: 3,
           qualityScore: 1,
           completed: true,
+          evidence: {
+            tier: "t1-local",
+            disclosure: {
+              expectedCallCount: 3,
+              maximumCostMicros: 3_000_000,
+              providerId: "local-evaluation",
+              dataKinds: ["evaluation-prompt"],
+            },
+          },
         },
       });
 

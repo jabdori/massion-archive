@@ -2621,11 +2621,18 @@ describe("Massion server product", () => {
       });
       const axisBundleId = axisBundle.data.bundleId;
       if (typeof axisBundleId !== "string") throw new Error("작업 축 평가 bundle을 찾을 수 없습니다");
+      const axisPreflight = (await client.query("optimization.evaluation.preflight", {
+        roleKey: "software-engineering.backend-specialist",
+        bundleId: axisBundleId,
+        modelProfileId: model.data.modelProfileId,
+        runtimeVersion: "software-product-axis-runtime-1",
+      })) as { readonly data: readonly [{ readonly checksum: string }] };
       const axisReceipt = await command("optimization.evaluation.execute", {
         roleKey: "software-engineering.backend-specialist",
         bundleId: axisBundleId,
         modelProfileId: model.data.modelProfileId,
         runtimeVersion: "software-product-axis-runtime-1",
+        preflightChecksum: axisPreflight.data[0].checksum,
       });
       const axisReceiptId = axisReceipt.data.receiptId;
       if (typeof axisReceiptId !== "string") throw new Error("작업 축 평가 receipt를 찾을 수 없습니다");

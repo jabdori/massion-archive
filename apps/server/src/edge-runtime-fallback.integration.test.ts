@@ -9,9 +9,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { IdentityService, OrganizationService } from "@massion/identity";
 import { CredentialVault, ModelRouter, ProviderService } from "@massion/router";
 import {
+  DirectExecutionLifecycle,
   MassionModelFactory,
   RoutedModelRegistry,
   RuntimeExecutionStore,
+  RuntimeRecovery,
   VoltAgentRunner,
   runtimeAgentName,
   type SubscriptionAgentAdapter,
@@ -78,7 +80,7 @@ describe("실제 Edge 구독 fallback 통합", () => {
     return await new ConnectorIdentityStore(identityPath).activate(pending, context);
   }
 
-  it("첫 계정의 app-server 인증 전 401을 실제 lease에 정산하고 다음 계정으로 성공한다", async () => {
+  it("실제 Edge 구독의 성공·fallback·실패·재시작이 Work 실행과 모델 계보를 보존한다", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "massion-edge-runtime-fallback-")));
     roots.push(root);
     const workspaceRoot = join(root, "workspace");
@@ -466,16 +468,15 @@ describe("실제 Edge 구독 fallback 통합", () => {
       profileRoot: join(root, "server-profiles"),
       executableAllowlist: {},
     });
-    const modelFactory = new MassionModelFactory(
-      router,
-      providers,
-      { build: () => ({ modelId: "unused" }) as LanguageModel },
-      {
-        broker,
-        resolver,
-        routeAttempts: { read: async (tenant, attemptId) => await router.readAttempt(tenant, attemptId) },
+    const modelBuilder = { build: () => ({ modelId: "unused" }) as LanguageModel };
+    const connectorRuntime = {
+      broker,
+      resolver,
+      routeAttempts: {
+        read: async (tenant: typeof context, attemptId: string) => await router.readAttempt(tenant, attemptId),
       },
-    );
+    };
+    const modelFactory = new MassionModelFactory(router, providers, modelBuilder, connectorRuntime);
     const store = await RuntimeExecutionStore.create(database, organizations);
     const runner = new VoltAgentRunner(
       {
@@ -510,6 +511,8 @@ describe("실제 Edge 구독 fallback 통합", () => {
         Array<{ account_id: string; status: string }>,
         Array<{
           attempt_id: string;
+          execution_id: string;
+          model_profile_id: string;
           credential_id: string;
           status: string;
           failure_class?: string;
@@ -523,7 +526,8 @@ describe("실제 Edge 구독 fallback 통합", () => {
     >(
       `SELECT account_id, status FROM subscription_account
        WHERE organization_id = $organization_id ORDER BY account_id ASC;
-       SELECT attempt_id, credential_id, status, failure_class, fallback_from_attempt_id, emitted_tokens,
+       SELECT attempt_id, execution_id, model_profile_id, credential_id, status, failure_class,
+              fallback_from_attempt_id, emitted_tokens,
               side_effects_started,
               selection_sequence
        FROM route_attempt WHERE organization_id = $organization_id ORDER BY selection_sequence ASC;
@@ -531,6 +535,8 @@ describe("실제 Edge 구독 fallback 통합", () => {
        WHERE organization_id = $organization_id ORDER BY created_at ASC;`,
       { organization_id: context.organizationId },
     );
+    const fallbackRecovery = await store.getRecovery(context, result.executionId);
+    const fallbackLineages = await router.listAttemptLineagesByExecution(context, result.executionId);
 
     expect(result, JSON.stringify({ result, accountRows, attemptRows, leaseRows })).toMatchObject({
       status: "succeeded",
@@ -542,6 +548,8 @@ describe("실제 Edge 구독 fallback 통합", () => {
     expect(accountRows.find((account) => account.account_id === accountB.account_id)?.status).toBe("active");
     expect(attemptRows).toEqual([
       expect.objectContaining({
+        execution_id: result.executionId,
+        model_profile_id: profile.profile.model_profile_id,
         credential_id: credentialA.credential_id,
         status: "failed",
         failure_class: "authentication",
@@ -549,12 +557,47 @@ describe("실제 Edge 구독 fallback 통합", () => {
         side_effects_started: false,
       }),
       expect.objectContaining({
+        execution_id: result.executionId,
+        model_profile_id: profile.profile.model_profile_id,
         credential_id: credentialB.credential_id,
         status: "succeeded",
         fallback_from_attempt_id: expect.any(String),
       }),
     ]);
     expect(attemptRows[1]?.fallback_from_attempt_id).toBe(attemptRows[0]?.attempt_id);
+    expect(fallbackRecovery.execution).toMatchObject({
+      execution_id: result.executionId,
+      work_id: "work-edge-fallback",
+      status: "succeeded",
+    });
+    expect(fallbackLineages).toEqual([
+      {
+        attemptId: attemptRows[0]?.attempt_id,
+        executionId: result.executionId,
+        modelProfileId: profile.profile.model_profile_id,
+        status: "failed",
+      },
+      {
+        attemptId: attemptRows[1]?.attempt_id,
+        executionId: result.executionId,
+        modelProfileId: profile.profile.model_profile_id,
+        fallbackFromAttemptId: attemptRows[0]?.attempt_id,
+        status: "succeeded",
+      },
+    ]);
+    expect(
+      fallbackRecovery.events
+        .filter((event) => event.event_type === "model.route.selected")
+        .map((event) => JSON.parse(event.payload_json)),
+    ).toEqual(
+      attemptRows.map((attempt) => ({
+        executionId: result.executionId,
+        attemptId: attempt.attempt_id,
+        modelProfileId: profile.profile.model_profile_id,
+        routeName: route.route.name,
+        preferenceApplied: false,
+      })),
+    );
     expect(leaseRows).toEqual([
       expect.objectContaining({
         account_id: accountA.account_id,
@@ -571,5 +614,140 @@ describe("실제 Edge 구독 fallback 통합", () => {
     expect(JSON.stringify({ result, accountRows, attemptRows, leaseRows })).not.toMatch(
       /profile-a|profile-b|edge-fallback-owner@example\.com/iu,
     );
+
+    vi.mocked(adapterB.execute).mockImplementationOnce(async (_tenant, input) => ({
+      outcome: "failed",
+      executionId: input.executionId,
+      sessionId: "provider-session-b-failed",
+      category: "input",
+      retryable: false,
+      signal: { kind: "input" },
+      emittedTokens: 0,
+      sideEffectsStarted: false,
+    }));
+    const failedResult = await runner.execute(context, {
+      commandId: randomUUID(),
+      workId: "work-edge-failed",
+      agentHandle: "representative",
+      modelRoute: route.route.name,
+      correlationId: randomUUID(),
+      estimatedTokens: 100,
+      estimatedCostMicros: 0,
+      input: "실패 계보를 검증해주세요",
+    });
+    const failedRecovery = await store.getRecovery(context, failedResult.executionId);
+    const failedLineages = await router.listAttemptLineagesByExecution(context, failedResult.executionId);
+
+    expect(failedResult).toMatchObject({ status: "failed", error: { category: "input", retryable: false } });
+    expect(failedRecovery.execution).toMatchObject({
+      execution_id: failedResult.executionId,
+      work_id: "work-edge-failed",
+      status: "failed",
+    });
+    expect(failedLineages).toEqual([
+      {
+        attemptId: expect.any(String),
+        executionId: failedResult.executionId,
+        modelProfileId: profile.profile.model_profile_id,
+        status: "failed",
+      },
+    ]);
+    const failedAttempt = await router.readAttempt(context, failedLineages[0]?.attemptId ?? "");
+    expect(failedAttempt).toMatchObject({
+      execution_id: failedResult.executionId,
+      model_profile_id: profile.profile.model_profile_id,
+      credential_id: credentialB.credential_id,
+      failure_class: "input",
+      status: "failed",
+    });
+    expect(
+      failedRecovery.events
+        .filter((event) => event.event_type === "model.route.selected")
+        .map((event) => JSON.parse(event.payload_json)),
+    ).toEqual([
+      {
+        executionId: failedResult.executionId,
+        attemptId: failedAttempt.attempt_id,
+        modelProfileId: profile.profile.model_profile_id,
+        routeName: route.route.name,
+        preferenceApplied: false,
+      },
+    ]);
+
+    const restartExecution = await store.createExecution(context, {
+      commandId: randomUUID(),
+      workId: "work-edge-restart",
+      agentHandle: "representative",
+      modelRoute: route.route.name,
+      correlationId: randomUUID(),
+      estimatedTokens: 100,
+      estimatedCostMicros: 0,
+      input: "재시작 계보를 검증해주세요",
+    });
+    await store.transition(context, {
+      commandId: `${restartExecution.execution.execution_id}:running`,
+      executionId: restartExecution.execution.execution_id,
+      expectedVersion: restartExecution.execution.version,
+      target: "running",
+      payload: { agentHandle: "representative" },
+    });
+    const reserved = await modelFactory.acquire(context, {
+      commandId: randomUUID(),
+      executionId: restartExecution.execution.execution_id,
+      workId: "work-edge-restart",
+      agentHandle: "representative",
+      workspaceRoot,
+      workspaceAccess: "workspace-write",
+      workspaceCapability: "workspace-capability-edge-fallback",
+      routeName: route.route.name,
+      estimatedTokens: 100,
+      estimatedCostMicros: 0,
+    });
+    const restartedStore = await RuntimeExecutionStore.create(database, organizations);
+    const restartedRunner = new VoltAgentRunner(
+      {
+        getAgents: () => [{ name: runtimeAgentName(context.organizationId, "representative") } as never],
+      },
+      restartedStore,
+      new MassionModelFactory(router, providers, modelBuilder, connectorRuntime),
+      new RoutedModelRegistry(),
+      new DirectExecutionLifecycle(
+        new RuntimeRecovery(restartedStore, { getWorkflowState: () => Promise.resolve(null) }),
+      ),
+    );
+
+    await expect(restartedRunner.recover(context, restartExecution.execution.execution_id)).resolves.toMatchObject({
+      executionId: restartExecution.execution.execution_id,
+      status: "interrupted",
+    });
+    const restartedRecovery = await restartedStore.getRecovery(context, restartExecution.execution.execution_id);
+    expect(restartedRecovery.execution).toMatchObject({
+      execution_id: restartExecution.execution.execution_id,
+      work_id: "work-edge-restart",
+      status: "interrupted",
+    });
+    await expect(
+      router.listAttemptLineagesByExecution(context, restartExecution.execution.execution_id),
+    ).resolves.toEqual([
+      {
+        attemptId: reserved.attemptId,
+        executionId: restartExecution.execution.execution_id,
+        modelProfileId: profile.profile.model_profile_id,
+        status: "failed",
+      },
+    ]);
+    expect(
+      restartedRecovery.events
+        .filter((event) => event.event_type === "model.route.selected")
+        .map((event) => JSON.parse(event.payload_json)),
+    ).toEqual([
+      {
+        executionId: restartExecution.execution.execution_id,
+        attemptId: reserved.attemptId,
+        modelProfileId: profile.profile.model_profile_id,
+        routeName: route.route.name,
+        preferenceApplied: false,
+      },
+    ]);
   });
 });

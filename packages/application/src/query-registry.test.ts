@@ -1579,6 +1579,19 @@ describe("ApplicationQueryRegistry", () => {
             checksum: "a".repeat(64),
             prompt: "prompt-secret",
           }),
+          previewEvaluation: async () => ({
+            bundleId: "bundle-1",
+            bundleVersion: 1,
+            modelProfileId: "profile-1",
+            runtimeVersion: "runtime-1",
+            configurationChecksum: "d".repeat(64),
+            expectedCallCount: 3,
+            maximumCostMicros: 30,
+            providerId: "provider-1",
+            dataKinds: ["evaluation-prompt"],
+            checksum: "e".repeat(64),
+            credential: "preflight-credential-secret",
+          }),
           listReceipts: async () => [
             {
               receiptId: "receipt-1",
@@ -1606,8 +1619,18 @@ describe("ApplicationQueryRegistry", () => {
     });
 
     const policy = await registry.query(context, ["optimization:read"], "optimization.policy", {});
+    const preflight = await registry.query(context, ["optimization:read"], "optimization.evaluation.preflight", {
+      roleKey: "assurance",
+      bundleId: "bundle-1",
+      modelProfileId: "profile-1",
+      runtimeVersion: "runtime-1",
+    });
     const receipts = await registry.query(context, ["optimization:read"], "optimization.receipts", {});
     expect(JSON.stringify(policy)).not.toContain("prompt-secret");
+    expect(JSON.stringify(preflight)).not.toContain("preflight-credential-secret");
+    expect(preflight.data).toEqual([
+      expect.objectContaining({ expectedCallCount: 3, maximumCostMicros: 30, providerId: "provider-1" }),
+    ]);
     expect(JSON.stringify(receipts)).not.toContain("credential-secret");
     expect(receipts.data).toEqual([expect.objectContaining({ bundleId: "bundle-1" })]);
     expect(policy.data).toEqual([expect.objectContaining({ policyVersionId: "policy-1", checksum: "a".repeat(64) })]);

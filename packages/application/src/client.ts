@@ -41,6 +41,7 @@ export type {
   KnowledgeRelationKindV1,
   OrganizationGraphSnapshotV1,
   OrganizationReferenceDispositionV1,
+  OptimizationEvaluationPreflightViewV1,
   ProviderDiscoveredModelViewV1,
   ProviderModelCatalogStatusViewV1,
   RouteAttemptViewV1,

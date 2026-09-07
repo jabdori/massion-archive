@@ -36,7 +36,10 @@ describe("Application model optimization operations", () => {
           verified: true,
           supportsStructuredOutput: true,
           supportsTools: true,
+          supportsVision: false,
           supportsStreaming: true,
+          contextWindow: 32_000,
+          maximumCostMicrosPerCall: 1_000,
           dataPolicy: "external-allowed",
         },
       ],
@@ -286,6 +289,25 @@ describe("Application model optimization operations", () => {
       }),
     );
     const bundleId = (bundle as { readonly data?: { readonly bundleId?: string } }).data?.bundleId;
+    if (bundleId === undefined) throw new Error("평가 bundle을 찾을 수 없습니다");
+    const preflight = await evaluations.previewEvaluation(context, {
+      roleKey: "assurance",
+      bundleId,
+      modelProfileId: "profile-1",
+      runtimeVersion: "runtime-1",
+    });
+    await expect(
+      registry.dispatch(
+        context,
+        ["optimization:write"],
+        envelope("execute-without-preflight", "optimization.evaluation.execute", {
+          roleKey: "assurance",
+          bundleId,
+          modelProfileId: "profile-1",
+          runtimeVersion: "runtime-1",
+        }),
+      ),
+    ).rejects.toMatchObject({ category: "validation", operatorCode: "APP_COMMAND_VALIDATION" });
     await expect(
       registry.dispatch(
         context,
@@ -296,6 +318,7 @@ describe("Application model optimization operations", () => {
           modelProfileId: "profile-1",
           runtimeVersion: "runtime-1",
           mode: "standard",
+          preflightChecksum: preflight.checksum,
         }),
       ),
     ).resolves.toMatchObject({ outcome: "succeeded", resource: { type: "OptimizationReceipt" } });

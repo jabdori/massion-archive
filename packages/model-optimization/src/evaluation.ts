@@ -18,6 +18,9 @@ import type {
   CompleteEvaluationInput,
   EvaluationBundle,
   EvaluationCase,
+  EvaluationExecutionDisclosure,
+  EvaluationPreflight,
+  EvaluationReceiptEvidence,
   EvaluationReasoningDifficulty,
   EvaluationRun,
   EvaluationTaskAxis,
@@ -29,6 +32,7 @@ import type {
 } from "./contracts.js";
 import type { EvaluationCapabilities, ModelEvaluationExecutionResult, ModelEvaluationExecutor } from "./ports.js";
 import {
+  MODEL_OPTIMIZATION_EVIDENCE_AUTHORITY_MIGRATION,
   MODEL_OPTIMIZATION_HARDENING_MIGRATION,
   MODEL_OPTIMIZATION_MIGRATION,
   MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION,
@@ -90,6 +94,14 @@ interface ReceiptRecord {
   readonly receipt_checksum: string;
   readonly command_id: string;
   readonly request_hash: string;
+  readonly evidence_tier?: "t0-bundled" | "t1-local";
+  readonly evidence_expires_at?: string | Date;
+  readonly evidence_source_version?: string;
+  readonly evidence_source_checksum?: string;
+  readonly evidence_configuration_checksum?: string;
+  readonly evidence_license?: string;
+  readonly evidence_contamination_possible?: boolean;
+  readonly evidence_disclosure_json?: string;
 }
 
 interface AxisScoreRecord {
@@ -199,6 +211,80 @@ function assertReasoningDifficulty(value: unknown): asserts value is EvaluationR
   }
 }
 
+function executionDisclosure(value: unknown): EvaluationExecutionDisclosure {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("평가 실행 전 고지가 유효하지 않습니다");
+  }
+  const disclosure = value as Partial<EvaluationExecutionDisclosure>;
+  if (!Number.isSafeInteger(disclosure.expectedCallCount) || (disclosure.expectedCallCount ?? 0) < 1) {
+    throw new Error("평가 예상 호출 수가 유효하지 않습니다");
+  }
+  if (
+    !Number.isSafeInteger(disclosure.maximumCostMicros) ||
+    (disclosure.maximumCostMicros ?? -1) < 0
+  ) {
+    throw new Error("평가 예상 최대 비용이 유효하지 않습니다");
+  }
+  assertText(disclosure.providerId, "평가 Provider 식별자");
+  if (
+    !Array.isArray(disclosure.dataKinds) ||
+    disclosure.dataKinds.length < 1 ||
+    disclosure.dataKinds.length > 16
+  ) {
+    throw new Error("평가 전송 데이터 종류가 유효하지 않습니다");
+  }
+  const dataKinds = disclosure.dataKinds.map((kind) => {
+    assertText(kind, "평가 전송 데이터 종류", 128);
+    return kind;
+  });
+  if (new Set(dataKinds).size !== dataKinds.length) throw new Error("평가 전송 데이터 종류가 중복되었습니다");
+  return {
+    expectedCallCount: disclosure.expectedCallCount as number,
+    maximumCostMicros: disclosure.maximumCostMicros as number,
+    providerId: disclosure.providerId,
+    dataKinds,
+  };
+}
+
+function receiptEvidence(record: ReceiptRecord): EvaluationReceiptEvidence | undefined {
+  if (record.evidence_tier === undefined) return undefined;
+  assertText(record.evidence_source_version, "평가 evidence source version");
+  assertChecksum(record.evidence_configuration_checksum, "평가 evidence configuration");
+  if (record.evidence_tier === "t0-bundled") {
+    assertText(record.evidence_license, "평가 evidence license", 256);
+    assertChecksum(record.evidence_source_checksum, "평가 evidence source");
+    if (typeof record.evidence_contamination_possible !== "boolean") {
+      throw new Error("평가 evidence 오염 가능성이 유효하지 않습니다");
+    }
+    const expiresAt = new Date(String(record.evidence_expires_at));
+    if (!Number.isFinite(expiresAt.getTime())) throw new Error("평가 evidence 만료 시각이 유효하지 않습니다");
+    return {
+      tier: "t0-bundled",
+      expiresAt: expiresAt.toISOString(),
+      sourceVersion: record.evidence_source_version,
+      sourceChecksum: record.evidence_source_checksum,
+      configurationChecksum: record.evidence_configuration_checksum,
+      license: record.evidence_license,
+      contaminationPossible: record.evidence_contamination_possible,
+    };
+  }
+  if (record.evidence_tier !== "t1-local" || record.evidence_disclosure_json === undefined) {
+    throw new Error("평가 evidence 권한이 유효하지 않습니다");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(record.evidence_disclosure_json);
+  } catch {
+    throw new Error("평가 실행 전 고지 JSON이 유효하지 않습니다");
+  }
+  return {
+    tier: "t1-local",
+    sourceVersion: record.evidence_source_version,
+    configurationChecksum: record.evidence_configuration_checksum,
+    disclosure: executionDisclosure(parsed),
+  };
+}
+
 function bundleView(record: BundleRecord): EvaluationBundle {
   return {
     bundleId: record.bundle_id,
@@ -228,6 +314,7 @@ function runView(record: RunRecord): EvaluationRun {
 }
 
 function receiptView(record: ReceiptRecord): StoredEvaluationReceipt {
+  const evidence = receiptEvidence(record);
   return {
     receiptId: record.receipt_id,
     runId: record.run_id,
@@ -244,6 +331,7 @@ function receiptView(record: ReceiptRecord): StoredEvaluationReceipt {
     completed: record.completed,
     inputChecksum: record.input_checksum,
     receiptChecksum: record.receipt_checksum,
+    ...(evidence === undefined ? {} : { evidence }),
   };
 }
 
@@ -298,6 +386,48 @@ function scoreReceipt(record: StoredEvaluationReceipt): EvaluationReceipt {
   };
 }
 
+function buildEvaluationPreflight(
+  bundle: BundleRecord,
+  cases: readonly EvaluationCase[],
+  profile: OptimizationModelProfile,
+  runtimeVersion: string,
+): EvaluationPreflight {
+  assertText(runtimeVersion, "runtime version");
+  assertText(profile.providerId, "평가 Provider 식별자");
+  const maximumCostMicrosPerCall = profile.maximumCostMicrosPerCall;
+  if (!Number.isSafeInteger(maximumCostMicrosPerCall) || (maximumCostMicrosPerCall ?? -1) < 0) {
+    throw new Error("평가 Route의 호출당 최대 비용이 유효하지 않습니다");
+  }
+  if (cases.length !== bundle.case_ids.length || cases.length < 1) {
+    throw new Error("평가 bundle case 계보가 유효하지 않습니다");
+  }
+  const maximumCostMicros = (maximumCostMicrosPerCall as number) * cases.length;
+  if (!Number.isSafeInteger(maximumCostMicros)) throw new Error("평가 예상 최대 비용이 유효하지 않습니다");
+  const disclosure = executionDisclosure({
+    expectedCallCount: cases.length,
+    maximumCostMicros,
+    providerId: profile.providerId,
+    dataKinds: ["evaluation-prompt"],
+  });
+  const configurationChecksum = digest({
+    bundleChecksum: bundle.checksum,
+    modelProfileId: profile.modelProfileId,
+    routeId: profile.routeId,
+    providerId: profile.providerId,
+    runtimeVersion,
+    maximumCostMicrosPerCall,
+  });
+  const value = {
+    bundleId: bundle.bundle_id,
+    bundleVersion: bundle.version,
+    modelProfileId: profile.modelProfileId,
+    runtimeVersion,
+    configurationChecksum,
+    ...disclosure,
+  };
+  return { ...value, checksum: digest(value) };
+}
+
 export interface CreateBundleInput {
   readonly commandId: string;
   readonly roleKey: OptimizationRoleKey;
@@ -336,7 +466,13 @@ export interface ExecuteEvaluationInput {
   readonly runtimeVersion: string;
   readonly mode?: "standard" | "shadow";
   readonly inputChecksum?: string;
+  readonly preflightChecksum?: string;
 }
+
+export type PreviewEvaluationInput = Pick<
+  ExecuteEvaluationInput,
+  "roleKey" | "bundleId" | "modelProfileId" | "runtimeVersion"
+>;
 
 export interface SelectTaskAxisModelsInput {
   readonly roleKey: OptimizationRoleKey;
@@ -381,6 +517,7 @@ export class ModelOptimizationStore {
       MODEL_OPTIMIZATION_HARDENING_MIGRATION,
       MODEL_OPTIMIZATION_RECEIPT_BUNDLE_LINEAGE_MIGRATION,
       MODEL_OPTIMIZATION_TASK_AXIS_SCORE_MIGRATION,
+      MODEL_OPTIMIZATION_EVIDENCE_AUTHORITY_MIGRATION,
     ]);
     return new ModelOptimizationStore(database, organizations, options);
   }
@@ -540,6 +677,7 @@ export class ModelOptimizationStore {
     context: TenantContext,
     input: CompleteEvaluationInput,
     axisScores: readonly AxisScoreInput[] = [],
+    evidence?: EvaluationReceiptEvidence,
   ): Promise<StoredEvaluationReceipt> {
     await this.organizations.verifyTenantContext(context);
     assertText(input.commandId, "명령 식별자");
@@ -556,7 +694,7 @@ export class ModelOptimizationStore {
     )
       throw new Error("평가 latency 또는 cost가 유효하지 않습니다");
     return await this.database.transaction(async (tx) => {
-      const requestHash = digest(input);
+      const requestHash = digest({ input, evidence });
       const repeated = await this.command<ReceiptRecord>(
         tx,
         context.organizationId,
@@ -584,9 +722,10 @@ export class ModelOptimizationStore {
         costMicros: input.costMicros,
         privacyAllowed: input.privacyAllowed,
         completed: input.completed,
+        evidence,
       });
       const [created] = await tx.query<[ReceiptRecord[]]>(
-        "CREATE optimization_receipt CONTENT { receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_id: $bundle_id, bundle_version: $bundle_version, sample_count: $sample_count, quality_score: $quality_score, latency_ms: $latency_ms, cost_micros: $cost_micros, privacy_allowed: $privacy_allowed, completed: $completed, input_checksum: $input_checksum, receipt_checksum: $receipt_checksum, command_id: $command_id, request_hash: $request_hash, created_at: time::now() } RETURN AFTER;",
+        "CREATE optimization_receipt CONTENT { receipt_id: $receipt_id, run_id: $run_id, organization_id: $organization_id, role_key: $role_key, model_profile_id: $model_profile_id, bundle_id: $bundle_id, bundle_version: $bundle_version, sample_count: $sample_count, quality_score: $quality_score, latency_ms: $latency_ms, cost_micros: $cost_micros, privacy_allowed: $privacy_allowed, completed: $completed, input_checksum: $input_checksum, receipt_checksum: $receipt_checksum, evidence_tier: $evidence_tier, evidence_expires_at: $evidence_expires_at, evidence_source_version: $evidence_source_version, evidence_source_checksum: $evidence_source_checksum, evidence_configuration_checksum: $evidence_configuration_checksum, evidence_license: $evidence_license, evidence_contamination_possible: $evidence_contamination_possible, evidence_disclosure_json: $evidence_disclosure_json, command_id: $command_id, request_hash: $request_hash, created_at: time::now() } RETURN AFTER;",
         {
           receipt_id: randomUUID(),
           run_id: run.run_id,
@@ -603,6 +742,16 @@ export class ModelOptimizationStore {
           completed: input.completed,
           input_checksum: run.input_checksum,
           receipt_checksum: receiptChecksum,
+          evidence_tier: evidence?.tier,
+          evidence_expires_at: evidence?.tier === "t0-bundled" ? new Date(evidence.expiresAt) : undefined,
+          evidence_source_version: evidence?.sourceVersion,
+          evidence_source_checksum: evidence?.tier === "t0-bundled" ? evidence.sourceChecksum : undefined,
+          evidence_configuration_checksum: evidence?.configurationChecksum,
+          evidence_license: evidence?.tier === "t0-bundled" ? evidence.license : undefined,
+          evidence_contamination_possible:
+            evidence?.tier === "t0-bundled" ? evidence.contaminationPossible : undefined,
+          evidence_disclosure_json:
+            evidence?.tier === "t1-local" ? canonicalJson(evidence.disclosure) : undefined,
           command_id: input.commandId,
           request_hash: requestHash,
         },
@@ -665,6 +814,36 @@ export class ModelOptimizationStore {
     return runs.length > 0;
   }
 
+  /** T1 로컬 bench가 실행 전에 공개하고 실행 시 다시 검증할 비용·전송 스냅샷입니다. */
+  public async previewEvaluation(
+    context: TenantContext,
+    input: PreviewEvaluationInput,
+  ): Promise<EvaluationPreflight> {
+    await this.organizations.verifyTenantContext(context);
+    assertRole(input.roleKey);
+    assertText(input.bundleId, "bundle 식별자");
+    assertText(input.modelProfileId, "model profile 식별자");
+    assertText(input.runtimeVersion, "runtime version");
+    if (!this.options.modelCatalog) throw new Error("정본 모델 catalog가 구성되지 않았습니다");
+    const [bundles, profiles] = await Promise.all([
+      this.database.query<[BundleRecord[]]>(
+        "SELECT * OMIT id FROM optimization_bundle WHERE organization_id = $organization_id AND bundle_id = $bundle_id LIMIT 1;",
+        { organization_id: context.organizationId, bundle_id: input.bundleId },
+      ),
+      this.options.modelCatalog(context),
+    ]);
+    const bundle = bundles[0][0];
+    if (!bundle || bundle.role_key !== input.roleKey) throw new Error("평가 bundle을 찾을 수 없거나 역할이 다릅니다");
+    const profile = profiles.find((candidate) => candidate.modelProfileId === input.modelProfileId);
+    if (!profile?.verified) throw new Error("검증된 연결 모델 profile이 아닙니다");
+    return buildEvaluationPreflight(
+      bundle,
+      await this.listBundleCases(context, bundle.bundle_id),
+      profile,
+      input.runtimeVersion,
+    );
+  }
+
   /** 고정된 평가 묶음의 모든 case를 실행하고 하나의 불변 receipt로 집계합니다. */
   public async executeEvaluation(
     context: TenantContext,
@@ -678,6 +857,7 @@ export class ModelOptimizationStore {
     assertText(input.bundleId, "bundle 식별자");
     assertText(input.modelProfileId, "model profile 식별자");
     assertText(input.runtimeVersion, "runtime version");
+    if (input.preflightChecksum !== undefined) assertChecksum(input.preflightChecksum, "평가 실행 전 고지");
     const mode = input.mode ?? "standard";
 
     const [bundles] = await this.database.query<[BundleRecord[]]>(
@@ -694,6 +874,13 @@ export class ModelOptimizationStore {
       const profiles = await this.options.modelCatalog(context);
       profile = profiles.find((candidate) => candidate.modelProfileId === input.modelProfileId);
       if (!profile || !profile.verified) throw new Error("검증된 연결 모델 profile이 아닙니다");
+    }
+    const preflight =
+      profile?.maximumCostMicrosPerCall === undefined
+        ? undefined
+        : buildEvaluationPreflight(bundle, cases, profile, input.runtimeVersion);
+    if (input.preflightChecksum !== undefined && preflight?.checksum !== input.preflightChecksum) {
+      throw new Error("평가 실행 전 고지가 현재 bundle·모델·Route와 일치하지 않습니다");
     }
 
     const inputChecksum =
@@ -764,6 +951,19 @@ export class ModelOptimizationStore {
         completed: results.every((result) => result.completed),
       },
       axisScores,
+      preflight
+        ? {
+            tier: "t1-local",
+            sourceVersion: input.runtimeVersion,
+            configurationChecksum: preflight.configurationChecksum,
+            disclosure: {
+              expectedCallCount: preflight.expectedCallCount,
+              maximumCostMicros: preflight.maximumCostMicros,
+              providerId: preflight.providerId,
+              dataKinds: preflight.dataKinds,
+            },
+          }
+        : undefined,
     );
   }
 

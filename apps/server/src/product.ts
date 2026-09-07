@@ -583,7 +583,10 @@ export async function createMassionDaemon(
               verified: true,
               supportsStructuredOutput: model.supports_structured_output,
               supportsTools: model.supports_tools,
+              supportsVision: model.supports_vision,
               supportsStreaming: model.supports_streaming,
+              contextWindow: model.context_window,
+              maximumCostMicrosPerCall: route.request_budget_micros,
               dataPolicy: route.data_policy,
             },
           ];

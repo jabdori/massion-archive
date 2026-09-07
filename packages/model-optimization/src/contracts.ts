@@ -3,6 +3,40 @@ import type { OptimizationRoleKey, EvaluationDataPolicy, EvaluationPolicy } from
 export type EvaluationTaskAxis =
   "code-generation" | "code-understanding" | "planning-design" | "review-critique" | "summary-records";
 export type EvaluationReasoningDifficulty = "low" | "medium" | "high";
+export type EvaluationEvidenceTier = "t0-bundled" | "t1-local";
+
+export interface EvaluationExecutionDisclosure {
+  readonly expectedCallCount: number;
+  readonly maximumCostMicros: number;
+  readonly providerId: string;
+  readonly dataKinds: readonly string[];
+}
+
+export interface EvaluationPreflight extends EvaluationExecutionDisclosure {
+  readonly bundleId: string;
+  readonly bundleVersion: number;
+  readonly modelProfileId: string;
+  readonly runtimeVersion: string;
+  readonly configurationChecksum: string;
+  readonly checksum: string;
+}
+
+export type EvaluationReceiptEvidence =
+  | {
+      readonly tier: "t0-bundled";
+      readonly expiresAt: string;
+      readonly sourceVersion: string;
+      readonly sourceChecksum: string;
+      readonly configurationChecksum: string;
+      readonly license: string;
+      readonly contaminationPossible: boolean;
+    }
+  | {
+      readonly tier: "t1-local";
+      readonly sourceVersion: string;
+      readonly configurationChecksum: string;
+      readonly disclosure: EvaluationExecutionDisclosure;
+    };
 
 export interface OptimizationModelProfile {
   readonly modelProfileId: string;
@@ -12,7 +46,10 @@ export interface OptimizationModelProfile {
   readonly verified: boolean;
   readonly supportsStructuredOutput: boolean;
   readonly supportsTools: boolean;
+  readonly supportsVision?: boolean;
   readonly supportsStreaming: boolean;
+  readonly contextWindow?: number;
+  readonly maximumCostMicrosPerCall?: number;
   readonly dataPolicy: EvaluationDataPolicy;
 }
 
@@ -70,6 +107,8 @@ export interface StoredEvaluationReceipt {
   readonly completed: boolean;
   readonly inputChecksum: string;
   readonly receiptChecksum: string;
+  /** 0129 이전 receipt는 권한을 추정하지 않고 이 필드가 없습니다. */
+  readonly evidence?: EvaluationReceiptEvidence;
 }
 
 export interface OptimizationPolicyVersion {

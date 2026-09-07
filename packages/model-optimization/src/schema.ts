@@ -269,3 +269,24 @@ WHEN $event IN ['UPDATE', 'DELETE']
 THEN { THROW 'Optimization receipt axis score는 immutable입니다'; };
 `,
 );
+
+/**
+ * 기존 receipt의 권한을 추정해 backfill하지 않습니다. 0129 이후 서버가 만든 T1 receipt와
+ * 신뢰된 동봉 자산에서 가져온 T0 receipt만 완전한 evidence 필드를 기록합니다.
+ */
+export const MODEL_OPTIMIZATION_EVIDENCE_AUTHORITY_MIGRATION = defineMigration(
+  "0129-model-optimization-evidence-authority",
+  `
+DEFINE FIELD evidence_tier ON optimization_receipt TYPE option<string>
+  ASSERT $value = NONE OR $value IN ['t0-bundled', 't1-local'];
+DEFINE FIELD evidence_expires_at ON optimization_receipt TYPE option<datetime>;
+DEFINE FIELD evidence_source_version ON optimization_receipt TYPE option<string>;
+DEFINE FIELD evidence_source_checksum ON optimization_receipt TYPE option<string>
+  ASSERT $value = NONE OR string::len($value) = 64;
+DEFINE FIELD evidence_configuration_checksum ON optimization_receipt TYPE option<string>
+  ASSERT $value = NONE OR string::len($value) = 64;
+DEFINE FIELD evidence_license ON optimization_receipt TYPE option<string>;
+DEFINE FIELD evidence_contamination_possible ON optimization_receipt TYPE option<bool>;
+DEFINE FIELD evidence_disclosure_json ON optimization_receipt TYPE option<string>;
+`,
+);

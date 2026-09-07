@@ -250,6 +250,99 @@ describe("Massion 모델 평가실", () => {
     ).toBe(true);
   });
 
+  it("T1 로컬 bench는 서버가 계산한 비용·Provider·데이터 고지를 확인한 뒤 같은 값을 receipt에 고정한다", async () => {
+    const execute = vi.fn<ModelEvaluationExecutor["execute"]>(async () => ({
+      qualityScore: 1,
+      latencyMs: 25,
+      costMicros: 3,
+      privacyAllowed: true,
+      completed: true,
+    }));
+    const profile: OptimizationModelProfile = {
+      modelProfileId: "profile-preflight",
+      modelId: "model-preflight",
+      routeId: "route-preflight",
+      providerId: "provider-preflight",
+      verified: true,
+      supportsStructuredOutput: true,
+      supportsTools: true,
+      supportsVision: false,
+      supportsStreaming: true,
+      contextWindow: 32_000,
+      maximumCostMicrosPerCall: 250,
+      dataPolicy: "external-allowed",
+    };
+    store = await ModelOptimizationStore.create(database, organizations, {
+      modelCatalog: async () => [profile],
+      executor: { execute },
+    });
+    const bundle = await store.createBundle(context, {
+      commandId: "bundle-preflight",
+      roleKey: "assurance",
+      runtimeVersion: "runtime-preflight",
+      cases: [
+        {
+          promptChecksum: checksum("a"),
+          toolsChecksum: checksum("b"),
+          environmentChecksum: checksum("c"),
+          expectedOutcome: "first",
+        },
+        {
+          promptChecksum: checksum("d"),
+          toolsChecksum: checksum("e"),
+          environmentChecksum: checksum("f"),
+          expectedOutcome: "second",
+        },
+      ],
+    });
+    const preflight = await store.previewEvaluation(context, {
+      roleKey: "assurance",
+      bundleId: bundle.bundleId,
+      modelProfileId: profile.modelProfileId,
+      runtimeVersion: "runtime-preflight",
+    });
+    expect(preflight).toMatchObject({
+      bundleId: bundle.bundleId,
+      modelProfileId: profile.modelProfileId,
+      expectedCallCount: 2,
+      maximumCostMicros: 500,
+      providerId: "provider-preflight",
+      dataKinds: ["evaluation-prompt"],
+    });
+    await expect(
+      store.executeEvaluation(context, {
+        commandId: "execute-preflight-stale",
+        roleKey: "assurance",
+        bundleId: bundle.bundleId,
+        modelProfileId: profile.modelProfileId,
+        runtimeVersion: "runtime-preflight",
+        preflightChecksum: checksum("0"),
+      }),
+    ).rejects.toThrow("실행 전 고지");
+    expect(execute).not.toHaveBeenCalled();
+
+    const receipt = await store.executeEvaluation(context, {
+      commandId: "execute-preflight",
+      roleKey: "assurance",
+      bundleId: bundle.bundleId,
+      modelProfileId: profile.modelProfileId,
+      runtimeVersion: "runtime-preflight",
+      preflightChecksum: preflight.checksum,
+    });
+    expect(receipt.evidence).toEqual({
+      tier: "t1-local",
+      sourceVersion: "runtime-preflight",
+      configurationChecksum: preflight.configurationChecksum,
+      disclosure: {
+        expectedCallCount: 2,
+        maximumCostMicros: 500,
+        providerId: "provider-preflight",
+        dataKinds: ["evaluation-prompt"],
+      },
+    });
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it("축 신호가 완전한 평가 실행은 불변 receipt와 축별 점수를 함께 기록한다", async () => {
     let profileBVerified = true;
     store = await ModelOptimizationStore.create(database, organizations, {

@@ -696,7 +696,29 @@ export interface GrowthSuggestionViewV1 {
   };
 }
 
+export interface OptimizationEvaluationPreflightViewV1 {
+  readonly bundleId: string;
+  readonly bundleVersion: number;
+  readonly modelProfileId: string;
+  readonly runtimeVersion: string;
+  readonly configurationChecksum: string;
+  readonly expectedCallCount: number;
+  readonly maximumCostMicros: number;
+  readonly providerId: string;
+  readonly dataKinds: readonly string[];
+  readonly checksum: string;
+}
+
 export interface ApplicationQueryMapV1 {
+  readonly "optimization.evaluation.preflight": {
+    readonly payload: {
+      readonly roleKey: string;
+      readonly bundleId: string;
+      readonly modelProfileId: string;
+      readonly runtimeVersion: string;
+    };
+    readonly data: readonly OptimizationEvaluationPreflightViewV1[];
+  };
   readonly "workspace.list": { readonly payload: Record<string, never>; readonly data: readonly WorkspaceViewV1[] };
   readonly "workspace.get": { readonly payload: { readonly workspaceId: string }; readonly data: WorkspaceViewV1 };
   readonly "work.index": {

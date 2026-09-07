@@ -17,6 +17,7 @@ export const MODEL_OPTIMIZATION_OPERATIONS = [
 
 export const MODEL_OPTIMIZATION_QUERIES = [
   "optimization.policy",
+  "optimization.evaluation.preflight",
   "optimization.receipts",
   "optimization.recommendations",
   "optimization.observations",

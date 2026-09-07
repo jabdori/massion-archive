@@ -2452,7 +2452,13 @@ function optimizationRequirements(value: unknown) {
   return {
     requiresTools: boolean(requirements.requiresTools, "requiresTools"),
     requiresStructuredOutput: boolean(requirements.requiresStructuredOutput, "requiresStructuredOutput"),
+    ...(requirements.requiresVision === undefined
+      ? {}
+      : { requiresVision: boolean(requirements.requiresVision, "requiresVision") }),
     requiresStreaming: boolean(requirements.requiresStreaming, "requiresStreaming"),
+    ...(requirements.maxContextTokens === undefined
+      ? {}
+      : { maxContextTokens: integer(requirements.maxContextTokens, "maxContextTokens", 1) }),
     dataPolicy:
       requirements.dataPolicy === "local-private"
         ? "local-private"
@@ -2609,8 +2615,8 @@ function registerOptimization(registry: ApplicationCommandRegistry, dependencies
     validate: (value) =>
       payload(
         value,
-        ["roleKey", "bundleId", "modelProfileId", "runtimeVersion", "mode", "inputChecksum"],
-        ["roleKey", "bundleId", "modelProfileId", "runtimeVersion"],
+        ["roleKey", "bundleId", "modelProfileId", "runtimeVersion", "mode", "inputChecksum", "preflightChecksum"],
+        ["roleKey", "bundleId", "modelProfileId", "runtimeVersion", "preflightChecksum"],
       ),
     async handle(context, command, value) {
       const receipt = await optimization.evaluations.executeEvaluation(context, {
@@ -2621,6 +2627,7 @@ function registerOptimization(registry: ApplicationCommandRegistry, dependencies
         runtimeVersion: string(value.runtimeVersion, "runtimeVersion"),
         ...(value.mode === undefined ? {} : { mode: value.mode as "standard" | "shadow" }),
         ...(value.inputChecksum === undefined ? {} : { inputChecksum: string(value.inputChecksum, "inputChecksum") }),
+        preflightChecksum: string(value.preflightChecksum, "preflightChecksum"),
       });
       return result(command, { resource: { type: "OptimizationReceipt", id: receipt.receiptId }, data: receipt });
     },

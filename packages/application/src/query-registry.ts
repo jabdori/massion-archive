@@ -161,7 +161,7 @@ export interface ApplicationQueryDependencies {
   readonly optimization?: {
     readonly evaluations: Pick<
       ModelOptimizationStore,
-      "getActivePolicy" | "listReceipts" | "listRecommendations" | "hasEvaluationRun"
+      "getActivePolicy" | "listReceipts" | "listRecommendations" | "hasEvaluationRun" | "previewEvaluation"
     >;
     readonly batches: Pick<OptimizationBatchService, "getActiveBatch" | "listObservations" | "hasBatch">;
   };
@@ -931,6 +931,18 @@ const OPTIMIZATION_POLICY_FIELDS = [
   "status",
   "checksum",
 ] as const;
+const OPTIMIZATION_PREFLIGHT_FIELDS = [
+  "bundleId",
+  "bundleVersion",
+  "modelProfileId",
+  "runtimeVersion",
+  "configurationChecksum",
+  "expectedCallCount",
+  "maximumCostMicros",
+  "providerId",
+  "dataKinds",
+  "checksum",
+] as const;
 const OPTIMIZATION_RECEIPT_FIELDS = [
   "receiptId",
   "runId",
@@ -947,6 +959,7 @@ const OPTIMIZATION_RECEIPT_FIELDS = [
   "completed",
   "inputChecksum",
   "receiptChecksum",
+  "evidence",
 ] as const;
 const OPTIMIZATION_RECOMMENDATION_FIELDS = [
   "recommendationId",
@@ -3298,6 +3311,27 @@ export function registerApplicationQueries(
         const policy = await dependencies.optimization?.evaluations.getActivePolicy(context);
         return policy === undefined ? [] : [projectOptimizationRecord(policy, OPTIMIZATION_POLICY_FIELDS)];
       },
+    });
+    registry.register({
+      operation: "optimization.evaluation.preflight",
+      requiredScopes: ["optimization:read"],
+      allowedRoles: EVERY_ROLE,
+      validate: (value) => object(value, ["roleKey", "bundleId", "modelProfileId", "runtimeVersion"]),
+      handle: async (context, value) => [
+        projectOptimizationRecord(
+          await dependencies.optimization!.evaluations.previewEvaluation(context, {
+            roleKey: (() => {
+              const roleKey = text(value.roleKey, "roleKey");
+              if (!isOptimizationRoleKey(roleKey)) throw new Error("지원하지 않는 최적화 roleKey입니다");
+              return roleKey;
+            })(),
+            bundleId: text(value.bundleId, "bundleId"),
+            modelProfileId: text(value.modelProfileId, "modelProfileId"),
+            runtimeVersion: text(value.runtimeVersion, "runtimeVersion"),
+          }),
+          OPTIMIZATION_PREFLIGHT_FIELDS,
+        ),
+      ],
     });
     registry.register({
       operation: "optimization.receipts",

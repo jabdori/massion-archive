@@ -18,7 +18,9 @@ function candidate(overrides: Partial<EvaluationCandidate> = {}): EvaluationCand
     verified: true,
     supportsStructuredOutput: true,
     supportsTools: true,
+    supportsVision: true,
     supportsStreaming: true,
+    contextWindow: 128_000,
     dataPolicy: "external-allowed",
     ...overrides,
   };
@@ -58,21 +60,31 @@ describe("모델 평가 추천", () => {
       candidates: [
         candidate({ modelProfileId: "unverified", verified: false }),
         candidate({ modelProfileId: "no-tools", supportsTools: false }),
-        candidate({ modelProfileId: "private-only", dataPolicy: "local-private" }),
-        candidate({ modelProfileId: "eligible" }),
+        candidate({ modelProfileId: "no-vision", supportsVision: false }),
+        candidate({ modelProfileId: "short-context", contextWindow: 8_192 }),
+        candidate({ modelProfileId: "privacy-denied" }),
+        candidate({ modelProfileId: "eligible", dataPolicy: "local-private" }),
       ],
       receipts: [receipt({ modelProfileId: "eligible" })],
       requirements: {
         requiresTools: true,
         requiresStructuredOutput: true,
+        requiresVision: true,
         requiresStreaming: true,
-        dataPolicy: "external-allowed",
+        maxContextTokens: 32_000,
+        dataPolicy: "local-private",
       },
     });
 
     expect(result.primary?.modelProfileId).toBe("eligible");
     expect(result.fallbacks).toEqual([]);
-    expect(result.excluded.map((item) => item.modelProfileId)).toEqual(["no-tools", "private-only", "unverified"]);
+    expect(result.excluded).toEqual([
+      { modelProfileId: "no-tools", reason: "missing-tools" },
+      { modelProfileId: "no-vision", reason: "missing-vision" },
+      { modelProfileId: "privacy-denied", reason: "privacy-not-allowed" },
+      { modelProfileId: "short-context", reason: "insufficient-context-window" },
+      { modelProfileId: "unverified", reason: "unverified" },
+    ]);
   });
 
   it.each<[EvaluationPolicy, string]>([

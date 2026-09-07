@@ -50,7 +50,8 @@ Massion은 모델을 고를 수 있는 채팅 앱도, 에이전트 여러 개를
 
 **확정된 기능 사실**
 
-- Work의 종료 상태는 `completed`, `awaiting-approval`, `blocked`, `failed`, `cancelled` 다섯입니다. 모델 경로 소진은 실패가 아니라 재시도 가능한 `blocked`로 보존됩니다.
+- (정정 2026-09-04) 이 항목은 원래 「Work의 종료 상태는 `completed`, `awaiting-approval`, `blocked`, `failed`, `cancelled` 다섯」이라고 적었습니다. **세 층의 상태가 섞여 있었습니다.** Work 자체의 상태는 `draft`·`planned`·`ready`·`running`·`waiting_approval`·`verifying`·`completed`·`failed`·`retrying`·`replanning`·`cancelled` 열하나이고 종료는 `completed`·`cancelled` 둘뿐입니다(`packages/work/src/schema.ts:299`). 위에 적혀 있던 다섯은 Work를 실행하는 **run**이 정착하는 상태입니다(`packages/application/src/run-store.ts:17-18`, 진행 중인 `ready`·`running` 제외). 명령 결과 어휘 `succeeded`·`accepted`·`awaiting-approval`·`blocked`는 또 다른 층입니다(`packages/application/src/contracts.ts:7`). 사용자가 화면에서 보는 것은 run 상태이므로 표면 문구는 그대로 두되, 도메인을 말할 때 Work와 run을 같은 이름으로 부르지 않습니다.
+- 모델 경로 소진은 실패가 아니라 재시도 가능한 `blocked` run으로 보존되며 `run.resume`으로 재개합니다.
 - Provider 자격 증명이 없어도 조직·업무·기록은 동작하며 모델 호출만 차단됩니다(제한 모드).
 - Provider 자격 증명은 개인 사용자가 자기 계정의 키를 자기 로컬 앱에 직접 등록합니다(BYOK). Massion은 자격 증명·계정·구독 할당량을 다른 사용자나 서버에 공유·대여·재판매·프록시하지 않습니다.
 - 일반 모드에서 승인이 필요한 실행은 사람의 결정 전까지 정지하며, 정책이 자동이면 사람을 기다리지 않습니다.
@@ -127,7 +128,8 @@ Massion은 모델을 고를 수 있는 채팅 앱도, 에이전트 여러 개를
 - Software Engineering 조직이 Git fixture에서 RED→GREEN 변경 후 독립 Assurance를 통과한 기록.
 - Evidence 패키지의 Tree-sitter 기반 파일·symbol·chunk·relation 인덱스, exact·BM25 검색, 선택적 embedding port, CodeGraphService와 EvidenceBrief 계약.
 - Growth 패키지의 versioned MemoryVersion·PromptVersion 합성 및 RuntimeExecution memory lineage 계약.
-- 품질 게이트 실측: ESLint 0, 4개 패키지 typecheck 통과, 테스트 518건 통과(commit `938709f` 기준).
+- 품질 게이트 실측은 [README 검증 범위 표](README.md)가 소유합니다(2026-08-09 기준 11개 스위트). (정정 2026-09-04) 이 자리에 있던 「테스트 518건 통과(commit `938709f` 기준)」는 2026-07-21 Web Console 커밋 시점의 수치였고, 그 표면은 2026-08-02 `7a68eef6e`에서 제거됐습니다. 사라진 패키지를 포함한 수치를 현재 근거로 쓰지 않습니다.
+- 생산 Workspace 지식 경로: 서버가 `WorkspaceKnowledgeService`·`EvidencePromptMaterializer`·`EvidenceContextBinder`를 조립하고(`apps/server/src/product.ts:865-881`) Representative·Strategy·Delivery가 모두 소비하며 데스크톱이 동결된 관계를 재대조합니다. 실측 [2026-07-27 UAT](docs/evidence/phase-30/desktop-live-workspace-file-knowledge-uat-2026-07-27.md).
 
 **없는 것 — 앞으로 지어내면 안 되는 것**
 
@@ -136,7 +138,7 @@ Massion은 모델을 고를 수 있는 채팅 앱도, 에이전트 여러 개를
 - Claude 소비자 구독 실계정 UAT.
 - 접근성 실측. 코드 구현은 있으나 스크린리더 실사용 확인은 하지 않았습니다.
 - 데스크톱 자체의 전체 사용자 UAT. `e3b5fe883`에서 Tauri → bridge → daemon → 실제 Provider, workspace 파일 문맥, Knowledge, 재시작 보존의 증분 검증은 통과했지만 native picker·업데이트·제거·접근성 실측은 남아 있습니다. [최신 증거](docs/evidence/phase-30/desktop-live-tauri-uat-2026-07-26-e3b5fe883.md)
-- Workspace 자동 색인·검색·CodeGraph 결과가 실제 Work의 Representative·Strategy·Delivery 입력과 데스크톱 citation으로 이어지는 생산 경로.
+- Workspace 지식의 **화면 기반 K01~K04 전체 UAT**. (정정 2026-09-04) 이 항목은 원래 「색인·검색·CodeGraph 결과가 Representative·Strategy·Delivery 입력과 데스크톱 citation으로 이어지는 생산 경로」 자체를 없는 것으로 적었습니다. **그 경로는 있습니다** — 위 「실재하는 것」과 [헌법 §9.6](docs/product/constitution.md)의 2026-08-09 정정이 소유합니다. 남은 것은 화면을 걸어간 전체 시나리오 증거입니다.
 - 개인 MemoryVersion의 실제 자동 Work 주입·재시작·사용 중지 전체 UAT. API·코드 경로 증거는 있으나 전체 화면 시나리오는 남아 있습니다.
 - LSP client/server 구현. 현재 저장소에는 LSP 구현이나 의존성이 없으며 완료 기능으로 주장하지 않습니다.
 - 서명·공증된 앱의 깨끗한 Mac 설치·수동 업데이트·제거, 앱 교체·재시작 뒤 데이터 지속성, daemon 비정상 종료 복구, 키보드·VoiceOver 실측.

@@ -9,7 +9,7 @@
 
 - [x] `route_attempt`에 `execution_id`를 추가하고 `runtime_execution.execution_id`와 `model_profile_id`를 같은 시도 정본으로 연결합니다.
 - [x] `assurance_check.executor_execution_id`에서 route attempt와 선택된 모델까지 조회하는 계보를 고정합니다. system adapter check는 실행 모델 계보가 없으므로 빈 선택 목록으로 명시합니다.
-- [ ] 성공·fallback·실패·재시작 경로에서 하나의 Work 실행이 올바른 route attempt와 모델을 가리키는 회귀 검증을 추가합니다.
+- [x] 성공·fallback·실패·재시작 경로에서 하나의 Work 실행이 올바른 route attempt와 모델을 가리키는 회귀 검증을 추가합니다.
 
 ## Task 2. 전략 신호와 baseline 회귀
 
@@ -28,7 +28,7 @@
 ## Task 4. 실행 시점 배치와 사건
 
 - [x] 역할별 활성 batch를 후보 집합으로 Router에 전달하고 작업 신호에 따른 모델 선택과 역할 baseline fallback을 연결합니다.
-- [ ] 선택 결과에 `model.route.selected`를 발행하고 Work·execution·route attempt·model profile의 redacted lineage를 보존합니다.
+- [x] 선택 결과에 `model.route.selected`를 발행하고 Work·execution·route attempt·model profile의 redacted lineage를 보존합니다.
 - [ ] 요청별 모델 선택 UI를 추가하지 않고, 기준 모델 신고·배치 후보·선택 근거만 공통 Application surface로 노출합니다.
 
 ## Task 5. 비용 고지·표면·검증

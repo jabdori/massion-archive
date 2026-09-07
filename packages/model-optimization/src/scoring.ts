@@ -34,7 +34,9 @@ export interface EvaluationCandidate {
   readonly verified: boolean;
   readonly supportsStructuredOutput: boolean;
   readonly supportsTools: boolean;
+  readonly supportsVision?: boolean;
   readonly supportsStreaming: boolean;
+  readonly contextWindow?: number;
   readonly dataPolicy: EvaluationDataPolicy;
 }
 
@@ -57,7 +59,9 @@ export interface EvaluationReceipt {
 export interface EvaluationRequirements {
   readonly requiresTools: boolean;
   readonly requiresStructuredOutput: boolean;
+  readonly requiresVision?: boolean;
   readonly requiresStreaming: boolean;
+  readonly maxContextTokens?: number;
   readonly dataPolicy: EvaluationDataPolicy;
 }
 
@@ -67,7 +71,9 @@ export interface RecommendationExclusion {
     | "unverified"
     | "missing-tools"
     | "missing-structured-output"
+    | "missing-vision"
     | "missing-streaming"
+    | "insufficient-context-window"
     | "privacy-not-allowed"
     | "incomplete-receipt"
     | "insufficient-samples";
@@ -244,6 +250,12 @@ export function recommendModels(input: RecommendModelsInput): ModelRecommendatio
   if (!Number.isSafeInteger(minimumSampleCount) || minimumSampleCount < 1) {
     throw new Error("모델 평가 최소 표본 수가 유효하지 않습니다");
   }
+  if (
+    input.requirements.maxContextTokens !== undefined &&
+    (!Number.isSafeInteger(input.requirements.maxContextTokens) || input.requirements.maxContextTokens < 1)
+  ) {
+    throw new Error("모델 평가 최대 context token 요구량이 유효하지 않습니다");
+  }
   const excluded: RecommendationExclusion[] = [];
   const comparable: Array<{ candidate: EvaluationCandidate; receipts: readonly EvaluationReceipt[] }> = [];
   const eligible: Array<{ candidate: EvaluationCandidate; receipt: EvaluationReceipt }> = [];
@@ -254,8 +266,14 @@ export function recommendModels(input: RecommendModelsInput): ModelRecommendatio
     else if (input.requirements.requiresTools && !candidate.supportsTools) returnFail(fail, "missing-tools");
     else if (input.requirements.requiresStructuredOutput && !candidate.supportsStructuredOutput)
       returnFail(fail, "missing-structured-output");
+    else if (input.requirements.requiresVision && !candidate.supportsVision) returnFail(fail, "missing-vision");
     else if (input.requirements.requiresStreaming && !candidate.supportsStreaming)
       returnFail(fail, "missing-streaming");
+    else if (
+      input.requirements.maxContextTokens !== undefined &&
+      (candidate.contextWindow ?? 0) < input.requirements.maxContextTokens
+    )
+      returnFail(fail, "insufficient-context-window");
     else if (input.requirements.dataPolicy === "local-private" && candidate.dataPolicy !== "local-private")
       returnFail(fail, "privacy-not-allowed");
     else {
