@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **Historical implementation archive.** This repository preserves the previous Massion implementation and its Git history. The clean rebuild is in the design stage at [jabdori/massion](https://github.com/jabdori/massion).
+>
+> Use the new repository for current product work. The material below describes the historical implementation.
+
+---
+
 # Massion AgentOS
 
 [English](README.md) | [한국어](README.ko.md)
